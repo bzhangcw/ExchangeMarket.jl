@@ -20,17 +20,23 @@ Base.@kwdef mutable struct HessianBar{T}
     φ::T
     # gradient
     ∇::Vector{T}
+    gₙ::T # norm of gradient
+    dₙ::T # size of Newton step
     # Hessian
     H::SparseMatrixCSC{T,Int}
 
     # -------------------------------------------------------------------
-    # timers and tolerances
+    # timers, tolerances, counters
+    # -------------------------------------------------------------------
     ts::Float64
     te::Float64
     tₗ::Float64
     t::Float64
-    # termination tolerance
+    # iteration counters
     k::Int = 0
+    # avg iterations per subproblem
+    kᵢ::Float64 = 0.0
+    # termination tolerance
     maxiter::Int
     maxtime::Float64
     tol::Float64
@@ -55,6 +61,7 @@ Base.@kwdef mutable struct HessianBar{T}
         this.maxtime = maxtime
         this.tol = tol
         this.k = 0
+        this.kᵢ = 0.0
         return this
     end
 end
@@ -99,59 +106,41 @@ function hess!(alg::HessianBar, fisher::FisherMarket; bool_dbg=false)
     alg.H = -mapreduce(Di, +, 1:fisher.m, init=spzeros(fisher.n, fisher.n))
 end
 
-# -----------------------------------------------------------------------
-# main iterates
-# -----------------------------------------------------------------------
-function iterate!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing)
-    alg.pb .= alg.p
-    # update all sub-problems of all agents i ∈ I
-    for i in 1:fisher.m
-        info = solve_substep!(
-            alg, fisher, i;
-            optimizer=optimizer,
-            ϵᵢ=1e-4
-        )
-        if info.ϵ > alg.tol
-            @warn "subproblem $i is not converged: ϵ: $(info.ϵ)"
-        end
-    end
-    # -------------------------------------------------------------------
-    # compute dual function value, gradient and Hessian
-    # !evaluate gradient first;
-    grad!(alg, fisher)
+function eval!(alg::HessianBar, fisher::FisherMarket)
     alg.φ = (
         logbar(fisher.val_u, fisher.w) +
         alg.μ * logbar(fisher.x) +
         alg.μ * logbar(alg.p) +
         alg.p' * alg.∇ - alg.μ * fisher.n
     )
-    hess!(alg, fisher)
-    # -------------------------------------------------------------------
-
-    # compute Newton step
-    dp = alg.H \ alg.∇
-    gₙ = norm(alg.∇)
-    dₙ = norm(dp)
-    # update price
-    αₘ = minimum(proj.(-alg.pb ./ dp))
-    α = αₘ * 0.99
-    alg.p .= alg.pb .+ α * dp
-
-    @assert all(alg.p .> 0)
-    alg.te = time()
-    alg.t = alg.te - alg.ts
-    alg.tₗ = alg.te - alg.ts # todo
-    _logline = produce_log(
-        __default_logger,
-        [alg.k log10(alg.μ) alg.φ gₙ dₙ alg.t alg.tₗ α]
-    )
-    println(_logline)
-    alg.k += 1
-    ϵ = [gₙ dₙ]
-    return ϵ
 end
 
-function produce_functions_from_subproblem(alg::HessianBar, fisher::FisherMarket, i::Int)
+
+# -----------------------------------------------------------------------
+# subproblems
+# -----------------------------------------------------------------------
+function play!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing, ϵᵢ=1e-7, verbose=false)
+    _k = 0
+    for i in 1:fisher.m
+        info = solve_substep!(
+            alg, fisher, i;
+            optimizer=optimizer,
+            ϵᵢ=ϵᵢ
+        )
+        _k += info.k
+        if info.ϵ > ϵᵢ
+            @warn "subproblem $i is not converged: ϵ: $(info.ϵ)"
+        end
+    end
+    alg.kᵢ = _k / fisher.n
+    verbose && validate(fisher; μ=alg.μ)
+end
+
+
+
+function produce_functions_from_subproblem(
+    alg::HessianBar, fisher::FisherMarket, i::Int
+)
     _p = alg.p
     _u(x) = fisher.u(x, i)
     _∇u(x) = fisher.∇u(x, i)
@@ -163,7 +152,7 @@ function produce_functions_from_subproblem(alg::HessianBar, fisher::FisherMarket
         r = fisher.w[i] / u^2
         return r * c * c' + alg.μ * spdiagm(1 ./ (x .^ 2))
     end
-    return _f, _g, _H
+    return _f, _g, _H, _u, _∇u
 end
 
 function solve_substep!(
@@ -174,6 +163,7 @@ function solve_substep!(
     _f, _g, _H = produce_functions_from_subproblem(alg, fisher, i)
     # warm-start
     _x₀ = fisher.x[i, :]
+    _f, _g, _H, _u, _∇u = produce_functions_from_subproblem(alg, fisher, i)
     info = optimizer(_f, _g; H=_H, x₀=_x₀, tol=ϵᵢ)
     fisher.x[i, :] .= info.x
     fisher.val_u[i] = _u(info.x)
@@ -181,6 +171,47 @@ function solve_substep!(
     return info
 end
 
+# -----------------------------------------------------------------------
+# main iterates
+# -----------------------------------------------------------------------
+function iterate!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing)
+    alg.pb .= alg.p
+    # update all sub-problems of all agents i ∈ I
+    play!(alg, fisher; optimizer=optimizer, ϵᵢ=1e-4, verbose=false)
+    # -------------------------------------------------------------------
+    # compute dual function value, gradient and Hessian
+    # !evaluate gradient first;
+    grad!(alg, fisher)
+    eval!(alg, fisher)
+    hess!(alg, fisher)
+    # -------------------------------------------------------------------
+
+    # compute Newton step
+    dp = -alg.H \ alg.∇
+    alg.gₙ = gₙ = norm(alg.∇)
+    alg.dₙ = dₙ = norm(dp)
+    # update price
+    αₘ = min(proj.(-alg.pb ./ dp)..., 1.0)
+    α = αₘ * 0.995
+    alg.p .= alg.pb .+ α * dp
+
+    @assert all(alg.p .> 0)
+    alg.te = time()
+    alg.t = alg.te - alg.ts
+    alg.tₗ = alg.te - alg.ts # todo
+    _logline = produce_log(
+        __default_logger,
+        [alg.k log10(alg.μ) alg.φ gₙ dₙ alg.t alg.tₗ α alg.kᵢ]
+    )
+    println(_logline)
+    alg.k += 1
+    ϵ = [gₙ dₙ]
+
+    # update barrier parameter
+    alg.μ *= 0.92
+
+    return ϵ
+end
 
 function opt!(
     p₀::Vector{T}, alg::HessianBar, fisher::FisherMarket;
@@ -193,6 +224,7 @@ function opt!(
     bool_default && @warn "No optimizer specified! Will use default one: $(optimizer)"
     _k = 0
     for _ in 1:maxiter
+        mod(_k, 20) == 0 && println(__default_logger._loghead)
         ϵ = iterate!(alg, fisher; optimizer=optimizer)
         if (max(ϵ...) < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
             break

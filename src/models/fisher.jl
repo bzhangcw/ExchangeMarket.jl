@@ -42,6 +42,7 @@ Base.@kwdef mutable struct FisherMarket{T}
     # dataframe for logging and display
     df::Union{DataFrame,Nothing} = nothing
 
+    # -----------------------------------------------------------------------
     FisherMarket(m, n; seed=1) = (
         Random.seed!(seed);
         this = new{Float64}();
@@ -81,7 +82,7 @@ function create_jump_model(fisher::FisherMarket)
         @constraint(model, ℓ[i] == u(x[i, :], i))
         log_to_expcone!(ℓ[i], v[i], model)
     end
-    @objective(model, Max, sum([w[i] * v[i] for i in 1:m]))
+    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]))
     return
 end
 
@@ -95,7 +96,7 @@ function solve_jump_model(fisher::FisherMarket)
 end
 
 
-function validate(fisher::FisherMarket)
+function validate(fisher::FisherMarket; μ=0.0)
     m = fisher.m
     n = fisher.n
     u = fisher.u
@@ -105,14 +106,16 @@ function validate(fisher::FisherMarket)
 
     fisher.df = df = DataFrame(
         :utility => fisher.val_u,
-        :left_budget => x * p - w,
+        :left_budget => w - x * p,
+        :left_budget_μ => w - x * p .+ μ * n,
     )
     println(__default_sep)
     @printf("agent information\n")
     println(__default_sep)
     @show first(df, 10)
     println(__default_sep)
-    @printf("goods: %.4e\n", maximum(abs.(value.(fisher.model[:limit]) - fisher.q)))
+    _excess = sum(fisher.x; dims=1)[:] - fisher.q
+    @printf("goods: [%.4e, %.4e]\n", maximum(_excess), minimum(_excess))
     println(__default_sep)
 end
 

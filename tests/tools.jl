@@ -8,8 +8,8 @@ __optim_ipnewton = IPNewton(;
     show_linesearch=false
 )
 
-options = Optim.Options(
-    g_tol=1e-8,
+__get_options(tol=1e-8) = Optim.Options(
+    g_abstol=tol,
     iterations=1_000,
     store_trace=false,
     show_trace=false,
@@ -54,7 +54,7 @@ function optim_newton(f, g;
     dfc = TwiceDifferentiableConstraints(lx, ux)
     obj = TwiceDifferentiable(f, _g!, _H!, x)
     res = optimize(
-        obj, dfc, x₀, __optim_ipnewton, options
+        obj, dfc, x₀, __optim_ipnewton, __get_options(tol)
     )
     return ResponseInfo(
         res.minimizer,

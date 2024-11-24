@@ -128,15 +128,13 @@ function play!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing, ϵᵢ=1
             ϵᵢ=ϵᵢ
         )
         _k += info.k
-        if info.ϵ > ϵᵢ
+        if info.ϵ > ϵᵢ * 1e2
             @warn "subproblem $i is not converged: ϵ: $(info.ϵ)"
         end
     end
     alg.kᵢ = _k / fisher.n
     verbose && validate(fisher; μ=alg.μ)
 end
-
-
 
 function produce_functions_from_subproblem(
     alg::HessianBar, fisher::FisherMarket, i::Int
@@ -177,7 +175,8 @@ end
 function iterate!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing)
     alg.pb .= alg.p
     # update all sub-problems of all agents i ∈ I
-    play!(alg, fisher; optimizer=optimizer, ϵᵢ=1e-4, verbose=false)
+    play!(alg, fisher; optimizer=optimizer, ϵᵢ=0.1 * alg.μ, verbose=false)
+
     # -------------------------------------------------------------------
     # compute dual function value, gradient and Hessian
     # !evaluate gradient first;
@@ -201,14 +200,17 @@ function iterate!(alg::HessianBar, fisher::FisherMarket; optimizer=nothing)
     alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ gₙ dₙ alg.t alg.tₗ α alg.kᵢ]
+        [alg.k log10(alg.μ) alg.φ (gₙ / fisher.m) dₙ alg.t alg.tₗ α alg.kᵢ]
     )
     println(_logline)
     alg.k += 1
     ϵ = [gₙ dₙ]
 
     # update barrier parameter
-    alg.μ *= 0.92
+    # if gₙ < alg.μ * 2e1
+    # alg.μ *= 0.92
+    # end
+    alg.μ *= 0.9
 
     return ϵ
 end

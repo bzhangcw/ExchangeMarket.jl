@@ -95,13 +95,17 @@ function solve_jump_model(fisher::FisherMarket)
     return
 end
 
+function validate(fisher::FisherMarket)
+    validate(fisher, nothing)
+end
 
-function validate(fisher::FisherMarket; μ=0.0)
+function validate(fisher::FisherMarket, alg)
     m = fisher.m
     n = fisher.n
     u = fisher.u
     x = fisher.x
-    p = fisher.p
+    p = isnothing(alg) ? fisher.p : alg.p
+    μ = isnothing(alg) ? 0.0 : alg.μ
     w = fisher.w
 
     fisher.df = df = DataFrame(

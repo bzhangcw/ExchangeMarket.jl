@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------
 # utilities functions
-# @author:Chuwen Zhang <chuwzhang@gmail.com>
+# @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
 using Printf, LaTeXStrings
@@ -67,7 +67,7 @@ mutable struct ExchangeLoggerUtil
     ExchangeLoggerUtil() = (
         this = new();
         this._logheadvals = ["k" "lg(μ)" "φ" "|∇φ|" "|Δp|" "t" "tₗ" "α" "kᵢ"];
-        this._logformats = ["%7d |" " %+5.2f |" " %+10.4e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |"] .|> Printf.Format;
+        this._logformats = ["%7d |" " %+5.2f |" " %+10.4e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
         this._dummy = [1 1e-3 1e-3 1e-3 1e2 1e4 1e4 1e4 1e4];
         this._dummyslots = map((y, ff) -> Printf.format(ff, y), this._dummy, this._logformats) .|> length;
         this._loghead = mapreduce((y, l) -> Printf.format(Printf.Format("%$(l-2)s |"), y), *, this._logheadvals, this._dummyslots)[1:end-1];

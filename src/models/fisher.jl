@@ -10,11 +10,7 @@ using JuMP, COPT, MosekTools, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
-# translate log utility to exponential cone
-# v <= log(x) => [v, 1, x] in MOI.ExponentialCone()
-log_to_expcone!(x, v, model) = @constraint(
-    model, [v, 1, x] in MOI.ExponentialCone()
-)
+
 
 Base.@kwdef mutable struct FisherMarket{T}
     model::Model
@@ -56,12 +52,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.val_∇u = c;
         this.q = m * rand(n); # in O(m)
         this.w = rand(m);
-        this.model = Model(
-            optimizer_with_attributes(
-                () -> MosekTools.Optimizer(),
-                # "LogToConsole" => true
-            )
-        );
+        this.model = __generate_empty_jump_model(; verbose=true);
         this.df = DataFrame();
         return this
     )
@@ -86,9 +77,9 @@ function create_jump_model(fisher::FisherMarket)
     return
 end
 
-function solve_jump_model(fisher::FisherMarket)
+function optimize_jump!(fisher::FisherMarket)
     model = fisher.model
-    optimize!(model)
+    JuMP.optimize!(model)
     fisher.x = value.(model[:x])
     fisher.p = -dual.(model[:limit])
     fisher.val_u = value.(model[:ℓ])
@@ -114,15 +105,31 @@ function validate(fisher::FisherMarket, alg)
         :left_budget_μ => w - x * p .+ μ * n,
     )
     println(__default_sep)
-    @printf("agent information\n")
+    @printf("\t\tequilibrium information\n")
     println(__default_sep)
     @show first(df, 10)
     println(__default_sep)
     _excess = sum(fisher.x; dims=1)[:] - fisher.q
-    @printf("goods: [%.4e, %.4e]\n", maximum(_excess), minimum(_excess))
+    @printf(" :market excess: [%.4e, %.4e]\n", maximum(_excess), minimum(_excess))
     println(__default_sep)
 end
 
+@doc raw"""
+    play!(fisher::FisherMarket, i::Int; ϵᵢ=1e-7, mode=:original)
+    run the best-response-type mapping for agent i
+    mode:
+    - :original: use the original utility function
+    - :hessian: use the Hessian-Barzilai-Borwein method
+"""
+function play!(fisher::FisherMarket, i::Int; ϵᵢ=1e-7, mode=:original)
+    if mode == :original
+        fisher.x[i, :] = optimize!(NewtonResponse, fisher.u, fisher.∇u)
+    else
+        fisher.x[i, :] = optimize!(HessianBar, fisher.u, fisher.∇u)
+    end
+    fisher.x[i, :] = optimize!(NewtonResponse, fisher.u, fisher.∇u)
+    return
+end
 
 Base.copy(z::FisherMarket{T}) where {T} = begin
     this = FisherMarket(z.m, z.n)

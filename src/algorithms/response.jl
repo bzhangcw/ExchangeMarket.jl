@@ -1,11 +1,11 @@
 # -----------------------------------------------------------------------
-# run subproblems as best-response-type mappings
-# @author:Chuwen Zhang <chuwzhang@gmail.com>
+# run subproblems as best-response-type mappings 
+#   using original utility function
+# also define the ResponseInfo and ResponseOptimizer structs
+# @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
 
-
-# using Optim
 mutable struct ResponseInfo
     x::Vector{Float64}
     f_val::Float64
@@ -14,31 +14,28 @@ mutable struct ResponseInfo
     k::Int
 end
 
-# solve the problem of the following form:
-# min f(x) with gradient g(x)
-#   x >= 0
-function default_newton_response(f, g;
-    H=nothing, x₀=nothing, n=10, maxiter=1000, tol=1e-4,
+Base.@kwdef mutable struct ResponseOptimizer
+    optfunc::Union{Function,Nothing}
+    style::Symbol
+    name::String = ""
+end
+
+# call to the optimizer of response mappings
+solve!(optimizer::ResponseOptimizer; kwargs...) = optimizer.optfunc(; kwargs...)
+
+# --------------------------------------------------------------------------
+# solve the original utility maximization problem by JuMP + optimizer
+#   only support linear utility function for now.
+# --------------------------------------------------------------------------
+@doc raw"""
+    solve the problem of the following form:
+    min f(x) with gradient g(x)
+    s.t. x >= 0
+"""
+function __original_utility_response(u, ∇u;
+    x₀=nothing, n=10, maxiter=1000, tol=1e-4,
     verbose=false
 )
-    x = isnothing(x₀) ? rand(n) : copy(x₀)
-    H = isnothing(H) ? ForwardDiff.hessian(f, x) : H
-    f_val = f(x)
-    g_val = g(x)
-    gₙ = 1e5
-    for k in 1:maxiter
-        gₙ = norm(g_val)
-        if gₙ <= tol
-            break
-        end
-        H_val = H(x)
-        dp = -H_val \ g_val
-        αₘ = minimum(proj.(-g_val ./ dp))
-        α = αₘ * 0.99
-        x .= x .+ α * dp
-        verbose && println("$(k): f_val: $(f_val), |g|: $(gₙ), α: $(α)")
-        f_val = f(x)
-        g_val = g(x)
-    end
-    return ResponseInfo(x, f_val, g_val, gₙ, 1)
 end
+
+BR = OriginalBestResponse = ResponseOptimizer(__original_utility_response, :structured, "BestResponse")

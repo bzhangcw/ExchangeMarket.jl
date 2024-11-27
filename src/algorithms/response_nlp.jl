@@ -110,7 +110,8 @@ function __optim_newton(;
         res.minimum,
         g(res.minimizer),
         res.g_residual,
-        res.iterations
+        res.iterations,
+        nothing
     )
 end
 

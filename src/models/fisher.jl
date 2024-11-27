@@ -10,6 +10,21 @@ using JuMP, COPT, MosekTools, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
+function toy_fisher()
+    m = 2
+    n = 3
+    fisher = FisherMarket(m, n)
+    c = [
+        0.7337 6.9883 9.1493
+        3.4924 6.2826 1.9281
+    ]
+    fisher.uₛ = (x, i) -> c[i, :]' * x
+    # initialize as linear utility
+    fisher.u = fisher.uₛ
+    fisher.∇u = (x, i) -> c[i, :]
+    fisher.w = [0.1677; 0.5711]
+    return fisher
+end
 
 
 Base.@kwdef mutable struct FisherMarket{T}
@@ -44,14 +59,17 @@ Base.@kwdef mutable struct FisherMarket{T}
         this = new{Float64}();
         this.m = m;
         this.n = n;
-        c = rand(m, n);
+        c = 10 * rand(m, n);
         this.uₛ = (x, i) -> c[i, :]' * x;
         # initialize as linear utility
         this.u = this.uₛ;
         this.∇u = (x, i) -> c[i, :];
+        this.val_u = zeros(m);
         this.val_∇u = c;
         this.q = m * rand(n); # in O(m)
         this.w = rand(m);
+        this.p = zeros(n);
+        this.x = zeros(m, n);
         this.model = __generate_empty_jump_model(; verbose=true);
         this.df = DataFrame();
         return this
@@ -74,10 +92,10 @@ function create_jump_model(fisher::FisherMarket)
         log_to_expcone!(ℓ[i], v[i], model)
     end
     @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]))
-    return
+    __optimize_jump!(fisher)
 end
 
-function optimize_jump!(fisher::FisherMarket)
+function __optimize_jump!(fisher::FisherMarket)
     model = fisher.model
     JuMP.optimize!(model)
     fisher.x = value.(model[:x])
@@ -85,6 +103,24 @@ function optimize_jump!(fisher::FisherMarket)
     fisher.val_u = value.(model[:ℓ])
     return
 end
+
+function create_dual_jump_model(fisher::FisherMarket)
+    model = fisher.model
+    @variable(model, s[1:fisher.m, 1:fisher.n] .>= 0)
+    @variable(model, p[1:fisher.n])
+    @variable(model, v[1:fisher.m])
+    @variable(model, logv[1:fisher.m])
+    log_to_expcone!.(v, logv, model)
+    @objective(model, Min, p' * fisher.q - sum([fisher.w[i] * logv[i] for i in 1:fisher.m]))
+
+    @constraint(model, xc[i=1:fisher.m], s[i, :] + v[i] * fisher.val_∇u[i, :] - p .== 0)
+    JuMP.optimize!(model)
+    fisher.x = hcat([abs.(dual.(xc[i])) for i in 1:fisher.m]...)'
+    fisher.p = value.(p)
+    fisher.val_u = map(i -> fisher.u(fisher.x[i, :], i), 1:fisher.m)
+    return
+end
+
 
 function validate(fisher::FisherMarket)
     validate(fisher, nothing)
@@ -114,22 +150,6 @@ function validate(fisher::FisherMarket, alg)
     println(__default_sep)
 end
 
-@doc raw"""
-    play!(fisher::FisherMarket, i::Int; ϵᵢ=1e-7, mode=:original)
-    run the best-response-type mapping for agent i
-    mode:
-    - :original: use the original utility function
-    - :hessian: use the Hessian-Barzilai-Borwein method
-"""
-function play!(fisher::FisherMarket, i::Int; ϵᵢ=1e-7, mode=:original)
-    if mode == :original
-        fisher.x[i, :] = optimize!(NewtonResponse, fisher.u, fisher.∇u)
-    else
-        fisher.x[i, :] = optimize!(HessianBar, fisher.u, fisher.∇u)
-    end
-    fisher.x[i, :] = optimize!(NewtonResponse, fisher.u, fisher.∇u)
-    return
-end
 
 Base.copy(z::FisherMarket{T}) where {T} = begin
     this = FisherMarket(z.m, z.n)

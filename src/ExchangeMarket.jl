@@ -27,7 +27,7 @@ include("algorithms/response_nlp.jl")
 include("algorithms/hessianbar.jl")
 
 
-export FisherMarket, create_jump_model, optimize_jump!, validate
+export FisherMarket, create_jump_model, create_dual_jump_model, validate
 export logbar, log_to_expcone!
 export HessianBar, solve!
 export eval!, grad!, hess!, iterate!, play!

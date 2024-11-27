@@ -11,7 +11,9 @@ Base.@kwdef mutable struct HessianBar{T}
     m::Int
     # price
     p::Vector{T}  # current price at k
+    λ::Vector{T}  # current dual variable of p at k (if needed)
     pb::Vector{T} # backward price at k-1
+    pλ::Vector{T} # backward dual variable of p at k-1
     # market excess demand
     z::Vector{T}
     # barrier parameter
@@ -30,7 +32,7 @@ Base.@kwdef mutable struct HessianBar{T}
     # Hessian
     H::SparseMatrixCSC{T,Int}
     # steps
-    step::Symbol = :affinescaling
+    step::Symbol = :affine_scaling
 
     # -------------------------------------------------------------------
     # timers, tolerances, counters
@@ -54,7 +56,9 @@ Base.@kwdef mutable struct HessianBar{T}
 
 
     function HessianBar(
-        n::Int, m::Int, p::Vector{T}, μ::T;
+        n::Int, m::Int,
+        p::Vector{T},
+        μ::T;
         maxiter::Int=1000,
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
@@ -70,6 +74,8 @@ Base.@kwdef mutable struct HessianBar{T}
         this.z = z
         this.μ = μ
         this.∇ = zeros(n)
+        this.λ = μ * ones(n)
+        this.pλ = μ * ones(n)
         this.H = spzeros(n, n)
         this.ts = time()
         this.maxiter = maxiter
@@ -190,7 +196,11 @@ function solve_substep!(
         fisher.val_∇u[i, :] = _∇u(info.x)
         return info
     elseif alg.optimizer.style == :structured
-        solve!(alg.optimizer; fisher=fisher, i=i, p=alg.p, μ=alg.μ, verbose=false)
+        info = solve!(alg.optimizer; fisher=fisher, i=i, p=alg.p, μ=alg.μ, verbose=false)
+        fisher.x[i, :] .= info.x
+        fisher.val_u[i] = fisher.u(info.x, i)
+        fisher.val_∇u[i, :] = fisher.∇u(info.x, i)
+        return info
     end
 end
 
@@ -209,19 +219,32 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     eval!(alg, fisher)
     hess!(alg, fisher)
     # -------------------------------------------------------------------
-
-    # compute affine-scaling Newton step
-    if alg.step == :affinescaling
+    # choice for Newton step of price
+    # -------------------------------------------------------------------
+    if alg.step == :affine_scaling
+        # compute affine-scaling Newton step
         invp = 1 ./ alg.p
-        dp = -(alg.H + alg.μ * spdiagm(invp .^ 2)) \ (alg.∇ - alg.μ ./ invp)
-        alg.gₙ = gₙ = norm(alg.∇)
+        dp = -(alg.H + alg.μ * spdiagm(invp .^ 2)) \ (alg.∇ - alg.μ * invp)
+        alg.gₙ = gₙ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(dp)
         # update price
         αₘ = min(proj.(-alg.pb ./ dp)..., 1.0)
         alg.α = α = αₘ * 0.995
         alg.p .= alg.pb .+ α * dp
-    else
-
+    elseif alg.step == :augmented
+        alg.pλ .= alg.λ
+        # construct augmented system
+        invp = 1 ./ alg.p
+        # Σ = P^{-1}Λ
+        σ = alg.λ .* invp
+        dp = -(alg.H + spdiagm(σ)) \ (alg.∇ - alg.μ * invp)
+        dλ = -alg.λ + alg.μ * invp - σ .* dp
+        alg.gₙ = gₙ = norm(alg.p .* alg.∇)
+        alg.dₙ = dₙ = norm(dp)
+        αₘ = min(proj.(-alg.pb ./ dp)..., proj.(-alg.pλ ./ dλ)..., 1.0)
+        alg.α = α = αₘ * 0.995
+        alg.p .= alg.pb .+ α * dp
+        alg.λ .= alg.pλ .+ α * dλ
     end
 
     @assert all(alg.p .> 0)
@@ -240,7 +263,8 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     # if gₙ < alg.μ * 2e1
     # alg.μ *= 0.92
     # end
-    alg.μ *= 0.9
+    # alg.μ *= 0.90
+    alg.μ *= (1 - min(alg.α * 0.4, 0.98))
 
     return ϵ
 end
@@ -248,10 +272,12 @@ end
 function solve!(
     p₀::Vector{T}, alg::HessianBar, fisher::FisherMarket;
     maxiter=1000, maxtime=100.0, tol=1e-6,
-    step::Symbol=:affinescaling,
+    step::Symbol=:affine_scaling,
+    keep_traj::Bool=false,
     kwargs...
 ) where {T}
     println(__default_logger._blockheader)
+    traj = []
     # override step choice here
     alg.step = step
     bool_default = isnothing(alg.optimizer)
@@ -266,7 +292,8 @@ function solve!(
     for _ in 1:maxiter
         mod(_k, 20) == 0 && println(__default_logger._loghead)
         ϵ = iterate!(alg, fisher)
-        if (max(ϵ...) < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
+        keep_traj && push!(traj, copy(alg.p))
+        if (min(ϵ...) < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
             break
         end
         _k += 1
@@ -274,5 +301,6 @@ function solve!(
 
     println(__default_logger._sep * "✓")
     println(__default_logger._sep)
+    return traj
 end
 

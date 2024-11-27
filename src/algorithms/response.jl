@@ -5,13 +5,15 @@
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-
+using JuMP, COPT
+import MathOptInterface as MOI
 mutable struct ResponseInfo
     x::Vector{Float64}
     f_val::Float64
     g_val::Vector{Float64}
     ϵ::Float64
     k::Int
+    md::Union{JuMP.Model,Nothing}
 end
 
 Base.@kwdef mutable struct ResponseOptimizer
@@ -32,10 +34,29 @@ solve!(optimizer::ResponseOptimizer; kwargs...) = optimizer.optfunc(; kwargs...)
     min f(x) with gradient g(x)
     s.t. x >= 0
 """
-function __original_utility_response(u, ∇u;
-    x₀=nothing, n=10, maxiter=1000, tol=1e-4,
+function __original_utility_response(;
+    i::Int=1,
+    p::Vector{T}=nothing,
+    fisher::FisherMarket=nothing,
+    μ=1e-4,
     verbose=false
-)
+) where {T}
+    ϵᵢ = μ * 1e-5
+    md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
+    @variable(md, x[1:fisher.n] .>= 0)
+    @objective(md, Min, -fisher.val_∇u[i, :]' * x)
+    @constraint(md, xc, p' * x <= fisher.w[i])
+    JuMP.optimize!(md)
+    val_x = abs.(value.(x))
+    return ResponseInfo(
+        val_x,
+        objective_value(md),
+        # the rest is dummy
+        val_x,
+        ϵᵢ,
+        1,
+        md
+    )
 end
 
 BR = OriginalBestResponse = ResponseOptimizer(__original_utility_response, :structured, "BestResponse")

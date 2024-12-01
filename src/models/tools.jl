@@ -36,3 +36,42 @@ end
 log_to_expcone!(x, logx, model) = @constraint(
     model, [logx, 1, x] in MOI.ExponentialCone()
 )
+
+@doc raw"""
+    translate power to power cone 
+    t = |x|^p
+    if p ≥ 1
+        t ≥ |x|^p ⇒ [t, 1, x] in MOI.PowerCone(1/p)
+    for 0 < p < 1
+        t ≤ |x|^p ⇒ [x, 1, t] in MOI.PowerCone(p)
+    end
+"""
+function powerp_to_cone(t, x, model, p::Float64)
+    if (p > 1)
+        @constraint(
+            model, [v, 1, x] in MOI.PowerCone(1 / p)
+        )
+    elseif (0 < p < 1)
+        @constraint(
+            model, [x, 1, t] in MOI.PowerCone(p)
+        )
+    elseif (p < 0)
+        @constraint(
+            model, [t, x, 1] in MOI.PowerCone(1 / (1 - p))
+        )
+    else
+        @warn "unsupported power $p"
+    end
+end
+
+function test_powerp_to_cone()
+    model = __generate_empty_jump_model()
+    @variable(model, t)
+    @variable(model, x)
+    powerp_to_cone(t, x, model, 0.5)
+    set_lower_bound(x, 4.0)
+    set_upper_bound(x, 4.0)
+    @objective(model, Max, t)
+    optimize!(model)
+    @show value(t) value(x)
+end

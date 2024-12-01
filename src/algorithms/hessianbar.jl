@@ -148,9 +148,14 @@ end
     end
     ϵᵢ: the tolerance for the subproblem
 """
-function play!(alg::HessianBar, fisher::FisherMarket; ϵᵢ=1e-7, verbose=false)
+function play!(
+    alg::HessianBar, fisher::FisherMarket;
+    ϵᵢ=1e-7, verbose=false,
+    index_set=nothing
+)
     _k = 0
-    for i in 1:fisher.m
+    index_set === nothing && (index_set = 1:fisher.m)
+    for i in index_set
         info = solve_substep!(
             alg, fisher, i;
             ϵᵢ=ϵᵢ
@@ -263,8 +268,8 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     # if gₙ < alg.μ * 2e1
     # alg.μ *= 0.92
     # end
-    # alg.μ *= 0.90
-    alg.μ *= (1 - min(alg.α * 0.4, 0.98))
+    alg.μ *= 0.85
+    # alg.μ *= (1 - min(alg.α * 0.8, 0.98))
 
     return ϵ
 end
@@ -293,7 +298,7 @@ function solve!(
         mod(_k, 20) == 0 && println(__default_logger._loghead)
         ϵ = iterate!(alg, fisher)
         keep_traj && push!(traj, copy(alg.p))
-        if (min(ϵ...) < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
+        if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
             break
         end
         _k += 1

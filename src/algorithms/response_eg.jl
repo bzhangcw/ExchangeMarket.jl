@@ -46,4 +46,118 @@ function __conic_eigenberg_gale_response(;
     )
 end
 
-EGConic = EigenbergGaleConicResponse = ResponseOptimizer(__conic_eigenberg_gale_response, :structured, "EigenbergGaleConicResponse")
+EGConic = EigenbergGaleConicResponse = ResponseOptimizer(
+    __conic_eigenberg_gale_response,
+    :structured,
+    "EigenbergGaleConicResponse"
+)
+
+function __conic_eigenberg_gale_response_ces_type_i(;
+    i::Int=1,
+    p::Vector{T}=nothing,
+    fisher::FisherMarket=nothing,
+    μ=1e-4,
+    verbose=false
+) where {T}
+    ρ = fisher.ρ
+    ϵᵢ = μ * 1e-5
+    md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
+    @variable(md, s[1:fisher.n] .>= 0)
+    @variable(md, Δ[1:fisher.n])
+
+    # Δ_{ij} = p_j - s_{ij}
+    @constraint(md, Δc[j=1:fisher.n], Δ[j] == p[j] - s[j])
+    @variable(md, λ)
+    @variable(md, logλ)
+    log_to_expcone!(λ, logλ, md)
+
+    # r_{ij} = λ_i * ρ * c_{ij}
+    @variable(md, r[1:fisher.n])
+    @constraint(md, rc[j=1:fisher.n], r[j] == λ * ρ * fisher.c[j])
+
+    # Δ^{ρ} ξ^{1-ρ}≥ r 
+    # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
+    @variable(md, ξ[1:fisher.n])
+    @constraint(
+        md,
+        ξc[j=1:fisher.n],
+        [Δ[j], ξ[j], r[j]] in MOI.PowerCone(ρ)
+    )
+    @objective(md, Min,
+        -1 / ρ * fisher.w[i] * logλ +
+        (1 - ρ) / ρ * sum(ξ)
+    )
+
+    JuMP.optimize!(md)
+    val_x = first.(dual.(md[:ξc]))
+    return ResponseInfo(
+        val_x,
+        objective_value(md),
+        # the rest is dummy
+        val_x,
+        ϵᵢ,
+        1,
+        md
+    )
+end
+
+EGConicCESTypeI = EigenbergGaleConicCESResponseTypeI = ResponseOptimizer(
+    __conic_eigenberg_gale_response_ces_type_i,
+    :structured,
+    "EigenbergGaleConicCESResponseTypeI"
+)
+
+function __conic_eigenberg_gale_response_ces_type_ii(;
+    i::Int=1,
+    p::Vector{T}=nothing,
+    fisher::FisherMarket=nothing,
+    μ=1e-4,
+    verbose=false
+) where {T}
+    ρ = fisher.ρ
+    ϵᵢ = μ * 1e-5
+    md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
+    @variable(md, s[1:fisher.n] .>= 0)
+    @variable(md, Δ[1:fisher.n])
+
+    # Δ_{ij} = p_j - s_{ij}
+    @constraint(md, Δc[j=1:fisher.n], Δ[j] == p[j] - s[j])
+    @variable(md, λ)
+    @variable(md, logλ)
+    log_to_expcone!(λ, logλ, md)
+
+    # r_{ij} = λ_i * ρ * c_{ij}
+    @variable(md, r[1:fisher.n])
+    @constraint(md, rc[j=1:fisher.n], r[j] == λ * ρ * fisher.c[j])
+
+    # Δ^{ρ} ξ^{1-ρ}≥ r 
+    # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
+    @variable(md, ξ[1:fisher.n])
+    @constraint(
+        md,
+        ξc[j=1:fisher.n],
+        [Δ[j], ξ[j], r[j]] in MOI.PowerCone(ρ)
+    )
+    @objective(md, Min,
+        -1 / ρ * fisher.w[i] * logλ +
+        (1 - ρ) / ρ * sum(ξ)
+    )
+
+    JuMP.optimize!(md)
+    val_x = first.(dual.(md[:ξc]))
+    return ResponseInfo(
+        val_x,
+        objective_value(md),
+        # the rest is dummy
+        val_x,
+        ϵᵢ,
+        1,
+        md
+    )
+end
+
+EGConicCESTypeII = EigenbergGaleConicCESResponseTypeII = ResponseOptimizer(
+    __conic_eigenberg_gale_response_ces_type_ii,
+    :structured,
+    "EigenbergGaleConicCESResponseTypeII"
+)

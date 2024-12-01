@@ -6,7 +6,7 @@
 __precompile__(false)
 
 using LinearAlgebra, SparseArrays
-using JuMP, COPT, MosekTools, Random
+using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
@@ -28,7 +28,6 @@ end
 
 
 Base.@kwdef mutable struct FisherMarket{T}
-    model::Model
     m::Int # number of agents
     n::Int # number of goods
     x::Matrix{T} # equilibrium allocation
@@ -48,18 +47,23 @@ Base.@kwdef mutable struct FisherMarket{T}
     val_u::Vector{T}
     # - current value of gradient function
     val_∇u::Matrix{T}
+    # - the vector c to parameterize the utility function
+    c::Matrix{T}
+    # CES parameter
+    ρ::T
 
     # -----------------------------------------------------------------------
     # dataframe for logging and display
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
-    FisherMarket(m, n; seed=1) = (
+    FisherMarket(m, n; ρ=1.0, seed=1) = (
         Random.seed!(seed);
         this = new{Float64}();
         this.m = m;
         this.n = n;
-        c = 10 * rand(m, n);
+        this.ρ = ρ;
+        this.c = c = 10 * rand(m, n);
         this.uₛ = (x, i) -> c[i, :]' * x;
         # initialize as linear utility
         this.u = this.uₛ;
@@ -70,59 +74,19 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.w = rand(m);
         this.p = zeros(n);
         this.x = zeros(m, n);
-        this.model = __generate_empty_jump_model(; verbose=true);
         this.df = DataFrame();
         return this
     )
 end
 
-function create_jump_model(fisher::FisherMarket)
-    model = fisher.model
-    m = fisher.m
-    n = fisher.n
-    u = fisher.u
-    q = fisher.q
-    w = fisher.w
-    @variable(model, x[1:m, 1:n] >= 0)
-    @variable(model, v[1:m])
-    @variable(model, ℓ[1:m])
-    @constraint(model, limit, x' * ones(m) .<= q)
-    for i in 1:m
-        @constraint(model, ℓ[i] == u(x[i, :], i))
-        log_to_expcone!(ℓ[i], v[i], model)
-    end
-    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]))
-    __optimize_jump!(fisher)
-end
-
-function __optimize_jump!(fisher::FisherMarket)
-    model = fisher.model
-    JuMP.optimize!(model)
-    fisher.x = value.(model[:x])
-    fisher.p = -dual.(model[:limit])
-    fisher.val_u = value.(model[:ℓ])
-    return
-end
-
-function create_dual_jump_model(fisher::FisherMarket)
-    model = fisher.model
-    @variable(model, s[1:fisher.m, 1:fisher.n] .>= 0)
-    @variable(model, p[1:fisher.n])
-    @variable(model, v[1:fisher.m])
-    @variable(model, logv[1:fisher.m])
-    log_to_expcone!.(v, logv, model)
-    @objective(model, Min, p' * fisher.q - sum([fisher.w[i] * logv[i] for i in 1:fisher.m]))
-
-    @constraint(model, xc[i=1:fisher.m], s[i, :] + v[i] * fisher.val_∇u[i, :] - p .== 0)
-    JuMP.optimize!(model)
-    fisher.x = hcat([abs.(dual.(xc[i])) for i in 1:fisher.m]...)'
-    fisher.p = value.(p)
-    fisher.val_u = map(i -> fisher.u(fisher.x[i, :], i), 1:fisher.m)
-    return
-end
-
-
-function validate(fisher::FisherMarket)
+@doc """
+    __validate(fisher::FisherMarket)
+    -----------------------------------------------------------------------
+    validate the equilibrium of the Fisher Market.
+    use the price attached in the FisherMarket if no alg is provided.
+    inner use only.
+"""
+function __validate(fisher::FisherMarket)
     validate(fisher, nothing)
 end
 

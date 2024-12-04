@@ -1,3 +1,10 @@
+# -----------------------------------------------------------------------
+# directly run market problem
+#   using induced utility function from Eigenberg-Gale-type potentials
+# @author: Chuwen Zhang <chuwzhang@gmail.com>
+# @date: 2024/11/22
+# -----------------------------------------------------------------------
+
 Base.@kwdef mutable struct Conic
     n::Int
     m::Int
@@ -104,9 +111,14 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
     fisher.val_u = value.(model[:ℓ] .^ (1 / ρ))
 end
 
-function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
+function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true)
     model = alg.model
     @variable(model, p[1:fisher.n] .>= 0)
+    if !bool_solve_p
+        @info "fix price p"
+        set_lower_bound.(p, alg.p)
+        set_upper_bound.(p, alg.p)
+    end
     @variable(model, λ[1:fisher.m])
     @variable(model, logλ[1:fisher.m])
     log_to_expcone!.(λ, logλ, model)
@@ -138,7 +150,7 @@ end
 
 # --------------------------------------------------------------------------
 # solve the dual problem of CES EG program
-# this is formulation II
+# this is formulation II (non-standard form)
 # I did this via conjugate dual, please see type I, which is more elegant
 # --------------------------------------------------------------------------
 function create_dual_ces_type_ii(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)

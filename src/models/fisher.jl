@@ -10,10 +10,10 @@ using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
-function toy_fisher()
+function toy_fisher(ρ)
     m = 2
     n = 3
-    fisher = FisherMarket(m, n)
+    fisher = FisherMarket(m, n; ρ=ρ)
     c = [
         0.7337 6.9883 9.1493
         3.4924 6.2826 1.9281
@@ -23,6 +23,7 @@ function toy_fisher()
     fisher.u = fisher.uₛ
     fisher.∇u = (x, i) -> c[i, :]
     fisher.w = [0.1677; 0.5711]
+    fisher.ρ = ρ
     return fisher
 end
 
@@ -39,18 +40,26 @@ Base.@kwdef mutable struct FisherMarket{T}
     # default utility function: linear
     uₛ::Union{Function,Nothing} = nothing
     # override utility function
-    # - utility function
+    # - utility function and gradient function of utility 
     u::Union{Function,Nothing} = nothing
-    # - gradient function of utility 
     ∇u::Union{Function,Nothing} = nothing
-    # - current value of utility function
+    # - current value and gradient of utility
     val_u::Vector{T}
-    # - current value of gradient function
     val_∇u::Matrix{T}
+    # - indirect utility function and gradient function of indirect utility
+    ν::Union{Function,Nothing} = nothing
+    ν∇ν::Union{Function,Nothing} = nothing
+
+    # - current value and gradient of indirect utility
+    val_ν::Vector{T}
+    val_∇ν::Matrix{T}
+    val_Hν::Matrix{T}
+
     # - the vector c to parameterize the utility function
     c::Matrix{T}
     # CES parameter
     ρ::T
+    σ::T
 
     # -----------------------------------------------------------------------
     # dataframe for logging and display
@@ -63,18 +72,59 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.m = m;
         this.n = n;
         this.ρ = ρ;
+        this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ);
         this.c = c = 10 * rand(m, n);
         this.uₛ = (x, i) -> c[i, :]' * x;
-        # initialize as linear utility
-        this.u = this.uₛ;
-        this.∇u = (x, i) -> c[i, :];
-        this.val_u = zeros(m);
-        this.val_∇u = c;
+
         this.q = m * rand(n); # in O(m)
-        this.w = rand(m);
+        this.w = w = rand(m);
         this.p = zeros(n);
         this.x = zeros(m, n);
         this.df = DataFrame();
+
+        if ρ == 1.0
+            # linear utility
+            this.u = this.uₛ
+            this.∇u = (x, i) -> c[i, :]
+            this.ν∇ν = (p, i) -> begin
+                ν = w[i] * maximum(c[i, :] ./ p)
+                ∇ν = nothing # nonsmooth
+                return ν, ∇ν
+            end
+        else
+            # CES utility, ρ < 1
+            this.u = (x, i) -> sum(c[i, :] .* (x .^ ρ))^(1 / ρ)
+            this.∇u = (x, i) -> sum(c[i, :] .* (x .^ ρ))^(1 / ρ - 1) .*
+                                (x .^ (ρ - 1)) .*
+                                c[i, :]
+
+            # ignore outer power and coeff
+            # only compute
+            # c^(1+σ)'p^(-σ)
+            this.ν∇ν = (p, i) -> begin
+                _cs = c[i, :] .^ (1 + σ)
+                _ps = p .^ (-σ)
+                _cp = _cs' * _ps
+                ν = _cp
+                ∇ν = -σ .* _cs .* (p .^ (-σ - 1))
+                Hν = σ * (σ + 1) .* _cs .* (p .^ (-σ - 2))
+                return ν, ∇ν, Hν
+            end
+            this.ν = (p, i) -> begin
+                _cs = c[i, :] .^ (1 + σ)
+                _ps = p .^ (-σ)
+                _cp = _cs' * _ps
+                ν = _cp
+                return ν
+            end
+
+        end;
+
+        this.val_u = zeros(m);
+        this.val_∇u = zeros(m, n);
+        this.val_ν = zeros(m);
+        this.val_∇ν = zeros(m, n);
+        this.val_Hν = zeros(m, n);
         return this
     )
 end

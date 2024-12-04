@@ -10,7 +10,8 @@ include("tools.jl")
 include("plots.jl")
 switch_to_pdf(;)
 
-f0 = ExchangeMarket.toy_fisher()
+ρ = 1.0
+f0 = ExchangeMarket.toy_fisher(ρ)
 # create a copy of fisher
 f1 = copy(f0)
 
@@ -30,7 +31,7 @@ f1.p .= p₀
 
 
 alg = HessianBar(n, m, p₀, μ; optimizer=EGConic)
-traj = solve!(p₀, alg, f1; maxiter=200, loginterval=10, keep_traj=true)
+traj = solve!(alg, f1; maxiter=200, loginterval=10, keep_traj=true)
 traj_pp₊ = map(pp -> norm(pp - c0.p), traj)
 
 

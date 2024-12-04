@@ -8,7 +8,7 @@ using JuMP, COPT, MosekTools, Random
 import MathOptInterface as MOI
 @doc raw"""
 """
-function __generate_empty_jump_model(; verbose=false, tol=1e-8)
+function __generate_empty_jump_model(; verbose=false, tol=1e-7)
     if __default_jump_solver == :copt
         return Model(
             optimizer_with_attributes(

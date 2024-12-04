@@ -52,6 +52,7 @@ Base.@kwdef mutable struct HessianBar{T}
 
     # subproblem solvers
     optimizer::ResponseOptimizer
+    option_grad::Symbol
 
 
 
@@ -63,6 +64,7 @@ Base.@kwdef mutable struct HessianBar{T}
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
         optimizer::ResponseOptimizer=OptimjlNewtonResponse,
+        option_grad::Symbol=:dual
     ) where {T}
         z = rand(n)
         this = new{T}()
@@ -84,57 +86,9 @@ Base.@kwdef mutable struct HessianBar{T}
         this.k = 0
         this.kᵢ = 0.0
         this.optimizer = optimizer
+        this.option_grad = option_grad
         return this
     end
-end
-
-# -----------------------------------------------------------------------
-# compute gradient and Hessian of Newton step of price
-# -----------------------------------------------------------------------
-
-function grad!(alg::HessianBar, fisher::FisherMarket)
-    alg.∇ .= sum(fisher.x; dims=1)[:] - fisher.q
-end
-
-# compute Jacobian: dx/dp
-function jacxp(X₂, u, c, w, μ)
-    invμ = 1 / μ
-    Xc = X₂ * c
-    r = w / u^2
-    return invμ * X₂ - (invμ^2 * r * Xc * Xc') ./ (1 + invμ * r * c' * Xc)
-end
-
-# compute Jacobian dp/dx
-function jacpx(Xi₂, u, c, w, μ)
-    r = w / u^2
-    return μ * Xi₂ + r * c * c'
-end
-
-function hess!(alg::HessianBar, fisher::FisherMarket; bool_dbg=false)
-    X2 = fisher.x .^ 2
-    Di(i) = begin
-        X₂ = spdiagm(X2[i, :])
-        u = fisher.val_u[i]
-        c = fisher.val_∇u[i, :]
-        w = fisher.w[i]
-        jxp = jacxp(X₂, u, c, w, alg.μ)
-        if bool_dbg
-            Xi₂ = spdiagm(1 ./ X2[i, :])
-            jpx = jacpx(Xi₂, u, c, w, alg.μ)
-            @info "jacpx * jacxp - I" maximum(abs.(jpx * jxp - I))
-        end
-        return jxp
-    end
-    alg.H = -mapreduce(Di, +, 1:fisher.m, init=spzeros(fisher.n, fisher.n))
-end
-
-function eval!(alg::HessianBar, fisher::FisherMarket)
-    alg.φ = (
-        logbar(fisher.val_u, fisher.w) +
-        alg.μ * logbar(fisher.x) +
-        alg.μ * logbar(alg.p) +
-        alg.p' * alg.∇ - alg.μ * fisher.n
-    )
 end
 
 
@@ -201,11 +155,26 @@ function solve_substep!(
         fisher.val_∇u[i, :] = _∇u(info.x)
         return info
     elseif alg.optimizer.style == :structured
-        info = solve!(alg.optimizer; fisher=fisher, i=i, p=alg.p, μ=alg.μ, verbose=false)
+        info = solve!(
+            alg.optimizer;
+            fisher=fisher, i=i, p=alg.p, μ=alg.μ, verbose=false
+        )
         fisher.x[i, :] .= info.x
         fisher.val_u[i] = fisher.u(info.x, i)
         fisher.val_∇u[i, :] = fisher.∇u(info.x, i)
         return info
+    elseif alg.optimizer.style == :analytic
+        fisher.val_ν[i], fisher.val_∇ν[i, :], fisher.val_Hν[i, :] = fisher.ν∇ν(alg.p, i)
+        fisher.x[i, :] = -fisher.w[i] ./ fisher.val_ν[i] ./ fisher.σ .* fisher.val_∇ν[i, :]
+        fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
+        return ResponseInfo(
+            fisher.x[i, :],
+            fisher.val_u[i],
+            [0.0],
+            0.0,
+            1,
+            nothing
+        )
     end
 end
 
@@ -215,14 +184,22 @@ end
 function iterate!(alg::HessianBar, fisher::FisherMarket)
     alg.pb .= alg.p
     # update all sub-problems of all agents i ∈ I
-    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
+    if alg.option_grad in [:usex, :dual]
+        play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
+        # -------------------------------------------------------------------
+        # compute dual function value, gradient and Hessian
+        # !evaluate gradient first;
+        grad!(alg, fisher)
+        eval!(alg, fisher)
+        hess!(alg, fisher)
+    else
+        throw(ArgumentError("""
+        invalid option for gradient: $(alg.option_grad)\n
+        only [:usex, :dual] are supported
+        """))
+    end
 
-    # -------------------------------------------------------------------
-    # compute dual function value, gradient and Hessian
-    # !evaluate gradient first;
-    grad!(alg, fisher)
-    eval!(alg, fisher)
-    hess!(alg, fisher)
+
     # -------------------------------------------------------------------
     # choice for Newton step of price
     # -------------------------------------------------------------------
@@ -265,17 +242,18 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     ϵ = [gₙ dₙ]
 
     # update barrier parameter
-    # if gₙ < alg.μ * 2e1
-    # alg.μ *= 0.92
-    # end
-    alg.μ *= 0.85
+    if gₙ < alg.μ * 2e1
+        alg.μ *= 0.1
+    end
+    # alg.μ *= 0.85
     # alg.μ *= (1 - min(alg.α * 0.8, 0.98))
 
     return ϵ
 end
 
 function solve!(
-    p₀::Vector{T}, alg::HessianBar, fisher::FisherMarket;
+    alg::HessianBar, fisher::FisherMarket;
+    p₀::Union{Vector{T},Nothing}=nothing,
     maxiter=1000, maxtime=100.0, tol=1e-6,
     step::Symbol=:affine_scaling,
     keep_traj::Bool=false,
@@ -287,10 +265,16 @@ function solve!(
     alg.step = step
     bool_default = isnothing(alg.optimizer)
     bool_default && (alg.optimizer = OptimjlNewtonResponse)
-    bool_default && @warn "No optimizer specified! Will use default one: $(alg.optimizer.name)\n"
+    !isnothing(p₀) && begin
+        (alg.p .= p₀)
+        println("!!!warm-starting price")
+    end
+
+    bool_default && @warn "!!!no optimizer specified! will use default one: $(alg.optimizer.name)\n"
     @printf " main iterate method           := %s\n" step
     @printf " subproblem solver alias       := %s\n" alg.optimizer.name
     @printf " subproblem solver style       := %s\n" alg.optimizer.style
+    @printf " option for gradient           := %s\n" alg.option_grad
     # @printf " algorithm description := %s\n" t.DESC
     println(__default_logger._sep)
     _k = 0
@@ -304,7 +288,10 @@ function solve!(
         _k += 1
     end
 
-    println(__default_logger._sep * "✓")
+
+    println(__default_logger._sep)
+    println(" ✓ final play")
+    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
     println(__default_logger._sep)
     return traj
 end

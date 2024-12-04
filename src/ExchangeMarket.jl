@@ -21,6 +21,7 @@ include("models/tools.jl")
 include("models/fisher.jl")
 
 # algorithms
+include("algorithms/diff.jl")
 include("algorithms/conic.jl")
 include("algorithms/response.jl")
 include("algorithms/response_eg.jl")
@@ -38,7 +39,7 @@ export eval!, grad!, hess!, iterate!, play!
 
 export ResponseInfo, solve_substep!, produce_functions_from_subproblem
 export BR
-export EGConic, EGConicCES
+export EGConic, EGConicCES, EGConicCESTypeI, EGConicAC
 export NR, ONR
 
 end

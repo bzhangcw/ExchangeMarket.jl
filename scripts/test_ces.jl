@@ -1,8 +1,8 @@
 using Revise
 using SparseArrays, LinearAlgebra
 using JuMP, MosekTools
+using Plots, LaTeXStrings, Printf
 import MathOptInterface as MOI
-using Plots, LaTeXStrings
 
 using ExchangeMarket
 
@@ -10,13 +10,15 @@ include("tools.jl")
 include("plots.jl")
 switch_to_pdf(;)
 
-m = 2000
-n = 200
-ρ = 0.3
+m = 200
+n = 20
+ρ = -0.9
 bool_run_conic = false
 
 f0 = FisherMarket(m, n; ρ=ρ)
 f1 = copy(f0)
+ρfmt = @sprintf("%+.1f", ρ)
+σfmt = @sprintf("%+.1f", f0.σ)
 
 if bool_run_conic
     c0 = Conic(n, m)
@@ -48,4 +50,10 @@ if bool_run_conic
     traj_pp₊ = map(pp -> norm(pp - c0.p), traj)
     fig = generate_empty()
     plot!(fig, traj_pp₊, label=L"$\|p^k - p^*\|_2$", linewidth=2, markershape=:circle)
+    savefig(fig, "traj_pp.pdf")
+else
+    traj_pp₊ = map(pp -> pp.gₙ, traj)
+    # fig = generate_empty(; shape=:square)
+    plot!(fig, ylabel=L"$\|\mathbf{P}\nabla \varphi\|_2$")
+    plot!(fig, traj_pp₊, label=L"$\rho := %$ρfmt~(\sigma := %$σfmt)$", linewidth=2, markershape=:circle)
 end

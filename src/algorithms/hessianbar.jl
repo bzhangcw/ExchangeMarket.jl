@@ -6,6 +6,19 @@
 
 using LinearAlgebra, SparseArrays
 
+Base.@kwdef mutable struct HessianBarInfo{T}
+    # iteration counters
+    k::Int = 0
+    # current price at k
+    p::Vector{T}
+    # current gradient at k
+    ∇::Vector{T}
+    # norm of scaled gradient
+    gₙ::T
+    # size of Newton step
+    dₙ::T
+end
+
 Base.@kwdef mutable struct HessianBar{T}
     n::Int
     m::Int
@@ -26,7 +39,7 @@ Base.@kwdef mutable struct HessianBar{T}
     φ::T
     # gradient
     ∇::Vector{T}
-    gₙ::T # norm of gradient
+    gₙ::T # norm of scaled gradient
     dₙ::T # size of Newton step
     α::T  # step size
     # Hessian
@@ -242,11 +255,11 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     ϵ = [gₙ dₙ]
 
     # update barrier parameter
-    if gₙ < alg.μ * 2e1
-        alg.μ *= 0.1
-    end
+    # if gₙ < alg.μ * 2e1
+    #     alg.μ *= 0.1
+    # end
     # alg.μ *= 0.85
-    # alg.μ *= (1 - min(alg.α * 0.8, 0.98))
+    alg.μ *= (1 - min(alg.α * 0.9, 0.98))
 
     return ϵ
 end
@@ -281,7 +294,10 @@ function solve!(
     for _ in 1:maxiter
         mod(_k, 20) == 0 && println(__default_logger._loghead)
         ϵ = iterate!(alg, fisher)
-        keep_traj && push!(traj, copy(alg.p))
+        keep_traj && push!(
+            traj,
+            HessianBarInfo(alg.k, alg.p, alg.∇, alg.gₙ, alg.dₙ)
+        )
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= maxiter)
             break
         end

@@ -30,7 +30,7 @@ f1.x .= x₀
 f1.p .= p₀
 
 
-alg = HessianBar(n, m, p₀, μ; optimizer=EGConicCESTypeI)
+alg = HessianBar(n, m, p₀, μ; optimizer=EGConicAC)
 traj = solve!(
     alg, f1;
     maxiter=200,

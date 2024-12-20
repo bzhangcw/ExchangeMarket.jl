@@ -12,10 +12,17 @@ using Printf, LaTeXStrings
 # -----------------------------------------------------------------------
 function copy_fields(this, that)
     for field in fieldnames(typeof(that))
-        if typeof(getfield(that, field)) <: AbstractArray
-            setfield!(this, field, copy(getfield(that, field)))
-        else
-            setfield!(this, field, getfield(that, field))
+        try
+            if typeof(getfield(that, field)) <: AbstractArray
+                setfield!(this, field, copy(getfield(that, field)))
+            else
+                setfield!(this, field, getfield(that, field))
+            end
+        catch e
+            if isa(e, UndefRefError)
+                @error "copy_fields: field $field not found"
+            end
+            rethrow(e)
         end
     end
 end
@@ -63,6 +70,14 @@ mutable struct ExchangeLoggerUtil
     _loghead
     _blockheader
     _sep
+    # for first-order method
+    _logheadvalsfo
+    _logformatsfo
+    _dummyfo
+    _dummyslotsfo
+    _logheadfo
+    _blockheaderfo
+    _sepfo
 
     ExchangeLoggerUtil() = (
         this = new();
@@ -72,14 +87,31 @@ mutable struct ExchangeLoggerUtil
         this._dummyslots = map((y, ff) -> Printf.format(ff, y), this._dummy, this._logformats) .|> length;
         this._loghead = mapreduce((y, l) -> Printf.format(Printf.Format("%$(l-2)s |"), y), *, this._logheadvals, this._dummyslots)[1:end-1];
         (this._blockheader, this._sep) = format_header(this._loghead);
+        # format for the first-order method
+        this._logheadvalsfo = ["k" "φ" "|∇φ|" "|Δp|" "t" "tₗ" "α" "kᵢ"];
+        this._logformatsfo = ["%7d |" " %+10.4e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
+        this._dummyfo = [1 1e-3 1e-3 1e2 1e4 1e4 1e4 1e4];
+        this._dummyslotsfo = map((y, ff) -> Printf.format(ff, y), this._dummyfo, this._logformatsfo) .|> length;
+        this._logheadfo = mapreduce((y, l) -> Printf.format(Printf.Format("%$(l-2)s |"), y), *, this._logheadvalsfo, this._dummyslotsfo)[1:end-1];
+        (this._blockheaderfo, this._sepfo) = format_header(this._logheadfo);
         return this
     )
 end
 
-produce_log(log, _logvals) = begin
-    _logslots = map((y, ff) -> Printf.format(ff, y), _logvals, log._logformats)
+produce_log(log, _logvals; fo=false) = begin
+    if !fo
+        _logslots = map((y, ff) -> Printf.format(ff, y), _logvals, log._logformats)
+    else
+        _logslots = map((y, ff) -> Printf.format(ff, y), _logvals, log._logformatsfo)
+    end
     _logline = reduce(*, _logslots)
     return _logline
 end
 
 __default_logger = ExchangeLoggerUtil()
+
+printto(ios, x) = begin
+    for io in ios
+        println(io, x)
+    end
+end

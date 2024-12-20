@@ -1,41 +1,39 @@
 # -----------------------------------------------------------------------
-# Hessian Barrier Method (Auction)
+# Mirror Descent Method (Auction) 
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
-# @date: 2024/11/22
+# @date: 2024/12/07
+
+# references for step size choices
+# [1] Cole R, Fleischer L (2008) Fast-converging tatonnement algorithms for one-time and ongoing market problems. Proceedings of the fortieth annual ACM symposium on Theory of computing. STOC ’08. (Association for Computing Machinery, New York, NY, USA), 315–324.
+# [2] Cheung YK, Cole R, Devanur N (2013) Tatonnement beyond gross substitutes? gradient descent to the rescue. Proceedings of the forty-fifth annual ACM symposium on Theory of Computing. STOC ’13. (Association for Computing Machinery, New York, NY, USA), 191–200.
+# [3] Cheung YK, Cole R, Tao Y (2018) Dynamics of Distributed Updating in Fisher Markets. Proceedings of the 2018 ACM Conference on Economics and Computation. EC ’18. (Association for Computing Machinery, New York, NY, USA), 351–368.
+
 # -----------------------------------------------------------------------
+
+
 
 using LinearAlgebra, SparseArrays
 
-Base.@kwdef mutable struct HessianBar{T} <: Algorithm
+Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
     n::Int
     m::Int
     # price
     p::Vector{T}  # current price at k
-    λ::Vector{T}  # current dual variable of p at k (if needed)
     pb::Vector{T} # backward price at k-1
-    pλ::Vector{T} # backward dual variable of p at k-1
     # market excess demand
     z::Vector{T}
-    # barrier parameter
-    μ::T
 
     # -------------------------------------------------------------------
     # main iterates
     # -------------------------------------------------------------------
     # dual function value
     φ::T
-    # gradient and norm of scaled gradient
+    # gradient
     ∇::Vector{T}
-    gₙ::T
-    gₜ::T
-    # update direction and size of Newton step
-    Δ::Vector{T}  # update direction at k-1
-    dₙ::T
-    # step size
-    α::T
-    # Hessian
-    H::SparseMatrixCSC{T,Int}
-    # steps
+    gₙ::T # norm of scaled gradient
+    dₙ::T # size of Newton step
+    α::Vector{T}  # step size for each j ∈ J
+    μ::Float64 = 0.0  # barrier parameter (not used, keep for interface)
 
     # -------------------------------------------------------------------
     # timers, tolerances, counters
@@ -58,44 +56,37 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     # -------------------------------------------------------------------
     name::Symbol
     optimizer::ResponseOptimizer
-    # linear system solver
-    linsys::Symbol
+    option_grad::Symbol
+    option_step::Symbol = :eg
+    option_stepsize::Symbol = :cc13
+
     # random sampler to choose players
     sampler::Sampler
-    option_grad::Symbol
-    option_step::Symbol
 
-
-
-    function HessianBar(
-        n::Int,
-        m::Int,
+    function MirrorDec(
+        n::Int, m::Int,
         p::Vector{T};
-        μ::Float64=1.0,
+        α::Float64=10.0,
         maxiter::Int=1000,
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
         optimizer::ResponseOptimizer=OptimjlNewtonResponse,
         option_grad::Symbol=:dual,
-        option_step::Symbol=:affine_scaling,
-        linsys::Symbol=:none,
-        sampler::Sampler=NullSampler(),
+        option_step::Symbol=:eg,
+        option_stepsize::Symbol=:cc13,
+        sampler::Sampler=NullSampler()
     ) where {T}
         z = rand(n)
         this = new{T}()
-        this.name = :HessianBar
+        this.name = :MirrorDec
         this.n = n
         this.m = m
         this.p = p
         this.φ = -1e6
         this.pb = p
         this.z = z
-        this.μ = μ
+        this.α = α * ones(n)
         this.∇ = zeros(n)
-        this.Δ = zeros(n)
-        this.λ = μ * ones(n)
-        this.pλ = μ * ones(n)
-        this.H = spzeros(n, n)
         this.ts = time()
         this.maxiter = maxiter
         this.maxtime = maxtime
@@ -105,7 +96,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.optimizer = optimizer
         this.option_grad = option_grad
         this.option_step = option_step
-        this.linsys = linsys
+        this.option_stepsize = option_stepsize
         this.sampler = sampler
         return this
     end
@@ -114,17 +105,16 @@ end
 # -----------------------------------------------------------------------
 # main iterates
 # -----------------------------------------------------------------------
-function iterate!(alg::HessianBar, fisher::FisherMarket)
+function iterate!(alg::MirrorDec, fisher::FisherMarket)
     alg.pb .= alg.p
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual]
-        play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
+        play!(alg, fisher; ϵᵢ=1e-4, verbose=false)
         # -------------------------------------------------------------------
         # compute dual function value, gradient and Hessian
         # !evaluate gradient first;
         grad!(alg, fisher)
         eval!(alg, fisher)
-        hess!(alg, fisher)
     else
         throw(ArgumentError("""
         invalid option for gradient: $(alg.option_grad)\n
@@ -132,73 +122,55 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         """))
     end
 
-
-    # -------------------------------------------------------------------
-    # choice for Newton step of price
-    # -------------------------------------------------------------------
-    if alg.option_step == :affine_scaling
-        # compute affine-scaling Newton step
-        linsolve!(alg, fisher)
-        alg.gₙ = gₙ = norm(alg.∇)
-        alg.gₜ = gₜ = norm(alg.p .* alg.∇)
-        alg.dₙ = dₙ = norm(alg.Δ)
-        # update price
-        αₘ = min(proj.(-alg.pb ./ alg.Δ)..., 1.0)
-        alg.α = α = αₘ * 0.995
-        alg.p .= alg.pb .+ α * alg.Δ
-    elseif alg.option_step == :augmented
-        alg.pλ .= alg.λ
-        # construct augmented system
-        invp = 1 ./ alg.p
-        # Σ = P^{-1}Λ
-        σ = alg.λ .* invp
-        alg.Δ = -(alg.H + spdiagm(σ)) \ (alg.∇ - alg.μ * invp)
-        dλ = -alg.λ + alg.μ * invp - σ .* alg.Δ
-        alg.gₙ = gₙ = norm(alg.p .* alg.∇)
-        alg.dₙ = dₙ = norm(alg.Δ)
-        αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.pλ ./ dλ)..., 1.0)
-        alg.α = α = αₘ * 0.995
-        alg.p .= alg.pb .+ α * alg.Δ
-        alg.λ .= alg.pλ .+ α * dλ
+    # compute mirror-descent step
+    if alg.option_stepsize == :cc13
+        # use cc'13 step size, see ref[1]
+        alg.α .= 5 * max.(fisher.q, sum(fisher.x, dims=1)[:])
+    elseif alg.option_stepsize == :cc08
+    else
+        throw(ArgumentError("""
+        invalid option for step size: $(alg.option_stepsize)\n
+            only [:cc13, :const] are supported
+            """))
     end
+    if alg.option_step == :eg
+        dp = exp.(-alg.∇ ./ alg.α)
+    elseif alg.option_step == :shmyrev
+        dp = sum(fisher.x, dims=1)[:]
+    end
+    alg.gₙ = gₙ = norm(alg.∇)
+    alg.dₙ = dₙ = norm(dp)
+    alg.p .= alg.pb .* dp
 
-    @assert all(alg.p .> 0)
+    # @assert all(alg.p .>= 0)
     alg.te = time()
     alg.t = alg.te - alg.ts
     alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ (alg.gₙ / fisher.m) alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
+        [alg.k alg.φ (alg.gₙ / fisher.m) alg.dₙ alg.t alg.tₗ maximum(alg.α) alg.kᵢ];
+        fo=true
     )
     alg.k += 1
     ϵ = [gₙ dₙ]
 
-    # update barrier parameter
-    # if gₙ < alg.μ * 2e1
-    #     alg.μ *= 0.1
-    # end
-    # alg.μ = 1e-7
-    # alg.μ *= 0.85
-    alg.μ *= (1 - min(alg.α * 0.9, 0.98))
-
-    alg.μ = max(alg.μ, 1e-15)
     return ϵ, _logline
 end
 
 function opt!(
-    alg::HessianBar, fisher::FisherMarket;
+    alg::MirrorDec, fisher::FisherMarket;
     p₀::Union{Vector{T},Nothing}=nothing,
     maxiter=1000,
     maxtime=100.0,
     tol=1e-6,
     keep_traj::Bool=false,
-    loginterval=1,
+    loginterval=20,
     logfile=nothing,
     reset::Bool=true,
     kwargs...
 ) where {T}
     ios = logfile === nothing ? [stdout] : [stdout, logfile]
-    printto(ios, __default_logger._blockheader)
+    printto(ios, __default_logger._blockheaderfo)
     traj = []
     bool_default = isnothing(alg.optimizer)
     if reset
@@ -224,17 +196,21 @@ function opt!(
     printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
+    l = @sprintf(" option for step size          := %s", alg.option_stepsize)
+    printto(ios, l)
     printto(ios, __default_logger._sep)
     _k = 0
-    while true
+    for _ in 1:maxiter
         ϵ, _logline = iterate!(alg, fisher)
         keep_traj && push!(
             traj,
-            StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, alg.dₙ, alg.φ)
+            StateInfo(alg.k, alg.p, alg.∇, alg.gₙ, alg.dₙ, alg.φ)
         )
-        mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
+        mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
+            printto(ios, __default_logger._logheadfo)
+            printto(ios, _logline)
             break
         end
         _k += 1
@@ -243,9 +219,8 @@ function opt!(
 
     printto(ios, __default_logger._sep)
     printto(ios, " ✓ final play")
-    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, all=true)
+    play!(alg, fisher; verbose=false)
     printto(ios, __default_logger._sep)
     return traj
 end
-
 

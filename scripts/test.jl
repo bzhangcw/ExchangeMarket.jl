@@ -28,10 +28,7 @@ f1.x .= x₀
 f1.p .= p₀
 
 
-alg = HessianBar(n, m, p₀, μ; optimizer=EGConic)
-traj = solve!(alg, f1; maxiter=200, loginterval=10, keep_traj=true)
-traj_pp₊ = map(pp -> norm(pp - c0.p), traj)
-
-fig = generate_empty()
-plot!(fig, traj_pp₊, label=L"$\|p^k - p^*\|_2$", linewidth=2, markershape=:circle)
+# alg = HessianBar(n, m, p₀, μ; optimizer=EGConic, option_grad=:usex)
+alg = HessianBar(n, m, p₀, μ; optimizer=EGConic, option_grad=:usex)
+traj = opt!(alg, f1; maxiter=100, loginterval=10, keep_traj=true)
 

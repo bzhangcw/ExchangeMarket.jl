@@ -44,7 +44,7 @@ function __vanilla_newton_response(f, g;
     return ResponseInfo(x, f_val, g_val, gₙ, 1)
 end
 
-NR = NewtonResponse = ResponseOptimizer(__vanilla_newton_response, :structured, "NewtonResponse")
+NR = NewtonResponse = ResponseOptimizer(__vanilla_newton_response, :linconic, "NewtonResponse")
 
 
 # --------------------------------------------------------------------------
@@ -56,11 +56,12 @@ __optim_ipnewton = IPNewton(;
     show_linesearch=false
 )
 
-__get_options(tol=1e-8) = Optim.Options(
+__get_options(tol=1e-8, verbose=false, store_trace=false) = Optim.Options(
+    f_abstol=tol,
     g_abstol=tol,
     iterations=1_000,
-    store_trace=false,
-    show_trace=false,
+    store_trace=store_trace,
+    show_trace=verbose,
     show_every=1,
     time_limit=100
 )
@@ -90,20 +91,23 @@ Returns the result of the optimization process.
 function __optim_newton(;
     f=nothing, g=nothing,
     H=nothing, x₀=nothing,
-    n=10, maxiter=1000,
-    tol=1e-4,
-    verbose=false
+    n=10,
+    ub=1.0,
+    lb=0.0,
+    tol=1e-8,
+    store_trace=false,
+    verbose=false,
 )
     x = isnothing(x₀) ? rand(n) : copy(x₀)
     H = isnothing(H) ? ForwardDiff.hessian(f, x) : H
-    lx = fill(0, length(x))
-    ux = fill(Inf, length(x))
+    lx = fill(lb, length(x))
+    ux = fill(ub, length(x))
     _g!(g_val, x) = (g_val .= g(x))
     _H!(H_val, x) = (H_val .= H(x))
     dfc = TwiceDifferentiableConstraints(lx, ux)
     obj = TwiceDifferentiable(f, _g!, _H!, x)
     res = optimize(
-        obj, dfc, x₀, __optim_ipnewton, __get_options(tol)
+        obj, dfc, x₀, __optim_ipnewton, __get_options(tol, verbose, store_trace)
     )
     return ResponseInfo(
         res.minimizer,
@@ -111,7 +115,7 @@ function __optim_newton(;
         g(res.minimizer),
         res.g_residual,
         res.iterations,
-        nothing
+        res
     )
 end
 

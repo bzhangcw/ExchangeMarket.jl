@@ -3,7 +3,7 @@
 # @author:Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-__precompile__(false)
+__precompile__(true)
 
 using LinearAlgebra, SparseArrays
 using JuMP, Random
@@ -13,17 +13,12 @@ using Printf, DataFrames
 function toy_fisher(ρ)
     m = 2
     n = 3
-    fisher = FisherMarket(m, n; ρ=ρ)
     c = [
         0.7337 6.9883 9.1493
         3.4924 6.2826 1.9281
     ]
-    fisher.uₛ = (x, i) -> c[i, :]' * x
-    # initialize as linear utility
-    fisher.u = fisher.uₛ
-    fisher.∇u = (x, i) -> c[i, :]
-    fisher.w = [0.1677; 0.5711]
-    fisher.ρ = ρ
+    w = [0.1677; 0.5711]
+    fisher = FisherMarket(m, n; ρ=ρ, c=c, w=w)
     return fisher
 end
 
@@ -47,13 +42,13 @@ Base.@kwdef mutable struct FisherMarket{T}
     val_u::Vector{T}
     val_∇u::Matrix{T}
     # - indirect utility function and gradient function of indirect utility
-    ν::Union{Function,Nothing} = nothing
-    ν∇ν::Union{Function,Nothing} = nothing
+    f::Union{Function,Nothing} = nothing
+    f∇f::Union{Function,Nothing} = nothing
 
     # - current value and gradient of indirect utility
-    val_ν::Vector{T}
-    val_∇ν::Matrix{T}
-    val_Hν::Matrix{T}
+    val_f::Vector{T}
+    val_∇f::Matrix{T}
+    val_Hf::Matrix{T}
 
     # - the vector c to parameterize the utility function
     c::Matrix{T}
@@ -66,18 +61,18 @@ Base.@kwdef mutable struct FisherMarket{T}
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
-    FisherMarket(m, n; ρ=1.0, seed=1) = (
+    FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, bool_unit=true) = (
         Random.seed!(seed);
         this = new{Float64}();
         this.m = m;
         this.n = n;
         this.ρ = ρ;
         this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ);
-        this.c = c = 10 * rand(m, n);
+        this.c = c = isnothing(c) ? 10 * rand(m, n) : c;
         this.uₛ = (x, i) -> c[i, :]' * x;
 
-        this.q = m * rand(n); # in O(m)
-        this.w = w = rand(m);
+        this.q = bool_unit ? ones(n) : m * rand(n); # in O(m)
+        this.w = w = isnothing(w) ? rand(m) : w;
         this.p = zeros(n);
         this.x = zeros(m, n);
         this.df = DataFrame();
@@ -86,10 +81,13 @@ Base.@kwdef mutable struct FisherMarket{T}
             # linear utility
             this.u = this.uₛ
             this.∇u = (x, i) -> c[i, :]
-            this.ν∇ν = (p, i) -> begin
-                ν = w[i] * maximum(c[i, :] ./ p)
-                ∇ν = nothing # nonsmooth
-                return ν, ∇ν
+            this.f = (p, i) -> begin
+                w[i] * maximum(c[i, :] ./ p)
+            end
+            this.f∇f = (p, i) -> begin
+                f = w[i] * maximum(c[i, :] ./ p)
+                ∇f = nothing # nonsmooth
+                return f, ∇f
             end
         else
             # CES utility, ρ < 1
@@ -101,30 +99,30 @@ Base.@kwdef mutable struct FisherMarket{T}
             # ignore outer power and coeff
             # only compute
             # c^(1+σ)'p^(-σ)
-            this.ν∇ν = (p, i) -> begin
+            this.f∇f = (p, i) -> begin
                 _cs = c[i, :] .^ (1 + σ)
                 _ps = p .^ (-σ)
                 _cp = _cs' * _ps
-                ν = _cp
-                ∇ν = -σ .* _cs .* (p .^ (-σ - 1))
-                Hν = σ * (σ + 1) .* _cs .* (p .^ (-σ - 2))
-                return ν, ∇ν, Hν
+                f = _cp
+                ∇f = -σ .* _cs .* (p .^ (-σ - 1))
+                Hf = σ * (σ + 1) .* _cs .* (p .^ (-σ - 2))
+                return f, ∇f, Hf
             end
-            this.ν = (p, i) -> begin
+            this.f = (p, i) -> begin
                 _cs = c[i, :] .^ (1 + σ)
                 _ps = p .^ (-σ)
                 _cp = _cs' * _ps
-                ν = _cp
-                return ν
+                f = _cp
+                return f
             end
 
         end;
 
         this.val_u = zeros(m);
         this.val_∇u = zeros(m, n);
-        this.val_ν = zeros(m);
-        this.val_∇ν = zeros(m, n);
-        this.val_Hν = zeros(m, n);
+        this.val_f = zeros(m);
+        this.val_∇f = zeros(m, n);
+        this.val_Hf = zeros(m, n);
         return this
     )
 end
@@ -155,12 +153,13 @@ function validate(fisher::FisherMarket, alg)
         :left_budget_μ => w - x * p .+ μ * n,
     )
     println(__default_sep)
-    @printf("\t\tequilibrium information\n")
+    @printf(" :equilibrium information\n")
+    @printf(" :method: %s\n", alg.name)
     println(__default_sep)
-    @show first(df, 10)
+    println(first(df, 10))
     println(__default_sep)
-    _excess = sum(fisher.x; dims=1)[:] - fisher.q
-    @printf(" :market excess: [%.4e, %.4e]\n", maximum(_excess), minimum(_excess))
+    _excess = (sum(fisher.x; dims=1)[:] - fisher.q) ./ maximum(fisher.q)
+    @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
     println(__default_sep)
 end
 

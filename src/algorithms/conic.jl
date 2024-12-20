@@ -14,18 +14,21 @@ Base.@kwdef mutable struct Conic
 
     model::Model
 
+    name::Symbol
     # barrier parameter
     μ::Float64 = 0.0
 
     function Conic(
         n::Int, m::Int;
+        tol=1e-12
     )
         this = new()
+        this.name = :Conic
         this.n = n
         this.m = m
         this.p = zeros(n)
         this.λ = zeros(n)
-        this.model = __generate_empty_jump_model(; verbose=true)
+        this.model = __generate_empty_jump_model(; verbose=true, tol=tol)
         return this
     end
 end
@@ -66,7 +69,7 @@ function __create_dual(alg::Conic, fisher::FisherMarket)
     log_to_expcone!.(λ, logλ, model)
     @objective(model, Min, p' * fisher.q - sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]))
 
-    @constraint(model, xc[i=1:fisher.m], s[i, :] + λ[i] * fisher.val_∇u[i, :] - p .== 0)
+    @constraint(model, xc[i=1:fisher.m], s[i, :] + λ[i] * fisher.c[i, :] - p .== 0)
     JuMP.optimize!(model)
     alg.p = value.(p)
     fisher.x = hcat([abs.(dual.(xc[i])) for i in 1:fisher.m]...)'
@@ -100,7 +103,7 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
         @constraint(model, ℓ[i] == sum(fisher.c[i, :] .* xp[i, :]))
         log_to_expcone!(ℓ[i], v[i], model)
     end
-    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]) / ρ)
+    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]) / ρ) - fisher.w' * log.(fisher.w)
     # -----------------------------------------------------------------------
     # optimize
     JuMP.optimize!(model)
@@ -109,6 +112,10 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
     # allocation saved in fisher
     fisher.x = value.(model[:x])
     fisher.val_u = value.(model[:ℓ] .^ (1 / ρ))
+end
+
+function create_dual_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true)
+    create_dual_ces_type_i(alg, fisher, ρ, bool_solve_p)
 end
 
 function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true)
@@ -138,7 +145,8 @@ function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.
     )
     @objective(model, Min,
         p' * fisher.q -
-        1 / ρ * sum([fisher.w[i] * logλ[i] for i in 1:fisher.m])
+        1 / ρ * sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]) +
+        fisher.w' * log.(fisher.w)
     )
 
     JuMP.optimize!(model)

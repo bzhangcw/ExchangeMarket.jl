@@ -13,7 +13,7 @@ mutable struct ResponseInfo
     g_val::Vector{Float64}
     ϵ::Float64
     k::Int
-    md::Union{JuMP.Model,Nothing}
+    md::Any
 end
 
 Base.@kwdef mutable struct ResponseOptimizer
@@ -59,4 +59,4 @@ function __original_utility_response(;
     )
 end
 
-BR = OriginalBestResponse = ResponseOptimizer(__original_utility_response, :structured, "BestResponse")
+BR = OriginalBestResponse = ResponseOptimizer(__original_utility_response, :linconic, "BestResponse")

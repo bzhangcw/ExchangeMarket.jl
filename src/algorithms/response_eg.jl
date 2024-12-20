@@ -48,7 +48,7 @@ end
 
 EGConic = EigenbergGaleConicResponse = ResponseOptimizer(
     __conic_eigenberg_gale_response,
-    :structured,
+    :linconic,
     "EigenbergGaleConicResponse"
 )
 
@@ -101,7 +101,7 @@ end
 
 EGConicCESTypeI = EigenbergGaleConicCESResponseTypeI = ResponseOptimizer(
     __conic_eigenberg_gale_response_ces_type_i,
-    :structured,
+    :linconic,
     "EigenbergGaleConicCESResponseTypeI"
 )
 

@@ -74,7 +74,8 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
         option_grad::Symbol=:dual,
         option_step::Symbol=:eg,
         option_stepsize::Symbol=:cc13,
-        sampler::Sampler=NullSampler()
+        sampler::Sampler=NullSampler(),
+        kwargs...
     ) where {T}
         z = rand(n)
         this = new{T}()
@@ -83,7 +84,7 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
         this.m = m
         this.p = p
         this.φ = -1e6
-        this.pb = p
+        this.pb = zeros(n)
         this.z = z
         this.α = α * ones(n)
         this.∇ = zeros(n)
@@ -107,6 +108,12 @@ end
 # -----------------------------------------------------------------------
 function iterate!(alg::MirrorDec, fisher::FisherMarket)
     alg.pb .= alg.p
+    if (alg.k == 0) && (alg.optimizer.style == :bids)
+        fisher.b .= (1 ./ alg.p') .* fisher.x
+        sumb = sum(fisher.b, dims=2)[:]
+        fisher.b ./= sumb
+        fisher.b .*= fisher.w
+    end
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual]
         play!(alg, fisher; ϵᵢ=1e-4, verbose=false)
@@ -135,12 +142,19 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
     end
     if alg.option_step == :eg
         dp = exp.(-alg.∇ ./ alg.α)
+        alg.p .= alg.pb .* dp
+        alg.dₙ = dₙ = norm(dp)
     elseif alg.option_step == :shmyrev
-        dp = sum(fisher.x, dims=1)[:]
+        if alg.optimizer.style == :bids
+            alg.p .= sum(fisher.b, dims=1)[:]
+            alg.dₙ = norm(alg.p - alg.pb)
+        else
+            dp = sum(fisher.x, dims=1)[:]
+            alg.p .= alg.pb .* dp
+            alg.dₙ = dₙ = norm(dp)
+        end
     end
     alg.gₙ = gₙ = norm(alg.∇)
-    alg.dₙ = dₙ = norm(dp)
-    alg.p .= alg.pb .* dp
 
     # @assert all(alg.p .>= 0)
     alg.te = time()
@@ -148,11 +162,11 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
     alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
-        [alg.k alg.φ (alg.gₙ / fisher.m) alg.dₙ alg.t alg.tₗ maximum(alg.α) alg.kᵢ];
+        [alg.k alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ maximum(alg.α) alg.kᵢ];
         fo=true
     )
     alg.k += 1
-    ϵ = [gₙ dₙ]
+    ϵ = [gₙ alg.dₙ]
 
     return ϵ, _logline
 end
@@ -204,11 +218,12 @@ function opt!(
         ϵ, _logline = iterate!(alg, fisher)
         keep_traj && push!(
             traj,
-            StateInfo(alg.k, alg.p, alg.∇, alg.gₙ, alg.dₙ, alg.φ)
+            StateInfo(alg.k, alg.p, alg.∇, alg.gₙ, alg.dₙ, alg.φ, alg.t)
         )
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
+            # if (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             printto(ios, __default_logger._logheadfo)
             printto(ios, _logline)
             break
@@ -224,3 +239,4 @@ function opt!(
     return traj
 end
 
+PR = ProportionalResponse = ResponseOptimizer(nothing, :bids, "ProportionalResponse")

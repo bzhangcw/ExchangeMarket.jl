@@ -3,7 +3,48 @@
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
+@doc raw"""
+    SMWDR1{T}
+    Structure for the SMW DR1 approximation of the inverse Hessian.
+    @note:
+        applying the Sherman–Morrison-Woodbury formula to compute the inverse Hessian,
+        which is approximated by Diagonal + Rank One (DR1) form:
+            diagm(this.d) + this.s * (this.a) * (this.a)'
+        then the inverse Hessian, `this.Hi`, is given as the linear operator:
+            Hi(x) -> (diagm(this.d) + this.s * (this.a) * (this.a)') \ x
+"""
+Base.@kwdef mutable struct SMWDR1{T}
+    n::Int
+    d::Vector{T}
+    a::Vector{T}
+    s::T
+    # linear operator for the inverse Hessian:
+    # Hi(x) -> Inverse(H) * x
+    Hi::Union{Nothing,Function,SparseMatrixCSC{T,Int}}
+    function SMWDR1(n::Int)
+        this = new{Float64}()
+        this.n = n
+        this.d = zeros(n)
+        this.a = zeros(n)
+        this.s = 0.0
+        this.Hi = nothing
+        return this
+    end
+end
 
+@doc raw"""
+    __assemble_dr1_approx(Ha::SMWDR1)
+
+    Assemble the DR1 approximation of the inverse Hessian from the SMWDR1 structure.
+        for debugging purposes.
+"""
+function __assemble_dr1_approx(Ha::SMWDR1)
+    return spdiagm(Ha.d) + Ha.s * Ha.a * Ha.a'
+end
+
+# -----------------------------------------------------------------------
+# main functions
+# -----------------------------------------------------------------------
 function grad!(alg, fisher::FisherMarket)
     if fisher.ρ == 1.0
         __linear_grad!(alg, fisher)
@@ -147,29 +188,6 @@ end
 # -----------------------------------------------------------------------
 # general CES case: ρ < 1, :dual mode
 # -----------------------------------------------------------------------
-function __ces_grad_dual!(alg, fisher::FisherMarket)
-    @assert fisher.ρ < 1
-    # the following is not needed, move to play
-    # for i in 1:fisher.m
-    #     fisher.val_f[i], fisher.val_∇f[i, :], fisher.val_Hf[i, :] = fisher.f∇f(alg.p, i)
-    #     fisher.x[i, :] = -fisher.w[i] ./ fisher.val_f[i] ./ fisher.σ .* fisher.val_∇f[i, :]
-    #     fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
-    # end
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - sum(fisher.x[alg.sampler.indices, :]; dims=1)[:]
-end
-
-function __ces_hess_dual!(alg, fisher::FisherMarket)
-    σ = fisher.σ
-    w = fisher.w
-    # compute 1/σ w_i * log(cs_i'p^{-σ})
-    _Hi = (i) -> begin
-        _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[i, :]) -
-             (1 / fisher.val_f[i])^2 * fisher.val_∇f[i, :] * fisher.val_∇f[i, :]'
-        return _H .* (w[i] / σ)
-    end
-    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
-end
-
 function __ces_eval_dual!(alg, fisher::FisherMarket)
     σ = fisher.σ
     w = fisher.w
@@ -181,4 +199,39 @@ function __ces_eval_dual!(alg, fisher::FisherMarket)
     )
 end
 
+function __ces_grad_dual!(alg, fisher::FisherMarket)
+    @assert fisher.ρ < 1
 
+    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - sum(fisher.x[alg.sampler.indices, :]; dims=1)[:]
+end
+
+function __ces_hess_dual!(alg, fisher::FisherMarket)
+    # compute 1/σ w_i * log(cs_i'p^{-σ})
+    if alg.linsys == :none
+        __compute_ces_exact_hess!(alg, fisher)
+    else
+        # @ref only, for debugging
+        # gamma = f1.w ./ sum(f1.w)
+        # u = alg.p' ./ f1.w .* f1.x
+        # ubar = (gamma'*u)[:]
+        pxbar = alg.p .* sum(fisher.x; dims=1)[:]
+        # -------------------------------------------------------------------
+        # diagonal + rank-one: save unregularized part
+        #   of P*(∇^2f)*P
+        # -------------------------------------------------------------------
+        alg.Ha.d .= (fisher.σ + 1) * pxbar
+        alg.Ha.a .= pxbar ./ sum(fisher.w)
+        alg.Ha.s = -sum(fisher.w) * fisher.σ
+    end
+end
+
+function __compute_exact_hess!(alg, fisher::FisherMarket)
+    σ = fisher.σ
+    w = fisher.w
+    _Hi = (i) -> begin
+        _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[i, :]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[i, :] * fisher.val_∇f[i, :]'
+        return _H .* (w[i] / σ)
+    end
+    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    @info "use exact Hessian"
+end

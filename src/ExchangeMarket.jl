@@ -20,6 +20,9 @@ include("utils.jl")
 include("models/tools.jl")
 include("models/fisher.jl")
 
+# constraints
+include("models/constrs.jl")
+
 # algorithms
 include("algorithms/algbase.jl")
 include("algorithms/diff.jl")
@@ -37,7 +40,8 @@ include("algorithms/hessianbar.jl")
 include("algorithms/mirror.jl")
 
 
-export logbar, log_to_expcone!, powerp_to_cone!
+export pprint
+export logbar, log_to_expcone!, powerp_to_cone!, proj
 export FisherMarket, validate
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
@@ -48,14 +52,21 @@ export MirrorDec
 
 export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
 export BR
+export PR # proportional response
 export EGConic, EGConicCES, EGConicCESTypeI, EGConicAC
-export NR, ONR
+export ONR
+
+# DR1: Diagonal + Rank-One
+export SMWDR1, smw_dr1!
 
 # randomization utilities
 export NullSampler, BatchSampler
 
 # primal methods
 export boxed_allocation!
+
+# constraints
+export LinearConstr
 
 end
 # end of module `ExchangeMarket`

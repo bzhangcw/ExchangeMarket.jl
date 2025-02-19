@@ -20,6 +20,7 @@ function reset_size(n, R)
     """
 end
 
+print_tex(io::IO, x::Char) = print(io, L"$x$")
 function generate_empty(; use_html=__backend == :html, title="", shape=:wide, settick=true)
     if use_html
         switch_to_pdf(; bool_use_html=true)
@@ -37,8 +38,6 @@ function generate_empty(; use_html=__backend == :html, title="", shape=:wide, se
         titlefontsize=20,
         yscale=settick ? :log10 : :auto,
         yticks=settick ? 10.0 .^ (-10:1:3) : :auto,
-        xlabel=L"$k$",
-        ylabel="value",
         legend=:topright,
         legendfonthalign=:left,
         title=title,

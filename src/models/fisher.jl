@@ -22,14 +22,20 @@ function toy_fisher(ρ)
     return fisher
 end
 
+spow(x, y) = x == 0.0 ? 0.0 : x^y
 
 Base.@kwdef mutable struct FisherMarket{T}
     m::Int # number of agents
     n::Int # number of goods
-    x::Matrix{T} # equilibrium allocation
-    p::Vector{T} # equilibrium price
+    x::Matrix{T} # allocation
+    p::Vector{T} # price
     w::Vector{T} # wealth
     q::Vector{T} # goods
+    # -------------------------------------------------------------------
+    # for propotional dynamics
+    # -------------------------------------------------------------------
+    b::Matrix{T} # bids
+
     # -----------------------------------------------------------------------
     # utility function
     # default utility function: linear
@@ -61,20 +67,43 @@ Base.@kwdef mutable struct FisherMarket{T}
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
-    FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, bool_unit=true) = (
+    FisherMarket(m, n; ρ=1.0,
+        c=nothing, w=nothing, seed=1,
+        scale=1.0, sparsity=(2.0 / n),
+        bool_unit=true, bool_sparse=true,
+        bool_unit_wealth=true,
+    ) = (
         Random.seed!(seed);
         this = new{Float64}();
         this.m = m;
         this.n = n;
         this.ρ = ρ;
         this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ);
-        this.c = c = isnothing(c) ? 10 * rand(m, n) : c;
+        c = isnothing(c) ? scale * sprand(Float64, m, n, sparsity) : c;
+
+        # ensure each row has at least one nonzero entry
+        for i in 1:m
+            if all(c[i, :] .== 0.0)
+                c[i, rand(1:size(c, 2))] = scale
+            end
+        end;
+        # ensure each column has at least one nonzero entry
+        for j in 1:n
+            if all(c[:, j] .== 0.0)
+                c[rand(1:size(c, 1)), j] = scale
+            end
+        end;
+        (!bool_sparse) && (c .+= scale);
+        this.c = c = sparse(c);
         this.uₛ = (x, i) -> c[i, :]' * x;
 
         this.q = bool_unit ? ones(n) : m * rand(n); # in O(m)
-        this.w = w = isnothing(w) ? rand(m) : w;
+        this.w = w = (isnothing(w) ? rand(m) : w) * scale;
+        this.w .= bool_unit_wealth ? w ./ sum(w) : w;
         this.p = zeros(n);
         this.x = zeros(m, n);
+        # sometimes use bids instead of allocation
+        this.b = zeros(m, n);
         this.df = DataFrame();
 
         if ρ == 1.0
@@ -91,14 +120,14 @@ Base.@kwdef mutable struct FisherMarket{T}
             end
         else
             # CES utility, ρ < 1
-            this.u = (x, i) -> sum(c[i, :] .* (x .^ ρ))^(1 / ρ)
-            this.∇u = (x, i) -> sum(c[i, :] .* (x .^ ρ))^(1 / ρ - 1) .*
-                                (x .^ (ρ - 1)) .*
-                                c[i, :]
+            this.u = (x, i) -> sum(c[i, :] .* spow.(x, ρ))^(1 / ρ)
+            this.∇u = (x, i) -> sum(c[i, :] .* spow.(x, ρ))^(1 / ρ - 1) .*
+                                spow.(x, ρ - 1) .* c[i, :]
 
+            # the derivatives respect to p
             # ignore outer power and coeff
             # only compute
-            # c^(1+σ)'p^(-σ)
+            # r := c^(1+σ)'p^(-σ)
             this.f∇f = (p, i) -> begin
                 _cs = c[i, :] .^ (1 + σ)
                 _ps = p .^ (-σ)
@@ -115,7 +144,6 @@ Base.@kwdef mutable struct FisherMarket{T}
                 f = _cp
                 return f
             end
-
         end;
 
         this.val_u = zeros(m);
@@ -160,6 +188,7 @@ function validate(fisher::FisherMarket, alg)
     println(__default_sep)
     _excess = (sum(fisher.x; dims=1)[:] - fisher.q) ./ maximum(fisher.q)
     @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
+    @printf(" :            social welfare:  %.4e\n", (log.(fisher.val_u))' * fisher.w)
     println(__default_sep)
 end
 

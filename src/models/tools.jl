@@ -3,26 +3,35 @@
 # @author:Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-using LinearAlgebra, SparseArrays
-using JuMP, COPT, MosekTools, Random
+using LinearAlgebra, SparseArrays, Random
+using JuMP, MosekTools, MadNLP
+# using COPT
 import MathOptInterface as MOI
+
 @doc raw"""
+    generate an empty JuMP model with the specified optimizer
+    bool_nlp: whether to use NLP solver, default false, use a linear conic solver.
 """
-function __generate_empty_jump_model(; verbose=false, tol=1e-7)
-    if __default_jump_solver == :copt
+function __generate_empty_jump_model(; bool_nlp=false, verbose=false, tol=1e-7)
+    if bool_nlp
         return Model(
             optimizer_with_attributes(
-                () -> COPT.ConeOptimizer(),
-                "LogToConsole" => verbose,
-                "FeasTol" => tol,
-                "DualTol" => tol
+                () -> MadNLP.Optimizer(),
+                "tol" => tol,
             )
         )
+        # elseif __default_jump_solver == :copt
+        #     return Model(
+        #         optimizer_with_attributes(
+        #             () -> COPT.ConeOptimizer(),
+        #             "LogToConsole" => verbose,
+        #             "FeasTol" => tol,
+        #             "DualTol" => tol
+        #         )
+        #     )
     else
         md = Model(MosekTools.Optimizer)
         set_attribute(md, "MSK_IPAR_LOG", verbose ? 10 : 0)
-        # set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_INFEAS", tol)
-        # set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_PFEAS", tol)
         set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_MU_RED", tol)
         set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_REL_GAP", tol)
         return md

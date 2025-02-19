@@ -5,7 +5,7 @@
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-using JuMP, COPT
+using JuMP
 import MathOptInterface as MOI
 mutable struct ResponseInfo
     x::Vector{Float64}
@@ -41,10 +41,11 @@ function __original_utility_response(;
     μ=1e-4,
     verbose=false
 ) where {T}
+    @warn "This function is deprecated. Use `EGConic types or General NLP types` instead."
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
     @variable(md, x[1:fisher.n] .>= 0)
-    @objective(md, Min, -fisher.val_∇u[i, :]' * x)
+    @objective(md, Min, -fisher.u(x, i))
     @constraint(md, xc, p' * x <= fisher.w[i])
     JuMP.optimize!(md)
     val_x = abs.(value.(x))

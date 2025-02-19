@@ -115,3 +115,5 @@ printto(ios, x) = begin
         println(io, x)
     end
 end
+
+pprint(x) = display(MIME("text/plain"), x)

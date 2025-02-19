@@ -14,4 +14,6 @@ Base.@kwdef mutable struct StateInfo{T}
     dₙ::T
     # dual function value
     φ::T
+    # time
+    t::T
 end

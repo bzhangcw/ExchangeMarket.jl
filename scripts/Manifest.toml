@@ -2,7 +2,7 @@
 
 julia_version = "1.10.3"
 manifest_format = "2.0"
-project_hash = "9941af906477d5793423516be94f9ba6d08cf7e9"
+project_hash = "6381b04fdf5bb6212968324f2a2254c4ab93f297"
 
 [[deps.AMD]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse_jll"]
@@ -104,12 +104,6 @@ deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "8873e196c2eb87962a2048b3b8e08946535864a1"
 uuid = "6e34b625-4abd-537c-b88f-471c36dfa7a0"
 version = "1.0.8+2"
-
-[[deps.COPT]]
-deps = ["LazyArtifacts", "Libdl", "LinearAlgebra", "MathOptInterface", "Pkg", "Random", "SparseArrays"]
-git-tree-sha1 = "0c87eba5590802cdd11f349c6e3fbd230aee4d1c"
-uuid = "227a2e2d-e949-4d8e-a1da-7384fe6f0b9f"
-version = "1.1.20"
 
 [[deps.Cairo_jll]]
 deps = ["Artifacts", "Bzip2_jll", "CompilerSupportLibraries_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "JLLWrappers", "LZO_jll", "Libdl", "Pixman_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Zlib_jll", "libpng_jll"]
@@ -293,7 +287,7 @@ uuid = "2702e6a9-849d-5ed8-8c21-79e8b8f9ee43"
 version = "0.0.20230411+1"
 
 [[deps.ExchangeMarket]]
-deps = ["COPT", "DataFrames", "ForwardDiff", "JuMP", "LaTeXStrings", "LineSearches", "LinearAlgebra", "MathOptInterface", "MosekTools", "Optim", "Printf", "Random", "SparseArrays"]
+deps = ["DataFrames", "ForwardDiff", "JuMP", "LaTeXStrings", "LineSearches", "LinearAlgebra", "MadNLP", "MathOptInterface", "MosekTools", "Optim", "Printf", "Random", "SparseArrays"]
 path = ".."
 uuid = "f4303546-4db8-419d-a649-8baed3ff0194"
 version = "0.1.0"
@@ -882,9 +876,9 @@ version = "10.2.0"
 
 [[deps.MosekTools]]
 deps = ["MathOptInterface", "Mosek", "Printf"]
-git-tree-sha1 = "6b7e79cf90aa69fe5b7fbde7523ab343fbc190ca"
+git-tree-sha1 = "944b53ab2dab8de7aa82d650536f9177a74ca723"
 uuid = "1ec41992-ff65-5c91-ac43-2df89e9693a4"
-version = "0.15.3"
+version = "0.15.4"
 
 [[deps.MozillaCACerts_jll]]
 uuid = "14a3606d-f60d-562e-9121-12d972cd8159"

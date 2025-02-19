@@ -93,5 +93,23 @@ function solve_substep!(
             1,
             nothing
         )
+    elseif alg.optimizer.style == :bids
+        # @info "use bids to recover allocation"
+        # use bids to recover allocation
+        fisher.x[i, :] = fisher.b[i, :] ./ alg.p
+        fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
+        fisher.val_f[i], fisher.val_∇f[i, :], fisher.val_Hf[i, :] = fisher.f∇f(alg.p, i)
+        cs = fisher.c[i, :] .* spow.(fisher.x[i, :], fisher.ρ)
+        sumcs = sum(cs)
+        # update bids
+        fisher.b[i, :] .= fisher.w[i] * cs ./ sumcs
+        return ResponseInfo(
+            fisher.x[i, :],
+            fisher.val_u[i],
+            [0.0],
+            0.0,
+            1,
+            nothing
+        )
     end
 end

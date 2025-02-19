@@ -1,0 +1,25 @@
+
+
+Base.@kwdef mutable struct LinearConstr{T}
+    m::Int
+    n::Int
+    A::Matrix{T}
+    b::Vector{T}
+    eps::Vector{T}
+    function LinearConstr(m::Int, n::Int, A::Matrix{T}, b::Vector{T}) where {T}
+        this = new{T}()
+        this.n = n
+        this.m = m
+        @assert m <= n
+        @assert size(A) == (m, n)
+        @assert length(b) == m
+        this.A = copy(A)
+        this.b = copy(b)
+        this.eps = zeros(m)
+        return this
+    end
+end
+
+function __evalconstr!(alg, fisher::FisherMarket, constr::LinearConstr)
+    constr.eps .= constr.A * alg.p .- constr.b
+end

@@ -1,10 +1,11 @@
 # -----------------------------------------------------------------------
 # run subproblems as best-response-type mappings
 #   using induced utility function from Eigenberg-Gale-type potentials
+#   the response mapping is induced from linear-conic programming
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-using JuMP, COPT
+using JuMP
 import MathOptInterface as MOI
 
 # --------------------------------------------------------------------------

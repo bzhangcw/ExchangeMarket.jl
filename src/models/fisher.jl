@@ -181,6 +181,12 @@ function validate(fisher::FisherMarket, alg)
         :left_budget_μ => w - x * p .+ μ * n,
     )
     println(__default_sep)
+    @printf(" :problem size\n")
+    @printf(" :    number of agents: %d\n", fisher.m)
+    @printf(" :    number of goods: %d\n", fisher.n)
+    @printf(" :    avg number of nonzero entries in c: %.4f\n",
+        length(sparse(fisher.c).nzval) / (fisher.m * fisher.n)
+    )
     @printf(" :equilibrium information\n")
     @printf(" :method: %s\n", alg.name)
     println(__default_sep)

@@ -3,8 +3,9 @@
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-using Printf, LaTeXStrings
+using Printf, LaTeXStrings, Dates
 
+current_date() = Dates.format(Dates.now(), "yyyymmddHHMM")
 # -----------------------------------------------------------------------
 # copy fields from that to this
 # - if field is an array, copy it; 

@@ -251,7 +251,8 @@ function opt!(
     reset::Bool=true,
     kwargs...
 ) where {T}
-    ios = logfile === nothing ? [stdout] : [stdout, logfile]
+    logfile = logfile === nothing ? open("log-hessianbar-$(current_date()).log", "a") : logfile
+    ios = [stdout, logfile]
     printto(ios, __default_logger._blockheader)
     traj = []
     bool_default = isnothing(alg.optimizer)
@@ -283,6 +284,7 @@ function opt!(
     l = @sprintf(" option for μ                  := %s", alg.option_mu)
     printto(ios, l)
     printto(ios, __default_logger._sep)
+    flush.(ios)
     _k = 0
     while true
         ϵ, _logline = iterate!(alg, fisher)
@@ -296,13 +298,20 @@ function opt!(
             break
         end
         _k += 1
+        flush.(ios)
     end
 
 
     printto(ios, __default_logger._sep)
     printto(ios, " ✓ final play")
     play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, all=true)
+    l = @sprintf(" finished in %d iterations", alg.k)
+    printto(ios, l)
+    l = @sprintf("          in %.3f seconds", alg.t)
+    printto(ios, l)
     printto(ios, __default_logger._sep)
+    flush.(ios)
+    close(logfile)
     return traj
 end
 

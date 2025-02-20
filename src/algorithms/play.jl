@@ -1,4 +1,3 @@
-
 # -----------------------------------------------------------------------
 # subproblems
 # -----------------------------------------------------------------------
@@ -15,19 +14,19 @@ function play!(
     verbose=false,
     all=false
 )
-    _k = 0
+    _k = Threads.Atomic{Int}(0)
     sample!(alg.sampler, fisher)
-    for i in (all ? (1:fisher.m) : alg.sampler.indices)
+    Threads.@threads for i in (all ? (1:fisher.m) : alg.sampler.indices)
         info = solve_substep!(
             alg, fisher, i;
             ϵᵢ=ϵᵢ,
         )
-        _k += info.k
+        Threads.atomic_add!(_k, info.k)
         if info.ϵ > ϵᵢ * 1e2
             @warn "subproblem $i is not converged: ϵ: $(info.ϵ)"
         end
     end
-    alg.kᵢ = _k / fisher.n
+    alg.kᵢ = _k.value / fisher.n
     verbose && validate(fisher, alg.μ)
 end
 

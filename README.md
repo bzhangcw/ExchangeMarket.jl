@@ -14,7 +14,7 @@ then dev source package
 ```
 You are ready to go.
 
-Refer to [scripts/fisher/test_ipm.jl](scripts/fisher/test_ipm.ipynb) for an example.
+Refer to [scripts/fisher/test_ipm.ipynb](scripts/fisher/test_ipm.ipynb) for an example.
 
 
 ## License

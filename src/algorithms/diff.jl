@@ -193,8 +193,7 @@ function __ces_eval_dual!(alg, fisher::FisherMarket)
     w = fisher.w
     alg.φ = min(
         alg.p' * fisher.q +
-        sum((w[i] / σ) * log(fisher.val_f[i]) for i in 1:fisher.m) +
-        sum(w[i] * log(w[i]) for i in 1:fisher.m),
+        sum(w[i] * log(fisher.val_u[i]) for i in 1:fisher.m),
         1e8
     )
 end

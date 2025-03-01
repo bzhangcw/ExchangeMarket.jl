@@ -118,5 +118,4 @@ function __pd!(alg, fisher::FisherMarket)
     alg.Δy .+= _cΔy
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
-    alg.μ = max(alg.μ, 1e-30)
 end

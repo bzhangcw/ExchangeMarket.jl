@@ -10,6 +10,18 @@ using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
+function add_nonzero_entries!(c, m, n, scale)
+    rows = 1:m
+    cols = rand(1:n, m)
+    vals = fill(scale, m)
+    c += sparse(rows, cols, vals, m, n)
+    cols = 1:n
+    rows = rand(1:m, n)
+    vals = fill(scale, n)
+    c += sparse(rows, cols, vals, m, n)
+    return c
+end
+
 function toy_fisher(ρ)
     m = 2
     n = 3
@@ -46,18 +58,18 @@ Base.@kwdef mutable struct FisherMarket{T}
     ∇u::Union{Function,Nothing} = nothing
     # - current value and gradient of utility
     val_u::Vector{T}
-    val_∇u::Matrix{T}
+    val_∇u::Union{Matrix{T},SparseMatrixCSC{T}}
     # - indirect utility function and gradient function of indirect utility
     f::Union{Function,Nothing} = nothing
     f∇f::Union{Function,Nothing} = nothing
 
     # - current value and gradient of indirect utility
     val_f::Vector{T}
-    val_∇f::Matrix{T}
-    val_Hf::Matrix{T}
+    val_∇f::Union{Matrix{T},SparseMatrixCSC{T}}
+    val_Hf::Union{Matrix{T},SparseMatrixCSC{T}}
 
     # - the vector c to parameterize the utility function
-    c::Matrix{T}
+    c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
     # CES parameter
     ρ::T
     σ::T
@@ -67,44 +79,35 @@ Base.@kwdef mutable struct FisherMarket{T}
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
-    FisherMarket(m, n; ρ=1.0,
+    function FisherMarket(m, n; ρ=1.0,
         c=nothing, w=nothing, seed=1,
         scale=1.0, sparsity=(2.0 / n),
-        bool_unit=true, bool_sparse=true,
+        bool_unit=true,
         bool_unit_wealth=true,
-    ) = (
-        Random.seed!(seed);
-        this = new{Float64}();
-        this.m = m;
-        this.n = n;
-        this.ρ = ρ;
-        this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ);
-        c = isnothing(c) ? scale * sprand(Float64, m, n, sparsity) : c;
+    )
+        ts = time()
+        println("FisherMarket initialization started...")
+        Random.seed!(seed)
+        this = new{Float64}()
+        this.m = m
+        this.n = n
+        this.ρ = ρ
+        this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ)
+        c = isnothing(c) ? scale * sprand(Float64, m, n, sparsity) : c
+        # ensure each row and column has at least one non-zero entry
+        c = add_nonzero_entries!(c, m, n, scale)
+        this.c = copy(c)
+        println("FisherMarket cost matrix initialized in $(time() - ts) seconds")
+        this.uₛ = (x, i) -> c[i, :]' * x
 
-        # ensure each row has at least one nonzero entry
-        for i in 1:m
-            if all(c[i, :] .== 0.0)
-                c[i, rand(1:size(c, 2))] = scale
-            end
-        end;
-        # ensure each column has at least one nonzero entry
-        for j in 1:n
-            if all(c[:, j] .== 0.0)
-                c[rand(1:size(c, 1)), j] = scale
-            end
-        end;
-        (!bool_sparse) && (c .+= scale);
-        this.c = c = sparse(c);
-        this.uₛ = (x, i) -> c[i, :]' * x;
-
-        this.q = bool_unit ? ones(n) : m * rand(n); # in O(m)
-        this.w = w = (isnothing(w) ? rand(m) : w) * scale;
-        this.w .= bool_unit_wealth ? w ./ sum(w) : w;
-        this.p = zeros(n);
-        this.x = zeros(m, n);
+        this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
+        this.w = w = (isnothing(w) ? rand(m) : w) * scale
+        this.w .= bool_unit_wealth ? w ./ sum(w) : w
+        this.p = zeros(n)
+        this.x = zeros(m, n)
         # sometimes use bids instead of allocation
-        this.b = zeros(m, n);
-        this.df = DataFrame();
+        this.b = zeros(m, n)
+        this.df = DataFrame()
 
         if ρ == 1.0
             # linear utility
@@ -144,15 +147,16 @@ Base.@kwdef mutable struct FisherMarket{T}
                 f = _cp
                 return f
             end
-        end;
+        end
 
-        this.val_u = zeros(m);
-        this.val_∇u = zeros(m, n);
-        this.val_f = zeros(m);
-        this.val_∇f = zeros(m, n);
-        this.val_Hf = zeros(m, n);
+        this.val_u = zeros(m)
+        this.val_∇u = zeros(m, n)
+        this.val_f = zeros(m)
+        this.val_∇f = zeros(m, n)
+        this.val_Hf = zeros(m, n)
+        println("FisherMarket initialized in $(time() - ts) seconds")
         return this
-    )
+    end
 end
 
 @doc """
@@ -178,10 +182,10 @@ function validate(fisher::FisherMarket, alg)
     fisher.df = df = DataFrame(
         :utility => fisher.val_u,
         :left_budget => w - x * p,
-        :left_budget_μ => w - x * p .+ μ * n,
     )
     println(__default_sep)
     @printf(" :problem size\n")
+
     @printf(" :    number of agents: %d\n", fisher.m)
     @printf(" :    number of goods: %d\n", fisher.n)
     @printf(" :    avg number of nonzero entries in c: %.4f\n",
@@ -194,7 +198,7 @@ function validate(fisher::FisherMarket, alg)
     println(__default_sep)
     _excess = (sum(fisher.x; dims=1)[:] - fisher.q) ./ maximum(fisher.q)
     @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
-    @printf(" :            social welfare:  %.4e\n", (log.(fisher.val_u))' * fisher.w)
+    @printf(" :            social welfare:  %.8e\n", (log.(fisher.val_u))' * fisher.w)
     println(__default_sep)
 end
 

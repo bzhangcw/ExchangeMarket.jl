@@ -114,11 +114,11 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
     fisher.val_u = value.(model[:ℓ] .^ (1 / ρ))
 end
 
-function create_dual_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true)
+function create_dual_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
     create_dual_ces_type_i(alg, fisher, ρ, bool_solve_p)
 end
 
-function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true)
+function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
     model = alg.model
     @variable(model, p[1:fisher.n] .>= 0)
     if !bool_solve_p
@@ -148,11 +148,12 @@ function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.
         1 / ρ * sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]) +
         fisher.w' * log.(fisher.w)
     )
-
-    JuMP.optimize!(model)
-    alg.p = value.(p)
-    fisher.x = first.(dual.(alg.model[:ξc]))
-    fisher.val_u = map(i -> sum(fisher.c[i, :] .* (fisher.x[i, :] .^ ρ))^(1 / ρ), 1:fisher.m)
+    if bool_optimize
+        JuMP.optimize!(model)
+        alg.p = value.(p)
+        fisher.x = first.(dual.(alg.model[:ξc]))
+        fisher.val_u = map(i -> sum(fisher.c[i, :] .* (fisher.x[i, :] .^ ρ))^(1 / ρ), 1:fisher.m)
+    end
     return
 end
 

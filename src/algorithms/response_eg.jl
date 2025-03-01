@@ -10,14 +10,13 @@ import MathOptInterface as MOI
 
 # --------------------------------------------------------------------------
 # solve the utility maximization problem by JuMP + optimizer
-#   induced from Eigenberg-Gale-type potentials
 #   for linear utility function
 # --------------------------------------------------------------------------
 @doc raw"""
-    solve the dual problem of the following form:
-    min - wᵢ log (vᵢ) + μ ⋅ logbar(sᵢ)
+solve the utility maximization problem by JuMP + optimizer
+  for linear utility function
 """
-function __conic_eigenberg_gale_response(;
+function __conic_log_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     fisher::FisherMarket=nothing,
@@ -37,10 +36,8 @@ function __conic_eigenberg_gale_response(;
     JuMP.optimize!(md)
     val_x = abs.(dual.(xc))
     return ResponseInfo(
-        val_x,
         objective_value(md),
         # the rest is dummy
-        val_x,
         ϵᵢ,
         1,
         md
@@ -48,17 +45,17 @@ function __conic_eigenberg_gale_response(;
 end
 
 EGConic = EigenbergGaleConicResponse = ResponseOptimizer(
-    __conic_eigenberg_gale_response,
+    __conic_log_response,
     :linconic,
     "EigenbergGaleConicResponse"
 )
 
-# --------------------------------------------------------------------------
-# solve the utility maximization problem by JuMP + optimizer
-#   induced from Eigenberg-Gale-type potentials
-#   for CES utility function of ρ < 1
-# --------------------------------------------------------------------------
-function __conic_eigenberg_gale_response_ces_type_i(;
+@doc raw"""
+  solve the utility maximization problem by JuMP + optimizer
+  for CES utility function of ρ < 1
+    use max log(uᵢ(xᵢ))
+"""
+function __conic_log_response_ces(;
     i::Int=1,
     p::Vector{T}=nothing,
     fisher::FisherMarket=nothing,
@@ -69,41 +66,41 @@ function __conic_eigenberg_gale_response_ces_type_i(;
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
 
-    @variable(md, λ)
-    @variable(md, logλ)
-    log_to_expcone!(λ, logλ, md)
+    @variable(md, u)
+    @variable(md, logu)
+    log_to_expcone!(u, logu, md)
 
+    @variable(md, x[1:fisher.n] >= 0)
+    @variable(md, ξ[1:fisher.n] >= 0)
+    # budget constraint
+    @constraint(md, budget, p' * x <= fisher.w[i])
+    # utility constraint
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    @variable(md, ξ[1:fisher.n])
-    @constraint(md, sum(ξ) <= 1)
-
+    _c = fisher.c[i, :] .^ (1 / ρ)
+    @constraint(md, sum(ξ) == u)
     @constraint(
         md,
         ξc[j=1:fisher.n],
-        [p[j], ξ[j], fisher.c[i, j] * λ] in MOI.PowerCone(ρ)
+        [_c[j] * x[j], u, ξ[j]] in MOI.PowerCone(ρ)
     )
-    @objective(md, Min,
-        -1 / ρ * fisher.w[i] * logλ
-    )
+    @objective(md, Max, logu)
 
     JuMP.optimize!(md)
-    val_x = first.(dual.(md[:ξc]))
+    fisher.x[i, :] .= value.(x)
     return ResponseInfo(
-        val_x,
         objective_value(md),
         # the rest is dummy
-        val_x,
         ϵᵢ,
         1,
         md
     )
 end
 
-EGConicCESTypeI = EigenbergGaleConicCESResponseTypeI = ResponseOptimizer(
-    __conic_eigenberg_gale_response_ces_type_i,
+EGConicCES = EigenbergGaleConicCESResponse = ResponseOptimizer(
+    __conic_log_response_ces,
     :linconic,
-    "EigenbergGaleConicCESResponseTypeI"
+    "EigenbergGaleConicCESResponse"
 )
 
 
@@ -112,14 +109,14 @@ EGConicCESTypeI = EigenbergGaleConicCESResponseTypeI = ResponseOptimizer(
 #   induced from Eigenberg-Gale-type potentials
 #   for CES utility function of ρ < 1
 # --------------------------------------------------------------------------
-function __analytic_eigenberg_gale_response_ac(;
+function __analytic_log_response_ac(;
     kwargs...
 )
     # keep skeleton only
 end
 
 EGConicAC = EigenbergGaleAnalyticalCESResponse = ResponseOptimizer(
-    __analytic_eigenberg_gale_response_ac,
+    __analytic_log_response_ac,
     :analytic,
     "EigenbergGaleAnalyticalCESResponse"
 )

@@ -12,7 +12,7 @@ greet() = print("Competitive Exchange Market!")
 # default settings
 # -----------------------------------------------------------------------
 __default_jump_solver = :mosek
-__default_sep = repeat("-", 100)
+__default_sep = repeat("-", 60)
 
 include("utils.jl")
 
@@ -39,7 +39,7 @@ include("algorithms/conic.jl")
 include("algorithms/hessianbar.jl")
 include("algorithms/mirror.jl")
 
-
+export LOGDIR, RESULTSDIR
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj
 export FisherMarket, validate
@@ -53,7 +53,7 @@ export MirrorDec
 export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
 export BR
 export PR # proportional response
-export EGConic, EGConicCES, EGConicCESTypeI, EGConicAC
+export EGConic, EGConicCES, EGConicAC
 export ONR
 
 # DR1: Diagonal + Rank-One

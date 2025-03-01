@@ -47,7 +47,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     # -------------------------------------------------------------------
     ts::Float64
     te::Float64
-    tₗ::Float64
+    tₗ::Float64 # time for collecting best responses
     t::Float64
     # iteration counters
     k::Int = 0
@@ -216,7 +216,6 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     # @assert all(alg.p .> 0)
     alg.te = time()
     alg.t = alg.te - alg.ts
-    alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
         # [alg.k log10(alg.μ) alg.φ (alg.gₙ / log(fisher.m + 1)) alg.gₜ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
@@ -234,7 +233,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     elseif alg.option_mu == :constant
         # do nothing
     elseif alg.option_mu == :predcorr
-        # do nothing
+        alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
     end
     return ϵ, _logline
 end
@@ -251,7 +250,7 @@ function opt!(
     reset::Bool=true,
     kwargs...
 ) where {T}
-    logfile = logfile === nothing ? open("log-hessianbar-$(current_date()).log", "a") : logfile
+    logfile = logfile === nothing ? open(joinpath(LOGDIR, "log-hessianbar-$(current_date()).log"), "a") : logfile
     ios = [stdout, logfile]
     printto(ios, __default_logger._blockheader)
     traj = []
@@ -303,11 +302,17 @@ function opt!(
 
 
     printto(ios, __default_logger._sep)
-    printto(ios, " ✓ final play")
-    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, all=true)
-    l = @sprintf(" finished in %d iterations", alg.k)
+    printto(ios, " ✓  final play")
+    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, all=true, timed=false)
+    l = @sprintf(" ✓  finished in        %4d steps", alg.k)
     printto(ios, l)
-    l = @sprintf("          in %.3f seconds", alg.t)
+    l = @sprintf("             in %.5e seconds", alg.t)
+    printto(ios, l)
+    l = @sprintf("  best-resp. in %.5e seconds ", alg.tₗ)
+    printto(ios, l)
+    l = @sprintf("            avg %.5e seconds ", alg.tₗ / alg.k)
+    printto(ios, l)
+    l = @sprintf("          usage %.2f%%", (alg.tₗ / alg.t) * 100)
     printto(ios, l)
     printto(ios, __default_logger._sep)
     flush.(ios)

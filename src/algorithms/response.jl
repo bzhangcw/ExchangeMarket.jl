@@ -8,10 +8,8 @@
 using JuMP
 import MathOptInterface as MOI
 mutable struct ResponseInfo
-    x::Vector{Float64}
     f_val::Float64
-    g_val::Vector{Float64}
-    ϵ::Float64
+    ϵ::Float64 # subproblem optimality, distance to best-response
     k::Int
     md::Any
 end
@@ -50,10 +48,8 @@ function __original_utility_response(;
     JuMP.optimize!(md)
     val_x = abs.(value.(x))
     return ResponseInfo(
-        val_x,
         objective_value(md),
         # the rest is dummy
-        val_x,
         ϵᵢ,
         1,
         md

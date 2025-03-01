@@ -12,8 +12,10 @@ function play!(
     alg::Algorithm, fisher::FisherMarket;
     ϵᵢ=1e-7,
     verbose=false,
-    all=false
+    all=false,
+    timed=true
 )
+    _ts = time()
     _k = Threads.Atomic{Int}(0)
     sample!(alg.sampler, fisher)
     Threads.@threads for i in (all ? (1:fisher.m) : alg.sampler.indices)
@@ -26,6 +28,7 @@ function play!(
             @warn "subproblem $i is not converged: ϵ: $(info.ϵ)"
         end
     end
+    timed && (alg.tₗ += time() - _ts)
     alg.kᵢ = _k.value / fisher.n
     verbose && validate(fisher, alg.μ)
 end
@@ -64,11 +67,11 @@ function solve_substep!(
     elseif alg.optimizer.style == :linconic
         info = solve!(
             alg.optimizer;
-            fisher=fisher, i=i, p=alg.p, μ=alg.μ, verbose=false
+            fisher=fisher, i=i, p=alg.p, μ=0.0, verbose=false
         )
-        fisher.x[i, :] .= info.x
-        fisher.val_u[i] = fisher.u(info.x, i)
-        fisher.val_∇u[i, :] = fisher.∇u(info.x, i)
+        fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
+        fisher.val_f[i] = fisher.val_u[i]^(1 / fisher.ρ)
+        fisher.val_∇u[i, :] = fisher.∇u(fisher.x[i, :], i)
         return info
     elseif alg.optimizer.style == :analytic
         if fisher.ρ == 1
@@ -85,9 +88,7 @@ function solve_substep!(
             fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
         end
         return ResponseInfo(
-            fisher.x[i, :],
             fisher.val_u[i],
-            [0.0],
             0.0,
             1,
             nothing
@@ -95,17 +96,24 @@ function solve_substep!(
     elseif alg.optimizer.style == :bids
         # @info "use bids to recover allocation"
         # use bids to recover allocation
-        fisher.x[i, :] = fisher.b[i, :] ./ alg.p
-        fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
-        fisher.val_f[i], fisher.val_∇f[i, :], fisher.val_Hf[i, :] = fisher.f∇f(alg.p, i)
-        cs = fisher.c[i, :] .* spow.(fisher.x[i, :], fisher.ρ)
-        sumcs = sum(cs)
-        # update bids
-        fisher.b[i, :] .= fisher.w[i] * cs ./ sumcs
+        if fisher.ρ >= 0
+            fisher.x[i, :] = fisher.b[i, :] ./ alg.p
+            fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
+            fisher.val_f[i], fisher.val_∇f[i, :], fisher.val_Hf[i, :] = fisher.f∇f(alg.p, i)
+            cs = fisher.c[i, :] .* spow.(fisher.x[i, :], fisher.ρ)
+            sumcs = sum(cs)
+            # update bids
+            fisher.b[i, :] .= fisher.w[i] * cs ./ sumcs
+        else
+            fisher.x[i, :] = fisher.b[i, :] ./ alg.p
+            fisher.val_u[i] = fisher.u(fisher.x[i, :], i)
+            fisher.val_f[i], fisher.val_∇f[i, :], fisher.val_Hf[i, :] = fisher.f∇f(alg.p, i)
+            cs = spow.(fisher.c[i, :] ./ spow.(alg.p, fisher.ρ), 1 / (1 - fisher.ρ))
+            sumcs = sum(cs)
+            fisher.b[i, :] .= fisher.w[i] * cs ./ sumcs
+        end
         return ResponseInfo(
-            fisher.x[i, :],
             fisher.val_u[i],
-            [0.0],
             0.0,
             1,
             nothing

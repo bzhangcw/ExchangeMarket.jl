@@ -222,7 +222,7 @@ function opt!(
         )
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
-        if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
+        if compute_stop(_k, alg, fisher)
             # if (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             printto(ios, __default_logger._logheadfo)
             printto(ios, _logline)

@@ -10,6 +10,8 @@ Base.@kwdef mutable struct StateInfo{T}
     ∇::Vector{T}
     # norm of scaled gradient
     gₙ::T
+    # distance to x*: ground truth allocation 
+    D::T
     # size of step
     dₙ::T
     # dual function value

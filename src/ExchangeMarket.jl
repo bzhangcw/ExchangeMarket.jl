@@ -53,7 +53,7 @@ export MirrorDec
 export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
 export BR
 export PR # proportional response
-export EGConic, EGConicCES, EGConicAC
+export EGConic, EGConicCES, CESAnalytic
 export ONR
 
 # DR1: Diagonal + Rank-One

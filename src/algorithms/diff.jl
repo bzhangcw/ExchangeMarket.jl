@@ -98,7 +98,7 @@ end
 # linear case; :usex mode
 # -----------------------------------------------------------------------
 function __linear_grad_fromx!(alg, fisher::FisherMarket)
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - sum(fisher.x[alg.sampler.indices, :]; dims=1)[:]
+    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - fisher.sumx
 end
 
 # compute Jacobian: -dx/dp
@@ -118,13 +118,13 @@ end
 function __linear_hess_fromx!(alg, fisher::FisherMarket; bool_dbg=false)
     X2 = fisher.x[alg.sampler.indices, :] .^ 2
     Di(i) = begin
-        X₂ = spdiagm(X2[i, :])
+        X₂ = spdiagm(X2[:, i])
         u = fisher.val_u[i]
-        c = fisher.val_∇u[i, :]
+        c = fisher.val_∇u[:, i]
         w = fisher.w[i]
         jxp = __linear_jacxp_fromx(X₂, u, c, w, alg.μ)
         if bool_dbg
-            Xi₂ = spdiagm(1 ./ X2[i, :])
+            Xi₂ = spdiagm(1 ./ X2[:, i])
             jpx = __linear_jacpx_fromx(Xi₂, u, c, w, alg.μ)
             @info "jacpx * jacxp - I" maximum(abs.(jpx * jxp - I))
         end
@@ -148,42 +148,17 @@ end
 # general CES case: ρ < 1
 # -----------------------------------------------------------------------
 function __ces_grad!(alg, fisher::FisherMarket; bool_dbg=false)
-    if alg.option_grad == :usex
-        __ces_grad_fromx!(alg, fisher; bool_dbg=bool_dbg)
-    else
-        __ces_grad_dual!(alg, fisher)
-    end
+    __ces_grad_dual!(alg, fisher)
 end
 
 function __ces_hess!(alg, fisher::FisherMarket; bool_dbg=false)
-    if alg.option_grad == :usex
-        __ces_hess_fromx!(alg, fisher; bool_dbg=bool_dbg)
-    else
-        __ces_hess_dual!(alg, fisher)
-    end
+    __ces_hess_dual!(alg, fisher)
 end
 
 function __ces_eval!(alg, fisher::FisherMarket)
-    if alg.option_grad == :usex
-        __ces_eval_fromx!(alg, fisher)
-    else
-        __ces_eval_dual!(alg, fisher)
-    end
+    __ces_eval_dual!(alg, fisher)
 end
 
-# -----------------------------------------------------------------------
-# general CES case: ρ < 1, :usex mode
-# -----------------------------------------------------------------------
-function __ces_grad_fromx!(alg, fisher::FisherMarket; bool_dbg=false)
-    @assert fisher.ρ < 1
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - sum(fisher.x[alg.sampler.indices, :]; dims=1)[:]
-    tmp = copy(alg.∇)
-    if bool_dbg
-        # compare with the result from :dual mode
-        __ces_grad!(alg, fisher)
-        @info "(q - ∑x) - (q - w/ν ∇ν)" maximum(abs.(alg.∇ - tmp))
-    end
-end
 
 # -----------------------------------------------------------------------
 # general CES case: ρ < 1, :dual mode
@@ -200,8 +175,7 @@ end
 
 function __ces_grad_dual!(alg, fisher::FisherMarket)
     @assert fisher.ρ < 1
-
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - sum(fisher.x[alg.sampler.indices, :]; dims=1)[:]
+    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - fisher.sumx
 end
 
 function __ces_hess_dual!(alg, fisher::FisherMarket)
@@ -213,7 +187,7 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
         # gamma = f1.w ./ sum(f1.w)
         # u = alg.p' ./ f1.w .* f1.x
         # ubar = (gamma'*u)[:]
-        pxbar = alg.p .* sum(fisher.x; dims=1)[:]
+        pxbar = alg.p .* sum(fisher.x; dims=2)[:]
         # -------------------------------------------------------------------
         # diagonal + rank-one: save unregularized part
         #   of P*(∇^2f)*P
@@ -228,9 +202,15 @@ function __compute_exact_hess!(alg, fisher::FisherMarket)
     σ = fisher.σ
     w = fisher.w
     _Hi = (i) -> begin
-        _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[i, :]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[i, :] * fisher.val_∇f[i, :]'
+        _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[:, i]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[:, i] * fisher.val_∇f[:, i]'
         return _H .* (w[i] / σ)
     end
     alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
     @info "use exact Hessian"
+end
+
+function __compute_exact_affine_scaled_hessop!(buff, alg, fisher::FisherMarket, v)
+    b = alg.p .* fisher.x
+    _uu = sum(v .* b; dims=2)
+    buff .= _uu .* (fisher.σ + 1) - fisher.σ * b * (b' ./ fisher.w * v)
 end

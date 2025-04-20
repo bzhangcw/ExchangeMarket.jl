@@ -22,6 +22,7 @@ function add_nonzero_entries!(c, m, n, scale)
     return c
 end
 
+
 function toy_fisher(ρ)
     m = 2
     n = 3
@@ -39,7 +40,7 @@ spow(x, y) = x == 0.0 ? 0.0 : x^y
 Base.@kwdef mutable struct FisherMarket{T}
     m::Int # number of agents
     n::Int # number of goods
-    x::Matrix{T} # allocation
+    x::Union{Matrix{T},SparseMatrixCSC{T}} # allocation
     p::Vector{T} # price
     w::Vector{T} # wealth
     q::Vector{T} # goods
@@ -70,6 +71,8 @@ Base.@kwdef mutable struct FisherMarket{T}
 
     # - the vector c to parameterize the utility function
     c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
+    # sum of x (for a limited samples)
+    sumx::Vector{T}
     # CES parameter
     ρ::T
     σ::T
@@ -84,6 +87,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         scale=1.0, sparsity=(2.0 / n),
         bool_unit=true,
         bool_unit_wealth=true,
+        bool_ensure_nz=true
     )
         ts = time()
         println("FisherMarket initialization started...")
@@ -93,56 +97,59 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.n = n
         this.ρ = ρ
         this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ)
-        c = isnothing(c) ? scale * sprand(Float64, m, n, sparsity) : c
+        c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
         # ensure each row and column has at least one non-zero entry
-        c = add_nonzero_entries!(c, m, n, scale)
+        if bool_ensure_nz
+            c = add_nonzero_entries!(c, n, m, scale)
+        end
         this.c = copy(c)
         println("FisherMarket cost matrix initialized in $(time() - ts) seconds")
-        this.uₛ = (x, i) -> c[i, :]' * x
+        this.uₛ = (x, i) -> c[:, i]' * x
 
         this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
         this.w = w = (isnothing(w) ? rand(m) : w) * scale
         this.w .= bool_unit_wealth ? w ./ sum(w) : w
         this.p = zeros(n)
-        this.x = zeros(m, n)
+        this.x = similar(c)
+        this.sumx = zeros(n)
         # sometimes use bids instead of allocation
-        this.b = zeros(m, n)
+        this.b = similar(c)
         this.df = DataFrame()
 
         if ρ == 1.0
             # linear utility
             this.u = this.uₛ
-            this.∇u = (x, i) -> c[i, :]
+            this.∇u = (x, i) -> c[:, i]
             this.f = (p, i) -> begin
-                w[i] * maximum(c[i, :] ./ p)
+                w[i] * maximum(c[:, i] ./ p)
             end
             this.f∇f = (p, i) -> begin
-                f = w[i] * maximum(c[i, :] ./ p)
+                f = w[i] * maximum(c[:, i] ./ p)
                 ∇f = nothing # nonsmooth
                 return f, ∇f
             end
         else
             # CES utility, ρ < 1
-            this.u = (x, i) -> sum(c[i, :] .* spow.(x, ρ))^(1 / ρ)
-            this.∇u = (x, i) -> sum(c[i, :] .* spow.(x, ρ))^(1 / ρ - 1) .*
-                                spow.(x, ρ - 1) .* c[i, :]
+            this.u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ)
+            this.∇u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ - 1) .*
+                                spow.(x, ρ - 1) .* c[:, i]
 
             # the derivatives respect to p
             # ignore outer power and coeff
             # only compute
             # r := c^(1+σ)'p^(-σ)
             this.f∇f = (p, i) -> begin
-                _cs = c[i, :] .^ (1 + σ)
-                _ps = p .^ (-σ)
+                _cs = spow.(c[:, i], 1 + σ)
+                _ps = spow.(p, -σ)
                 _cp = _cs' * _ps
                 f = _cp
-                ∇f = -σ .* _cs .* (p .^ (-σ - 1))
-                Hf = σ * (σ + 1) .* _cs .* (p .^ (-σ - 2))
+                ∇f = -σ .* _cs .* spow.(p, (-σ - 1))
+                Hf = σ * (σ + 1) .* _cs .* (spow.(p, -σ - 2))
                 return f, ∇f, Hf
             end
             this.f = (p, i) -> begin
-                _cs = c[i, :] .^ (1 + σ)
-                _ps = p .^ (-σ)
+                _cs = spow.(c[:, i], (1 + σ))
+                _ps = spow.(p, (-σ))
                 _cp = _cs' * _ps
                 f = _cp
                 return f
@@ -150,10 +157,10 @@ Base.@kwdef mutable struct FisherMarket{T}
         end
 
         this.val_u = zeros(m)
-        this.val_∇u = zeros(m, n)
+        this.val_∇u = similar(c)
         this.val_f = zeros(m)
-        this.val_∇f = zeros(m, n)
-        this.val_Hf = zeros(m, n)
+        this.val_∇f = similar(c)
+        this.val_Hf = similar(c)
         println("FisherMarket initialized in $(time() - ts) seconds")
         return this
     end
@@ -181,7 +188,7 @@ function validate(fisher::FisherMarket, alg)
 
     fisher.df = df = DataFrame(
         :utility => fisher.val_u,
-        :left_budget => w - x * p,
+        :left_budget => w - x' * p,
     )
     println(__default_sep)
     @printf(" :problem size\n")
@@ -196,7 +203,7 @@ function validate(fisher::FisherMarket, alg)
     println(__default_sep)
     println(first(df, 10))
     println(__default_sep)
-    _excess = (sum(fisher.x; dims=1)[:] - fisher.q) ./ maximum(fisher.q)
+    _excess = (sum(fisher.x; dims=2)[:] - fisher.q) ./ maximum(fisher.q)
     @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
     @printf(" :            social welfare:  %.8e\n", (log.(fisher.val_u))' * fisher.w)
     println(__default_sep)

@@ -1,5 +1,6 @@
 bool_multiple = false
 bool_square = false
+ξ = 0.99
 
 if bool_multiple
     # Gjerstad's counter-example
@@ -27,9 +28,9 @@ else
         b = rand(m, n)
         b = b ./ sum(b; dims=1)
     end
-    ρ = 0.5
+    ρ = -0.3
     γ = 1e3
-    f0 = FisherMarket(m, n; ρ=ρ, bool_unit=true, sparsity=0.95)
+    f0 = FisherMarket(m, n; ρ=ρ, bool_unit=true, sparsity=ξ)
 end
 bool_run_conic = false
 
@@ -49,22 +50,22 @@ __xx(p) = begin
     _g = zeros(f0.m, f0.n)
     _x = zeros(f0.m, f0.n)
     for i in 1:f0.m
-        _f[i], _g[i, :], _ = f0.f∇f(p, i)
-        _x[i, :] = -_g[i, :] / _f[i] / f0.σ * p'b[i, :]
+        _f[i], _g[:, i], _ = f0.f∇f(p, i)
+        _x[:, i] = -_g[:, i] / _f[i] / f0.σ * p'b[:, i]
     end
     return _x
 end
 xp(p) = begin
-    return hcat([p'b[i, :] * (c[i, :] ./ p) .^ (1 + σ) / sum(p[j]^(-σ) * c[i, j]^(1 + σ) for j in 1:n) for i in 1:m]...)'
+    return hcat([p'b[:, i] * (c[:, i] ./ p) .^ (1 + σ) / sum(p[j]^(-σ) * c[i, j]^(1 + σ) for j in 1:n) for i in 1:m]...)'
 end
 xw(p) = begin
-    return hcat([_w[i] * (c[i, :] ./ p) .^ (1 + σ) / sum(p[j]^(-σ) * c[i, j]^(1 + σ) for j in 1:n) for i in 1:m]...)'
+    return hcat([_w[i] * (c[:, i] ./ p) .^ (1 + σ) / sum(p[j]^(-σ) * c[i, j]^(1 + σ) for j in 1:n) for i in 1:m]...)'
 end
 
 # only compute i-th BR map
 __x(p, i) = begin
     _f, _g, _ = f0.f∇f(p, i)
-    _x = -_g / _f / f0.σ * p'b[i, :]
+    _x = -_g / _f / f0.σ * p'b[:, i]
     return _x
 end
 # only compute i-th BR map, but in fisher case
@@ -78,7 +79,7 @@ __Jx(p, i) = begin
     return ForwardDiff.jacobian(_xi, p)
 end
 __tJx(p, i) = begin
-    _xi(p) = b[i, :] .* p - __x(p, i) .* p
+    _xi(p) = b[:, i] .* p - __x(p, i) .* p
     return ForwardDiff.jacobian(_xi, p)
 end
 
@@ -89,10 +90,10 @@ jpsi(p) = begin
     _g = zeros(f0.m, f0.n)
     _J = zeros(f0.n, f0.n)
     for i in 1:f0.m
-        _f[i], _g[i, :], Hi = f0.f∇f(p, i)
+        _f[i], _g[:, i], Hi = f0.f∇f(p, i)
         _J += (
-            -p'b[i, :] / f0.σ / _f[i] * diagm(Hi) +
-            p'b[i, :] / f0.σ / (_f[i]^2) * _g[i, :] * _g[i, :]'
+            -p'b[:, i] / f0.σ / _f[i] * diagm(Hi) +
+            p'b[:, i] / f0.σ / (_f[i]^2) * _g[:, i] * _g[:, i]'
         )
     end
     return _J
@@ -102,11 +103,11 @@ jx(p) = begin
     _g = zeros(f0.m, f0.n)
     _J = zeros(f0.n, f0.n)
     for i in 1:f0.m
-        _f[i], _g[i, :], Hi = f0.f∇f(p, i)
+        _f[i], _g[:, i], Hi = f0.f∇f(p, i)
         _J += (
-            -p'b[i, :] / f0.σ / _f[i] * diagm(Hi) +
-            p'b[i, :] / f0.σ / (_f[i]^2) * _g[i, :] * _g[i, :]' -
-            _g[i, :] / _f[i] / f0.σ * b[i, :]'
+            -p'b[:, i] / f0.σ / _f[i] * diagm(Hi) +
+            p'b[:, i] / f0.σ / (_f[i]^2) * _g[:, i] * _g[:, i]' -
+            _g[:, i] / _f[i] / f0.σ * b[:, i]'
         )
     end
     return _J
@@ -152,7 +153,7 @@ __tx(d, i) = begin
 end
 
 __tJxd(d, i) = begin
-    _xi(d) = b[i, :] .* d - __tx(d, i)
+    _xi(d) = b[:, i] .* d - __tx(d, i)
     return ForwardDiff.jacobian(_xi, d)
 end
 

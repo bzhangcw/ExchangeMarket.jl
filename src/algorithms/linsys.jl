@@ -4,14 +4,26 @@ function linsolve!(alg, fisher::FisherMarket)
         if alg.linsys == :none
             __direct!(alg, fisher)
         elseif alg.linsys == :dr1
-            __dr1!(alg, fisher)
+            __dr1af!(alg, fisher)
         else
         end
     elseif alg.option_step == :primal_dual
         if alg.linsys == :dr1
-            __pd!(alg, fisher)
+            __dr1pd!(alg, fisher)
         else
-            error("unknown linear system solver: $(alg.linsys)")
+            error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
+        end
+    elseif alg.option_step == :damped_ns
+        if alg.linsys == :dr1
+            __dr1damped!(alg, fisher)
+        else
+            error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
+        end
+    elseif alg.option_step == :homotopy
+        if alg.linsys == :dr1
+            __dr1homo!(alg, fisher)
+        else
+            error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
         end
     else
         error("unknown step type: $(alg.option_step)")
@@ -23,7 +35,12 @@ function __direct!(alg, fisher::FisherMarket)
     alg.Δ .= -(alg.H + alg.μ * spdiagm(invp .^ 2)) \ (alg.∇ - alg.μ * invp)
 end
 
+@doc raw"""
+    smw_dr1!(Ha::SMWDR1)
 
+    Compute the inverse operator of the Hessian using the Sherman-Morrison-Woodbury formula.
+    inv(H)(x) = ...
+"""
 function smw_dr1!(Ha::SMWDR1)
     # Compute D⁻¹*a
     Dinva = Ha.a ./ Ha.d
@@ -35,12 +52,12 @@ function smw_dr1!(Ha::SMWDR1)
 end
 
 @doc raw"""
-    __dr1(alg, fisher::FisherMarket)
+    __dr1pd!(alg, fisher::FisherMarket)
 
     Diagonal + Rank-One method for linear system solver.
         applied in :affine_scaling mode
 """
-function __dr1!(alg, fisher::FisherMarket)
+function __dr1af!(alg, fisher::FisherMarket)
     # -------------------------------------------------------------------
     # solve
     # -------------------------------------------------------------------
@@ -50,12 +67,12 @@ function __dr1!(alg, fisher::FisherMarket)
 end
 
 @doc raw"""
-    __pd(alg, fisher::FisherMarket)
+    __dr1pd!(alg, fisher::FisherMarket)
 
     Solve the linear system in the primal-dual update
         the inverse Hessian is computed by DR1 update.
 """
-function __pd!(alg, fisher::FisherMarket)
+function __dr1pd!(alg, fisher::FisherMarket)
     # rescale back to the original scale
     n = length(alg.p)
     invp = 1 ./ alg.p
@@ -81,7 +98,6 @@ function __pd!(alg, fisher::FisherMarket)
 
     # compute the primal-dual update
     g = alg.Ha.Hi(ξ₁ + ξ₃ .* invp)
-
     alg.Δy = -inv(A * GA) * (A * g - ξ₂)
     alg.Δ = -g - alg.Ha.Hi(A' * alg.Δy)
     alg.Δs = -invp .* ξ₃ - Σ .* alg.Δ
@@ -118,4 +134,28 @@ function __pd!(alg, fisher::FisherMarket)
     alg.Δy .+= _cΔy
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
+end
+
+
+function __dr1damped!(alg, fisher::FisherMarket)
+    # -------------------------------------------------------------------
+    # solve
+    # -------------------------------------------------------------------
+    smw_dr1!(alg.Ha)
+
+    # damped Newton step
+    alg.Δ .= -alg.p .* alg.Ha.Hi(alg.p .* alg.∇)
+end
+
+function __dr1homo!(alg, fisher::FisherMarket)
+    # -------------------------------------------------------------------
+    # solve
+    # -------------------------------------------------------------------
+    smw_dr1!(alg.Ha)
+    γ = 0.158
+    alg.k == 0 && (alg.∇₀ .= alg.∇)
+    d₀ = alg.p .* alg.Ha.Hi(alg.p .* alg.∇₀)
+    denom = sqrt(abs(alg.∇' * d₀))
+    alg.μ = max(alg.μ - γ / denom, 0)
+    alg.Δ .= -alg.p .* alg.Ha.Hi(alg.p .* (alg.∇ - alg.μ * alg.∇₀))
 end

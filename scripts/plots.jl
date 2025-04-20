@@ -42,6 +42,6 @@ function generate_empty(; use_html=__backend == :html, title="", shape=:wide, se
         legendfonthalign=:left,
         title=title,
         linewidth=2,
-        size=shape == :wide ? (900, 600) : (700, 600),
+        size=shape == :wide ? (900, 600) : (600, 500),
     )
 end

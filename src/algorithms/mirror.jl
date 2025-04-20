@@ -181,6 +181,7 @@ function opt!(
     loginterval=20,
     logfile=nothing,
     reset::Bool=true,
+    ground_truth::Union{Matrix{T},Nothing}=nothing,
     kwargs...
 ) where {T}
     ios = logfile === nothing ? [stdout] : [stdout, logfile]
@@ -215,11 +216,16 @@ function opt!(
     printto(ios, __default_logger._sep)
     _k = 0
     for _ in 1:maxiter
-        ϵ, _logline = iterate!(alg, fisher)
+        _D = 0.0
+        if !isnothing(ground_truth)
+            # x - x*
+            _D = sum(abs.(fisher.x - ground_truth))
+        end
         keep_traj && push!(
             traj,
-            StateInfo(alg.k, alg.p, alg.∇, alg.gₙ, alg.dₙ, alg.φ, alg.t)
+            StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
+        _, _logline = iterate!(alg, fisher)
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if compute_stop(_k, alg, fisher)

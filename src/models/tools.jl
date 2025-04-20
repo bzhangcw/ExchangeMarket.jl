@@ -84,3 +84,14 @@ function test_powerp_to_cone()
     optimize!(model)
     @show value(t) value(x)
 end
+
+
+function drop_empty(c::SparseMatrixCSC)
+    # sum over rows/cols to see which have any nonzeros
+    row_sums = sum(abs.(c), dims=2)[:]    # Vector of length m
+    col_sums = sum(abs.(c), dims=1)[1, :]  # Vector of length n
+
+    rows = findall(!iszero, row_sums)
+    cols = findall(!iszero, col_sums)
+    return c[rows, cols], rows, cols
+end

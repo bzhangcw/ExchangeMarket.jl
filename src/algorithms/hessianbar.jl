@@ -29,6 +29,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     φ::T
     # gradient and norm of scaled gradient
     ∇::Vector{T}
+    ∇₀::Vector{T}
     gₙ::T
     gₜ::T
     dₙ::T
@@ -85,7 +86,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         maxiter::Int=1000,
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
-        optimizer::ResponseOptimizer=OptimjlNewtonResponse,
+        optimizer::ResponseOptimizer=CESAnalytic,
         option_grad::Symbol=:dual,
         option_step::Symbol=:affine_scaling,
         option_mu::Symbol=:normal,
@@ -105,6 +106,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.z = z
         this.μ = μ
         this.∇ = zeros(n)
+        this.∇₀ = zeros(n)
         this.H = spzeros(n, n)
         this.Ha = SMWDR1(n)
         this.ts = time()
@@ -130,7 +132,9 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         else
             this.s = copy(this.p)
         end
-        this.μ = this.p' * this.s / this.n
+
+        (this.option_mu != :nothing) && (this.μ = this.p' * this.s / this.n)
+
         this.ps = zeros(n)
         this.Δs = zeros(n)
 
@@ -180,7 +184,9 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 
     # -------------------------------------------------------------------
     # choice for Newton step of price
+    #   I. methods that use the canonical logarithmic barrier 
     # -------------------------------------------------------------------
+    #  B(p) = -<log(p), 1>
     if alg.option_step == :affine_scaling
         if !isnothing(alg.linconstr)
             @warn "linear constraint is not supported for affine scaling"
@@ -194,14 +200,16 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         αₘ = min(proj.(-(alg.pb) ./ alg.Δ)..., 1.0)
         alg.α = α = αₘ * 0.9995
         alg.p .= alg.pb .+ α * alg.Δ
+
     elseif alg.option_step == :primal_dual
         @debug "use primal-dual step"
         alg.ps .= alg.s
         alg.py .= alg.y
 
         linsolve!(alg, fisher)
-
+        # standard ℓ₂ norm
         alg.gₙ = gₙ = norm(alg.∇)
+        # local dual norm
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
 
@@ -213,12 +221,43 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.y .= alg.py .+ α * alg.Δy
     end
 
+    # -------------------------------------------------------------------
+    # II. methods that do not use the canonical logarithmic barrier 
+    if alg.option_step == :damped_ns
+        @debug """
+            use damped Newton step
+            this is very slow.
+        """
+
+        linsolve!(alg, fisher)
+        alg.gₙ = gₙ = norm(alg.∇)
+        alg.gₜ = gₜ = norm(alg.p .* alg.∇)
+        alg.dₙ = dₙ = norm(alg.Δ)
+
+        # newton decrement
+        λ = sqrt(-alg.∇' * alg.Δ)
+        # update price
+        alg.α = α = αₘ = 1.0 / (λ + 1.0)
+        # alg.α = α = αₘ = 0.999
+        alg.p .= alg.pb .+ α * alg.Δ
+
+    elseif alg.option_step == :homotopy
+        linsolve!(alg, fisher)
+        alg.gₙ = gₙ = norm(alg.∇)
+        alg.gₜ = gₜ = norm(alg.p .* alg.∇)
+        alg.dₙ = dₙ = norm(alg.Δ)
+
+        # update price
+        alg.α = α = αₘ = 1.0
+        # alg.α = α = αₘ = 0.999
+        alg.p .= alg.pb .+ α * alg.Δ
+    end
+
     # @assert all(alg.p .> 0)
     alg.te = time()
     alg.t = alg.te - alg.ts
     _logline = produce_log(
         __default_logger,
-        # [alg.k log10(alg.μ) alg.φ (alg.gₙ / log(fisher.m + 1)) alg.gₜ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
         [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
     )
     alg.k += 1
@@ -228,11 +267,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     if alg.option_mu == :normal
         alg.μ *= (1 - min(alg.α * 0.9, 0.98))
         alg.μ = max(alg.μ, 1e-20)
-    elseif alg.option_mu == :adaptive
-        alg.μ = 1e-6
-    elseif alg.option_mu == :constant
-        # do nothing
-    elseif alg.option_mu == :predcorr
+    elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
     end
     return ϵ, _logline
@@ -248,6 +283,7 @@ function opt!(
     loginterval=1,
     logfile=nothing,
     reset::Bool=true,
+    ground_truth::Union{Matrix{T},Nothing}=nothing,
     kwargs...
 ) where {T}
     logfile = logfile === nothing ? open(joinpath(LOGDIR, "log-hessianbar-$(current_date()).log"), "a") : logfile
@@ -286,11 +322,16 @@ function opt!(
     flush.(ios)
     _k = 0
     while true
-        ϵ, _logline = iterate!(alg, fisher)
+        _D = 0.0
+        if !isnothing(ground_truth)
+            # x - x*
+            _D = sum(abs.(fisher.x - ground_truth))
+        end
         keep_traj && push!(
             traj,
-            StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, alg.dₙ, alg.φ, alg.t)
+            StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
+        _, _logline = iterate!(alg, fisher)
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol^2) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)

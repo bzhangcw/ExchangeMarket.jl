@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------
 using Printf, LaTeXStrings, Dates
 
-current_date() = Dates.format(Dates.now(), "yyyymmddHHMM")
+current_date() = Dates.format(Dates.now(), "yyyymmddHH")
 
 LOGDIR = joinpath(@__DIR__, "../logs")
 RESULTSDIR = joinpath(@__DIR__, "../results", "$(current_date())")

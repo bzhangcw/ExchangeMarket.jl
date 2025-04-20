@@ -32,7 +32,7 @@ function __conic_log_response(;
     log_to_expcone!.(s, logs, md)
     log_to_expcone!(v, logv, md)
     @objective(md, Min, -fisher.w[i] * logv - μ * sum(logs))
-    @constraint(md, xc, s + v .* fisher.c[i, :] - p .== 0)
+    @constraint(md, xc, s + v .* fisher.c[:, i] - p .== 0)
     JuMP.optimize!(md)
     val_x = abs.(dual.(xc))
     return ResponseInfo(
@@ -77,7 +77,7 @@ function __conic_log_response_ces(;
     # utility constraint
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    _c = fisher.c[i, :] .^ (1 / ρ)
+    _c = fisher.c[:, i] .^ (1 / ρ)
     @constraint(md, sum(ξ) == u)
     @constraint(
         md,
@@ -87,7 +87,7 @@ function __conic_log_response_ces(;
     @objective(md, Max, logu)
 
     JuMP.optimize!(md)
-    fisher.x[i, :] .= value.(x)
+    fisher.x[:, i] .= value.(x)
     return ResponseInfo(
         objective_value(md),
         # the rest is dummy
@@ -115,9 +115,9 @@ function __analytic_log_response_ac(;
     # keep skeleton only
 end
 
-EGConicAC = EigenbergGaleAnalyticalCESResponse = ResponseOptimizer(
+CESAnalytic = ResponseOptimizer(
     __analytic_log_response_ac,
     :analytic,
-    "EigenbergGaleAnalyticalCESResponse"
+    "CESAnalytic"
 )
 

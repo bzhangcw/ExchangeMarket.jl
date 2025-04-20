@@ -46,7 +46,7 @@ function __create_primal(alg::Conic, fisher::FisherMarket)
     @variable(model, ℓ[1:m])
     @constraint(model, limit, x' * ones(m) .<= q)
     for i in 1:m
-        @constraint(model, ℓ[i] == u(x[i, :], i))
+        @constraint(model, ℓ[i] == u(x[:, i], i))
         log_to_expcone!(ℓ[i], v[i], model)
     end
     @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]))
@@ -69,11 +69,11 @@ function __create_dual(alg::Conic, fisher::FisherMarket)
     log_to_expcone!.(λ, logλ, model)
     @objective(model, Min, p' * fisher.q - sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]))
 
-    @constraint(model, xc[i=1:fisher.m], s[i, :] + λ[i] * fisher.c[i, :] - p .== 0)
+    @constraint(model, xc[i=1:fisher.m], s[:, i] + λ[i] * fisher.c[:, i] - p .== 0)
     JuMP.optimize!(model)
     alg.p = value.(p)
     fisher.x = hcat([abs.(dual.(xc[i])) for i in 1:fisher.m]...)'
-    fisher.val_u = map(i -> fisher.u(fisher.x[i, :], i), 1:fisher.m)
+    fisher.val_u = map(i -> fisher.u(fisher.x[:, i], i), 1:fisher.m)
     return
 end
 
@@ -100,7 +100,7 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
     @variable(model, ℓ[1:m])
     @constraint(model, limit, x' * ones(m) .<= q)
     for i in 1:m
-        @constraint(model, ℓ[i] == sum(fisher.c[i, :] .* xp[i, :]))
+        @constraint(model, ℓ[i] == sum(fisher.c[:, i] .* xp[:, i]))
         log_to_expcone!(ℓ[i], v[i], model)
     end
     @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]) / ρ) - fisher.w' * log.(fisher.w)
@@ -136,7 +136,7 @@ function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.
     @constraint(
         model,
         λc[i=1:fisher.m],
-        sum(ξ[i, :]) <= 1
+        sum(ξ[:, i]) <= 1
     )
     @constraint(
         model,
@@ -152,7 +152,7 @@ function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.
         JuMP.optimize!(model)
         alg.p = value.(p)
         fisher.x = first.(dual.(alg.model[:ξc]))
-        fisher.val_u = map(i -> sum(fisher.c[i, :] .* (fisher.x[i, :] .^ ρ))^(1 / ρ), 1:fisher.m)
+        fisher.val_u = map(i -> sum(fisher.c[:, i] .* (fisher.x[:, i] .^ ρ))^(1 / ρ), 1:fisher.m)
     end
     return
 end
@@ -193,7 +193,7 @@ function create_dual_ces_type_ii(alg::Conic, fisher::FisherMarket, ρ::Float64=0
     JuMP.optimize!(model)
     alg.p = value.(p)
     fisher.x = first.(dual.(alg.model[:ξc]))
-    fisher.val_u = map(i -> sum(fisher.c[i, :] .* (fisher.x[i, :] .^ ρ))^(1 / ρ), 1:fisher.m)
+    fisher.val_u = map(i -> sum(fisher.c[:, i] .* (fisher.x[:, i] .^ ρ))^(1 / ρ), 1:fisher.m)
     return
 end
 

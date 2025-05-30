@@ -109,10 +109,10 @@ end
 function iterate!(alg::MirrorDec, fisher::FisherMarket)
     alg.pb .= alg.p
     if (alg.k == 0) && (alg.optimizer.style == :bids)
-        fisher.b .= (1 ./ alg.p') .* fisher.x
+        fisher.b .= fisher.x .* (1 ./ alg.p)
         sumb = sum(fisher.b, dims=2)[:]
         fisher.b ./= sumb
-        fisher.b .*= fisher.w
+        fisher.b .*= fisher.w'
     end
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual]
@@ -132,7 +132,7 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
     # compute mirror-descent step
     if alg.option_stepsize == :cc13
         # use cc'13 step size, see ref[1]
-        alg.α .= 5 * max.(fisher.q, sum(fisher.x, dims=1)[:])
+        alg.α .= 5 * max.(fisher.q, sum(fisher.x, dims=2)[:])
     elseif alg.option_stepsize == :cc08
     else
         throw(ArgumentError("""
@@ -146,10 +146,10 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
         alg.dₙ = dₙ = norm(dp)
     elseif alg.option_step == :shmyrev
         if alg.optimizer.style == :bids
-            alg.p .= sum(fisher.b, dims=1)[:]
+            alg.p .= sum(fisher.b, dims=2)[:]
             alg.dₙ = norm(alg.p - alg.pb)
         else
-            dp = sum(fisher.x, dims=1)[:]
+            dp = sum(fisher.x, dims=2)[:]
             alg.p .= alg.pb .* dp
             alg.dₙ = dₙ = norm(dp)
         end

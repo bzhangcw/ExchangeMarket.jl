@@ -56,8 +56,8 @@ export PR # proportional response
 export EGConic, EGConicCES, CESAnalytic
 export ONR
 
-# DR1: Diagonal + Rank-One
-export SMWDR1, smw_dr1!
+# DRq: Diagonal + Rank-q
+export SMWDRq, smw_drq!, update_cluster_map!
 
 # randomization utilities
 export NullSampler, BatchSampler

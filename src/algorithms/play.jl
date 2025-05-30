@@ -18,6 +18,9 @@ function play!(
     _ts = time()
     _k = Threads.Atomic{Int}(0)
     sample!(alg.sampler, fisher)
+    # @note:
+    #  this will not work for sparse ones
+    #  todo: maybe modify the nzval inplace.
     Threads.@threads for i in (all ? (1:fisher.m) : alg.sampler.indices)
         info = solve_substep!(
             alg, fisher, i;

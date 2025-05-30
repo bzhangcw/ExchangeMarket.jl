@@ -2,6 +2,12 @@
 # Hessian Barrier Method (Auction)
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
+# @reference:
+# [1] C Zhang, C He, B Jiang, Y Ye, Price updates by interior-point algorithms, working paper (2025)
+# [2] Dvurechensky, P., Nesterov, Y.: Improved global performance guarantees of second-order methods in convex minimization, http://arxiv.org/abs/2408.11022, (2024)
+# [3] Nesterov, Y.: Lectures on Convex Optimization. Springer International Publishing, Cham (2018)
+# [4] Nesterov, Y., Nemirovskii, A.: Interior-Point Polynomial Algorithms in Convex Programming. Society for Industrial and Applied Mathematics (1994)
+
 # -----------------------------------------------------------------------
 
 using LinearAlgebra, SparseArrays
@@ -41,7 +47,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     α::T
     # Hessian
     H::SparseMatrixCSC{T,Int}
-    Ha::SMWDR1{T}
+    Ha::SMWDRq{T}
 
     # -------------------------------------------------------------------
     # timers, tolerances, counters
@@ -88,10 +94,10 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         tol::Float64=1e-6,
         optimizer::ResponseOptimizer=CESAnalytic,
         option_grad::Symbol=:dual,
-        option_step::Symbol=:affine_scaling,
+        option_step::Symbol=:affinesc,
         option_mu::Symbol=:normal,
         linconstr::Union{LinearConstr,Nothing}=nothing,
-        linsys::Symbol=:dr1,
+        linsys::Symbol=:DRq,
         sampler::Sampler=NullSampler(),
         # optional; needed if use primal-dual step
         s::Union{Vector{T},Nothing}=nothing,
@@ -108,7 +114,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.∇ = zeros(n)
         this.∇₀ = zeros(n)
         this.H = spzeros(n, n)
-        this.Ha = SMWDR1(n)
+        this.Ha = SMWDRq(n, 1, m)
         this.ts = time()
         this.maxiter = maxiter
         this.maxtime = maxtime
@@ -116,6 +122,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.k = 0
         this.kᵢ = 0.0
         this.optimizer = optimizer
+        # options
         this.option_grad = option_grad
         this.option_step = option_step
         this.option_mu = option_mu
@@ -159,6 +166,7 @@ end
 # -----------------------------------------------------------------------
 function iterate!(alg::HessianBar, fisher::FisherMarket)
     alg.pb .= alg.p
+    # @note: possible initialization
     # if (alg.k == 0)
     #     fisher.b .= (1 ./ alg.p') .* fisher.x
     #     sumb = sum(fisher.b, dims=2)[:]
@@ -184,10 +192,11 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 
     # -------------------------------------------------------------------
     # choice for Newton step of price
-    #   I. methods that use the canonical logarithmic barrier 
+    #   I. methods that use the standard logarithmic barrier B
     # -------------------------------------------------------------------
     #  B(p) = -<log(p), 1>
-    if alg.option_step == :affine_scaling
+    if alg.option_step == :affinesc
+        @debug "use (primal) affine scaling step"
         if !isnothing(alg.linconstr)
             @warn "linear constraint is not supported for affine scaling"
         end
@@ -201,7 +210,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.α = α = αₘ * 0.9995
         alg.p .= alg.pb .+ α * alg.Δ
 
-    elseif alg.option_step == :primal_dual
+    elseif alg.option_step == :logbar
         @debug "use primal-dual step"
         alg.ps .= alg.s
         alg.py .= alg.y
@@ -223,10 +232,11 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 
     # -------------------------------------------------------------------
     # II. methods that do not use the canonical logarithmic barrier 
+    #   treat as the self-concordant function directly;
+    #   see Section 2&3 in [2]
     if alg.option_step == :damped_ns
         @debug """
             use damped Newton step
-            this is very slow.
         """
 
         linsolve!(alg, fisher)
@@ -246,14 +256,12 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.gₙ = gₙ = norm(alg.∇)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
-
         # update price
         alg.α = α = αₘ = 1.0
         # alg.α = α = αₘ = 0.999
         alg.p .= alg.pb .+ α * alg.Δ
     end
 
-    # @assert all(alg.p .> 0)
     alg.te = time()
     alg.t = alg.te - alg.ts
     _logline = produce_log(
@@ -261,7 +269,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
     )
     alg.k += 1
-    ϵ = [gₙ dₙ]
+    ϵ = [alg.gₙ alg.dₙ]
 
     # update barrier parameter
     if alg.option_mu == :normal
@@ -269,6 +277,8 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.μ = max(alg.μ, 1e-20)
     elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
+    else
+        # not needed
     end
     return ϵ, _logline
 end

@@ -4,42 +4,54 @@
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
 @doc raw"""
-    SMWDR1{T}
-    Structure for the SMW DR1 approximation of the inverse Hessian.
+    SMWDRq{T}
+    Structure for the SMW DRq approximation of the inverse Hessian.
     @note:
-        applying the Sherman–Morrison-Woodbury formula to compute the inverse Hessian,
-        which is approximated by Diagonal + Rank One (DR1) form:
-            diagm(this.d) + this.s * (this.a) * (this.a)'
+        applying the Sherman–Morrison–Woodbury formula to compute the inverse Hessian,
+        which is approximated by Diagonal + Rank-q (DRq) form:
+            diagm(this.d) + sum(this.s[i] * this.a[i] * this.a[i]' for i in 1:q)
         then the inverse Hessian, `this.Hi`, is given as the linear operator:
-            Hi(x) -> (diagm(this.d) + this.s * (this.a) * (this.a)') \ x
+            H⁻¹(x) ≈ (D + ∑ sᵢ aᵢ aᵢ')⁻¹ x
 """
-Base.@kwdef mutable struct SMWDR1{T}
+Base.@kwdef mutable struct SMWDRq{T}
     n::Int
     d::Vector{T}
-    a::Vector{T}
-    s::T
-    # linear operator for the inverse Hessian:
-    # Hi(x) -> Inverse(H) * x
+    a::Vector{Vector{T}}
+    s::Vector{T}
     Hi::Union{Nothing,Function,SparseMatrixCSC{T,Int}}
-    function SMWDR1(n::Int)
+    cluster_map::Dict{Int,Vector{Int}}
+    q::Int
+
+    function SMWDRq(n::Int, q::Int, m::Int)
         this = new{Float64}()
         this.n = n
         this.d = zeros(n)
-        this.a = zeros(n)
-        this.s = 0.0
+        this.a = [zeros(n) for _ in 1:q]
+        this.s = zeros(q)
         this.Hi = nothing
+        this.q = q
+        # cluster_map::Dict{Int, Vector{Int}}
+        #   cluster/group index g = 1, 2, ..., q
+        #   ∀g, this.cluster_map[g] ≡ I_g : the set of player indices in group g
+        this.cluster_map = Dict(1 => [1:m...])
         return this
     end
 end
+update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}) = begin
+    alg.Ha.q = length(cluster_map)
+    alg.Ha.s = zeros(alg.Ha.q)
+    alg.Ha.a = [zeros(alg.n) for _ in 1:alg.Ha.q]
+    alg.Ha.cluster_map = cluster_map
+end
 
 @doc raw"""
-    __assemble_dr1_approx(Ha::SMWDR1)
+    __assemble_drq_approx(Ha::SMWDRq)
 
-    Assemble the DR1 approximation of the inverse Hessian from the SMWDR1 structure.
+    Assemble the DRq approximation of the inverse Hessian from the SMWDRq structure.
         for debugging purposes.
 """
-function __assemble_dr1_approx(Ha::SMWDR1)
-    return spdiagm(Ha.d) + Ha.s * Ha.a * Ha.a'
+function __assemble_drq_approx(Ha::SMWDRq)
+    return spdiagm(Ha.d) + sum(Ha.s[i] * Ha.a[i] * Ha.a[i]' for i in 1:Ha.q)
 end
 
 # -----------------------------------------------------------------------
@@ -69,7 +81,9 @@ function eval!(alg, fisher::FisherMarket)
     end
 end
 
-
+# -----------------------------------------------------------------------
+# linear case
+# -----------------------------------------------------------------------
 function __linear_grad!(alg, fisher::FisherMarket; bool_dbg=false)
     if alg.option_grad == :usex
         __linear_grad_fromx!(alg, fisher)
@@ -94,9 +108,7 @@ function __linear_eval!(alg, fisher::FisherMarket)
     end
 end
 
-# -----------------------------------------------------------------------
-# linear case; :usex mode
-# -----------------------------------------------------------------------
+# :usex mode
 function __linear_grad_fromx!(alg, fisher::FisherMarket)
     alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - fisher.sumx
 end
@@ -180,24 +192,34 @@ end
 
 function __ces_hess_dual!(alg, fisher::FisherMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
-    if alg.linsys == :none
-        __compute_ces_exact_hess!(alg, fisher)
-    else
-        # @ref only, for debugging
-        # gamma = f1.w ./ sum(f1.w)
-        # u = alg.p' ./ f1.w .* f1.x
-        # ubar = (gamma'*u)[:]
+    if alg.linsys == :direct
+        __compute_exact_hess!(alg, fisher)
+    elseif alg.linsys == :DRq
+        groups = alg.Ha.cluster_map
+        q = length(groups)
+        n = size(fisher.x, 1)
+
         pxbar = alg.p .* sum(fisher.x; dims=2)[:]
-        # -------------------------------------------------------------------
-        # diagonal + rank-one: save unregularized part
-        #   of P*(∇^2f)*P
-        # -------------------------------------------------------------------
         alg.Ha.d .= (fisher.σ + 1) * pxbar
-        alg.Ha.a .= pxbar ./ sum(fisher.w)
-        alg.Ha.s = -sum(fisher.w) * fisher.σ
+        alg.Ha.a = [zeros(n) for _ in 1:q]
+        alg.Ha.s = zeros(q)
+
+        for (i, idxs) in pairs(groups)
+            xsum = sum(fisher.x[:, idxs]; dims=2)[:]
+            wsum = sum(fisher.w[idxs])
+            ai = (alg.p .* xsum) ./ wsum
+            si = -wsum * fisher.σ
+            alg.Ha.a[i] = ai
+            alg.Ha.s[i] = si
+        end
+    else
+        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     end
 end
 
+# -----------------------------------------------------------------------
+# compute the exact Hessian
+# -----------------------------------------------------------------------
 function __compute_exact_hess!(alg, fisher::FisherMarket)
     σ = fisher.σ
     w = fisher.w

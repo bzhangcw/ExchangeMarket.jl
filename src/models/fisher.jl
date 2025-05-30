@@ -82,12 +82,32 @@ Base.@kwdef mutable struct FisherMarket{T}
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
+    """
+    FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, scale=1.0, sparsity=(2.0/n), bool_unit=true, bool_unit_wealth=true, bool_ensure_nz=true, bool_force_dense=false)
+
+    Create a Fisher market model with m agents and n goods.
+
+    # Arguments
+    - `m::Int`: Number of agents
+    - `n::Int`: Number of goods
+    - `ρ::Float64`: CES parameter (default: 1.0 for linear utility)
+    - `c`: Utility function parameterization matrix (default: random sparse matrix)
+    - `w`: Wealth vector (default: random vector)
+    - `seed::Int`: Random seed (default: 1)
+    - `scale::Float64`: Scale factor for costs and wealth (default: 1.0)
+    - `sparsity::Float64`: Sparsity of cost matrix (default: 2.0/n)
+    - `bool_unit::Bool`: Whether to use unit goods (default: true)
+    - `bool_unit_wealth::Bool`: Whether to normalize wealth (default: true)
+    - `bool_ensure_nz::Bool`: Whether to ensure non-zero entries (default: true)
+    - `bool_force_dense::Bool`: Whether to force dense matrix (default: false)
+    """
     function FisherMarket(m, n; ρ=1.0,
         c=nothing, w=nothing, seed=1,
         scale=1.0, sparsity=(2.0 / n),
         bool_unit=true,
         bool_unit_wealth=true,
-        bool_ensure_nz=true
+        bool_ensure_nz=true,
+        bool_force_dense=false
     )
         ts = time()
         println("FisherMarket initialization started...")
@@ -101,6 +121,9 @@ Base.@kwdef mutable struct FisherMarket{T}
         # ensure each row and column has at least one non-zero entry
         if bool_ensure_nz
             c = add_nonzero_entries!(c, n, m, scale)
+        end
+        if bool_force_dense
+            c = Matrix(c)
         end
         this.c = copy(c)
         println("FisherMarket cost matrix initialized in $(time() - ts) seconds")

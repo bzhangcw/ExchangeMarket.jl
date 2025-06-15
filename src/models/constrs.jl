@@ -3,10 +3,14 @@
 Base.@kwdef mutable struct LinearConstr{T}
     m::Int
     n::Int
-    A::Matrix{T}
+    A::Union{SparseMatrixCSC{T,Int},Matrix{T}}
     b::Vector{T}
     eps::Vector{T}
-    function LinearConstr(m::Int, n::Int, A::Matrix{T}, b::Vector{T}) where {T}
+    function LinearConstr(
+        m::Int, n::Int,
+        A::Union{SparseMatrixCSC{T,Int},Matrix{T}},
+        b::Vector{T}
+    ) where {T}
         this = new{T}()
         this.n = n
         this.m = m
@@ -20,6 +24,6 @@ Base.@kwdef mutable struct LinearConstr{T}
     end
 end
 
-function __evalconstr!(alg, fisher::FisherMarket, constr::LinearConstr)
+function __evalconstr!(alg, constr::LinearConstr)
     constr.eps .= constr.A * alg.p .- constr.b
 end

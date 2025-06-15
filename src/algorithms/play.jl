@@ -10,8 +10,8 @@
 """
 function play!(
     alg::Algorithm, fisher::FisherMarket;
-    ϵᵢ=1e-7,
     verbose=false,
+    ϵᵢ=1e-7,
     all=false,
     timed=true
 )
@@ -21,6 +21,8 @@ function play!(
     # @note:
     #  this will not work for sparse ones
     #  todo: maybe modify the nzval inplace.
+    #        a better way is to implement an Agent class
+    #        and use a distributed AgentPool.
     Threads.@threads for i in (all ? (1:fisher.m) : alg.sampler.indices)
         info = solve_substep!(
             alg, fisher, i;
@@ -56,14 +58,14 @@ end
 
 function solve_substep!(
     alg::Algorithm, fisher::FisherMarket, i::Int;
-    ϵᵢ=1e-4
+    kwargs...
 )
     if alg.optimizer.style == :nlp
         # warm-start
         _x₀ = fisher.x[:, i]
         # provide functions
         _f, _g, _H, _u, _∇u = produce_functions_from_subproblem(alg, fisher, i)
-        info = solve!(alg.optimizer; f=_f, g=_g, H=_H, x₀=_x₀, tol=ϵᵢ)
+        info = solve!(alg.optimizer; f=_f, g=_g, H=_H, x₀=_x₀, kwargs...)
         fisher.x[:, i] .= info.x
         fisher.val_u[i] = _u(info.x)
         fisher.val_∇u[:, i] = _∇u(info.x)
@@ -71,12 +73,32 @@ function solve_substep!(
     elseif alg.optimizer.style == :linconic
         info = solve!(
             alg.optimizer;
-            fisher=fisher, i=i, p=alg.p, μ=0.0, verbose=false
+            fisher=fisher,
+            i=i,
+            p=alg.p,
+            μ=0.0,
+            verbose=false
         )
         fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
         fisher.val_f[i] = fisher.val_u[i]^(1 / fisher.ρ)
         fisher.val_∇u[:, i] = fisher.∇u(fisher.x[:, i], i)
         return info
+    elseif alg.optimizer.style == :linconicaffine
+        info = solve!(
+            alg.optimizer;
+            fisher=fisher,
+            i=i,
+            p=alg.p,
+            μ=0.0,
+            verbose=false,
+            kwargs...
+        )
+        fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
+        fisher.val_f[i] = fisher.val_u[i]^(1 / fisher.ρ)
+
+        return info
+
+
     elseif alg.optimizer.style == :analytic
         if fisher.ρ == 1
             ratio = fisher.c[:, i] ./ alg.p

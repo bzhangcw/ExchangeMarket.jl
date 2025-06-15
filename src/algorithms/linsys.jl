@@ -1,7 +1,7 @@
 
 function linsolve!(alg, fisher::FisherMarket)
     if alg.option_step == :affinesc
-        if alg.linsys == :direct
+        if alg.linsys ∈ [:direct, :direct_affine]
             __direct!(alg, fisher)
         elseif alg.linsys == :DRq
             __drqaf(alg, fisher)

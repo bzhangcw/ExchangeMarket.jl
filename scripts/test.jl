@@ -28,7 +28,7 @@ f1.x .= x₀
 f1.p .= p₀
 
 
-# alg = HessianBar(n, m, p₀, μ; optimizer=EGConic, option_grad=:usex)
-alg = HessianBar(n, m, p₀, μ; optimizer=EGConic, option_grad=:usex)
+# alg = HessianBar(n, m, p₀, μ; optimizer=DualCESConic, option_grad=:usex)
+alg = HessianBar(n, m, p₀, μ; optimizer=DualCESConic, option_grad=:usex)
 traj = opt!(alg, f1; maxiter=100, loginterval=10, keep_traj=true)
 

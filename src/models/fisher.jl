@@ -45,7 +45,7 @@ Base.@kwdef mutable struct FisherMarket{T}
     w::Vector{T} # wealth
     q::Vector{T} # goods
     # -------------------------------------------------------------------
-    # for propotional dynamics
+    # for propotional dynamics and IPMs
     # -------------------------------------------------------------------
     b::Matrix{T} # bids
 
@@ -82,6 +82,14 @@ Base.@kwdef mutable struct FisherMarket{T}
     df::Union{DataFrame,Nothing} = nothing
 
     # -----------------------------------------------------------------------
+    # constraints
+    # -----------------------------------------------------------------------
+    # - linear constraints on allocation
+    constr_x::Union{Vector{LinearConstr},Nothing} = nothing
+    # - linear constraints on price
+    constr_p::Union{LinearConstr,Nothing} = nothing
+
+    # -----------------------------------------------------------------------
     """
     FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, scale=1.0, sparsity=(2.0/n), bool_unit=true, bool_unit_wealth=true, bool_ensure_nz=true, bool_force_dense=false)
 
@@ -99,15 +107,17 @@ Base.@kwdef mutable struct FisherMarket{T}
     - `bool_unit::Bool`: Whether to use unit goods (default: true)
     - `bool_unit_wealth::Bool`: Whether to normalize wealth (default: true)
     - `bool_ensure_nz::Bool`: Whether to ensure non-zero entries (default: true)
-    - `bool_force_dense::Bool`: Whether to force dense matrix (default: false)
+    - `bool_force_dense::Bool`: Whether to force dense matrix (default: true)
     """
     function FisherMarket(m, n; ρ=1.0,
+        constr_x=nothing,
+        constr_p=nothing,
         c=nothing, w=nothing, seed=1,
         scale=1.0, sparsity=(2.0 / n),
         bool_unit=true,
         bool_unit_wealth=true,
         bool_ensure_nz=true,
-        bool_force_dense=false
+        bool_force_dense=true
     )
         ts = time()
         println("FisherMarket initialization started...")
@@ -138,6 +148,8 @@ Base.@kwdef mutable struct FisherMarket{T}
         # sometimes use bids instead of allocation
         this.b = similar(c)
         this.df = DataFrame()
+        this.constr_x = constr_x
+        this.constr_p = constr_p
 
         if ρ == 1.0
             # linear utility

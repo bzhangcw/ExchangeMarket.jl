@@ -18,17 +18,17 @@ include("utils.jl")
 
 # models
 include("models/tools.jl")
+include("models/constrs.jl")
 include("models/fisher.jl")
 
-# constraints
-include("models/constrs.jl")
 
 # algorithms
 include("algorithms/algbase.jl")
 include("algorithms/diff.jl")
 include("algorithms/play.jl")
 include("algorithms/response.jl")
-include("algorithms/response_eg.jl")
+include("algorithms/response_ces.jl")
+include("algorithms/response_ces_af.jl")
 include("algorithms/response_nlp.jl")
 include("algorithms/primals.jl")
 include("algorithms/linsys.jl")
@@ -41,7 +41,7 @@ include("algorithms/mirror.jl")
 
 export LOGDIR, RESULTSDIR
 export pprint
-export logbar, log_to_expcone!, powerp_to_cone!, proj
+export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export FisherMarket, validate
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
@@ -51,10 +51,11 @@ export HessianBar
 export MirrorDec
 
 export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
-export BR
+export CESConic, DualCESConic, CESAnalytic
 export PR # proportional response
-export EGConic, EGConicCES, CESAnalytic
 export ONR
+# affine-constrained response
+export AFCESConic
 
 # DRq: Diagonal + Rank-q
 export SMWDRq, smw_drq!, update_cluster_map!

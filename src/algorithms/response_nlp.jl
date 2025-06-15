@@ -6,6 +6,8 @@
 #   regardless of the specific functional forms of utilities.
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
+# @todo: 
+#   - not good, planning to change to MadNLP.jl
 # -----------------------------------------------------------------------
 using Optim, LineSearches, ForwardDiff
 

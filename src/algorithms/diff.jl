@@ -37,6 +37,11 @@ Base.@kwdef mutable struct SMWDRq{T}
         return this
     end
 end
+
+@doc raw"""
+    update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}})
+    Update the cluster map of the SMWDRq structure, this decompose the players into clusters.
+"""
 update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}) = begin
     alg.Ha.q = length(cluster_map)
     alg.Ha.s = zeros(alg.Ha.q)
@@ -194,6 +199,9 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
     if alg.linsys == :direct
         __compute_exact_hess!(alg, fisher)
+    elseif alg.linsys == :direct_affine
+        # compute the exact Hessian of the affine-constrained problem
+        __compute_exact_hess_afcon!(alg, fisher)
     elseif alg.linsys == :DRq
         groups = alg.Ha.cluster_map
         q = length(groups)
@@ -212,6 +220,7 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
             alg.Ha.a[i] = ai
             alg.Ha.s[i] = si
         end
+
     else
         throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     end
@@ -231,8 +240,46 @@ function __compute_exact_hess!(alg, fisher::FisherMarket)
     @info "use exact Hessian"
 end
 
-function __compute_exact_affine_scaled_hessop!(buff, alg, fisher::FisherMarket, v)
+@doc raw"""
+    __compute_exact_hessop_afsc!(buff, alg, fisher::FisherMarket, v)
+    Compute the exact Hessian-vector product operator 
+        with affine-scaling P∇²fP
+"""
+function __compute_exact_hessop_afscale!(buff, alg, fisher::FisherMarket, v)
     b = alg.p .* fisher.x
     _uu = sum(v .* b; dims=2)
     buff .= _uu .* (fisher.σ + 1) - fisher.σ * b * (b' ./ fisher.w * v)
+end
+
+# -----------------------------------------------------------------------
+# compute the exact affine-constrained Hessian
+# -----------------------------------------------------------------------
+@doc raw"""
+This computes the exact Hessian of the affine-constrained problem,
+    namely, the log-UMP has an affine constraint on the allocation
+"""
+function __compute_exact_hess_afcon!(alg, fisher::FisherMarket)
+
+    _Hi = (i) -> begin
+        _γ = fisher.x[:, i] .* alg.p / fisher.w[i]
+        _W = begin
+            ((1 - fisher.ρ) * diagm(alg.p .^ 2 ./ _γ) +
+             fisher.ρ * alg.p * alg.p') ./ (fisher.w[i]^2)
+        end
+        _constr_x = fisher.constr_x[i]
+        @assert _constr_x.n == fisher.n
+
+        # Z = [_W _constr_x.A'; _constr_x.A spzeros(_constr_x.m, _constr_x.m)]
+        # rhs = [1 / fisher.w[i] * I(fisher.n); zeros(_constr_x.m, _constr_x.n)]
+        # sol = Z \ rhs
+        # # first n rows
+        # _H = sol[1:fisher.n, :]
+        _iW = fisher.w[i]^2 / (1 - fisher.ρ) * diagm(1 ./ alg.p) * (diagm(_γ) - fisher.ρ * _γ * _γ') * diagm(1 ./ alg.p)
+        _iH = 1 / fisher.w[i] .* (
+            _iW - _iW * _constr_x.A' * inv(_constr_x.A * _iW * _constr_x.A' + 1e-12 * I) * _constr_x.A * _iW
+        )
+        return _iH
+    end
+    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    @info "use exact Hessian from affine-constrained UMP"
 end

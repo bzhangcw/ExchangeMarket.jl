@@ -1,7 +1,7 @@
 # -----------------------------------------------------------------------
 # run subproblems as best-response-type mappings
 #   using induced utility function from Eigenberg-Gale-type potentials
-#   the response mapping is induced from linear-conic programming
+#   the response mapping is captured by linear-conic programming
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
@@ -9,50 +9,11 @@ using JuMP
 import MathOptInterface as MOI
 
 # --------------------------------------------------------------------------
-# solve the utility maximization problem by JuMP + optimizer
-#   for linear utility function
+# primal form of CES economy in linear-conic form
 # --------------------------------------------------------------------------
 @doc raw"""
-solve the utility maximization problem by JuMP + optimizer
-  for linear utility function
-"""
-function __conic_log_response(;
-    i::Int=1,
-    p::Vector{T}=nothing,
-    fisher::FisherMarket=nothing,
-    μ=1e-4,
-    verbose=false
-) where {T}
-    ϵᵢ = μ * 1e-5
-    md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
-    @variable(md, s[1:fisher.n] .>= 0)
-    @variable(md, logs[1:fisher.n])
-    @variable(md, v .>= 0)
-    @variable(md, logv)
-    log_to_expcone!.(s, logs, md)
-    log_to_expcone!(v, logv, md)
-    @objective(md, Min, -fisher.w[i] * logv - μ * sum(logs))
-    @constraint(md, xc, s + v .* fisher.c[:, i] - p .== 0)
-    JuMP.optimize!(md)
-    val_x = abs.(dual.(xc))
-    return ResponseInfo(
-        objective_value(md),
-        # the rest is dummy
-        ϵᵢ,
-        1,
-        md
-    )
-end
-
-EGConic = EigenbergGaleConicResponse = ResponseOptimizer(
-    __conic_log_response,
-    :linconic,
-    "EigenbergGaleConicResponse"
-)
-
-@doc raw"""
-  solve the utility maximization problem by JuMP + optimizer
-  for CES utility function of ρ < 1
+  solve the logarithmic utility maximization problem by JuMP + optimizer
+  for CES utility function of ρ ≤ 1
     use max log(uᵢ(xᵢ))
 """
 function __conic_log_response_ces(;
@@ -60,7 +21,8 @@ function __conic_log_response_ces(;
     p::Vector{T}=nothing,
     fisher::FisherMarket=nothing,
     μ=1e-4,
-    verbose=false
+    verbose=false,
+    kwargs...
 ) where {T}
     ρ = fisher.ρ
     ϵᵢ = μ * 1e-5
@@ -97,18 +59,60 @@ function __conic_log_response_ces(;
     )
 end
 
-EGConicCES = EigenbergGaleConicCESResponse = ResponseOptimizer(
+CESConic = CESConicResponse = ResponseOptimizer(
     __conic_log_response_ces,
     :linconic,
-    "EigenbergGaleConicCESResponse"
+    "CESConicResponse"
 )
 
+# --------------------------------------------------------------------------
+# dual form of CES economy in linear-conic form
+# --------------------------------------------------------------------------
+@doc raw"""
+solve the logarithmic utility maximization problem by JuMP + optimizer
+  for linear utility function in the `dual form`
+"""
+function __conic_log_response_ces_dual(;
+    i::Int=1,
+    p::Vector{T}=nothing,
+    fisher::FisherMarket=nothing,
+    μ=1e-4,
+    verbose=false
+) where {T}
+    ϵᵢ = μ * 1e-5
+    md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
+    @variable(md, s[1:fisher.n] .>= 0)
+    @variable(md, logs[1:fisher.n])
+    @variable(md, v .>= 0)
+    @variable(md, logv)
+    log_to_expcone!.(s, logs, md)
+    log_to_expcone!(v, logv, md)
+    @objective(md, Min, -fisher.w[i] * logv - μ * sum(logs))
+    @constraint(md, xc, s + v .* fisher.c[:, i] - p .== 0)
+    JuMP.optimize!(md)
+    fisher.x[:, i] .= abs.(dual.(xc))
+    return ResponseInfo(
+        objective_value(md),
+        # the rest is dummy
+        ϵᵢ,
+        1,
+        md
+    )
+end
+DualCESConic = DualCESConicResponse = ResponseOptimizer(
+    __conic_log_response_ces_dual,
+    :linconic,
+    "DualCESConicResponse"
+)
 
 # --------------------------------------------------------------------------
-# solve the utility maximization problem analytically
-#   induced from Eigenberg-Gale-type potentials
-#   for CES utility function of ρ < 1
+# solve the CES utility maximization problem analytically
 # --------------------------------------------------------------------------
+@doc raw"""
+solve the utility maximization problem analytically
+  induced from convex potentials
+  for CES utility function of ρ < 1
+"""
 function __analytic_log_response_ac(;
     kwargs...
 )

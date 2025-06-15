@@ -2,6 +2,9 @@ using Optim, LineSearches
 using ForwardDiff
 using ExchangeMarket
 
+using JuMP, MathOptInterface, SparseArrays
+const MOI = MathOptInterface
+
 __optim_ipnewton = IPNewton(;
     linesearch=Optim.backtrack_constrained_grad,
     μ0=:auto,
@@ -64,3 +67,5 @@ function optim_newton(f, g;
         res.iterations
     )
 end
+
+

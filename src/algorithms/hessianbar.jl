@@ -129,6 +129,8 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.linsys = linsys
         this.sampler = sampler
         # linear constraint
+        # todo: this is the linear constraint for prices,
+        #       move to FisherMarket later
         this.linconstr = linconstr
         # initialize vectors
         this.p = copy(p)
@@ -175,7 +177,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
     #     fisher.p .= sum(fisher.b, dims=1)[:]
     # end
     # update all sub-problems of all agents i ∈ I
-    if alg.option_grad in [:usex, :dual]
+    if alg.option_grad in [:usex, :dual, :aff]
         play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
         # -------------------------------------------------------------------
         # compute dual function value, gradient and Hessian
@@ -221,10 +223,13 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         # local dual norm
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
+        if any(isnan.([gₜ, gₙ, dₙ]))
+            return true, ""
+        end
 
         # step size
         αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.ps ./ alg.Δs)..., 1.0)
-        alg.α = α = αₘ * 0.9995
+        alg.α = α = αₘ * 0.995
         alg.p .= alg.pb .+ α * alg.Δ
         alg.s .= alg.ps .+ α * alg.Δs
         alg.y .= alg.py .+ α * alg.Δy
@@ -279,8 +284,10 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
     else
         # not needed
+        @warn "unknown option for μ: $(alg.option_mu)"
+        @warn "not updating μ"
     end
-    return ϵ, _logline
+    return false, _logline
 end
 
 function opt!(
@@ -331,6 +338,7 @@ function opt!(
     printto(ios, __default_logger._sep)
     flush.(ios)
     _k = 0
+    bool_early_stop = false
     while true
         _D = 0.0
         if !isnothing(ground_truth)
@@ -341,7 +349,8 @@ function opt!(
             traj,
             StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
-        _, _logline = iterate!(alg, fisher)
+        bool_early_stop, _logline = iterate!(alg, fisher)
+        bool_early_stop && break
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol^2) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
@@ -365,6 +374,7 @@ function opt!(
     printto(ios, l)
     l = @sprintf("          usage %.2f%%", (alg.tₗ / alg.t) * 100)
     printto(ios, l)
+    bool_early_stop && printto(ios, " !!! early stopping")
     printto(ios, __default_logger._sep)
     flush.(ios)
     close(logfile)

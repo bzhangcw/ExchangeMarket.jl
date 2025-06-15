@@ -95,3 +95,76 @@ function drop_empty(c::SparseMatrixCSC)
     cols = findall(!iszero, col_sums)
     return c[rows, cols], rows, cols
 end
+
+
+@doc raw"""
+    extract_standard_form(md::Model)
+
+Given a JuMP LP `md`, returns `(A, b, c)` such that  
+  maximize cᵀ x  
+  subject to A x = b, x ≥ 0,  
+allowing both `≤` and `=` constraints in `md`.
+"""
+function extract_standard_form(md::Model)
+    backend = JuMP.backend(md)
+    n = MOI.get(backend, MOI.NumberOfVariables())
+
+    # objective
+    sense = MOI.get(backend, MOI.ObjectiveSense())
+    obj = MOI.get(backend, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}())
+    c = zeros(n)
+    for term in obj.terms
+        c[term.variable.value] = term.coefficient
+    end
+    if sense == MOI.MAX_SENSE
+        c .*= -1
+    end
+
+    # ≤‐constraints
+    F, S = MOI.ScalarAffineFunction{Float64}, MOI.LessThan{Float64}
+    ineq = MOI.get(backend, MOI.ListOfConstraintIndices{F,S}())
+    m_ineq = length(ineq)
+    rows₁ = Int[]
+    cols₁ = Int[]
+    vals₁ = Float64[]
+    b_ineq = zeros(m_ineq)
+    for (i, ci) in enumerate(ineq)
+        f = MOI.get(backend, MOI.ConstraintFunction(), ci)
+        for term in f.terms
+            push!(rows₁, i)
+            push!(cols₁, term.variable.value)
+            push!(vals₁, term.coefficient)
+        end
+        b_ineq[i] = MOI.get(backend, MOI.ConstraintSet(), ci).upper
+    end
+    A_ineq = sparse(rows₁, cols₁, vals₁, m_ineq, n)
+
+    # =‐constraints
+    E = MOI.EqualTo{Float64}
+    eq = MOI.get(backend, MOI.ListOfConstraintIndices{F,E}())
+    m_eq = length(eq)
+    rows₂ = Int[]
+    cols₂ = Int[]
+    vals₂ = Float64[]
+    b_eq = zeros(m_eq)
+    for (i, ci) in enumerate(eq)
+        f = MOI.get(backend, MOI.ConstraintFunction(), ci)
+        for term in f.terms
+            push!(rows₂, i)
+            push!(cols₂, term.variable.value)
+            push!(vals₂, term.coefficient)
+        end
+        b_eq[i] = MOI.get(backend, MOI.ConstraintSet(), ci).value
+    end
+    A_eq0 = sparse(rows₂, cols₂, vals₂, m_eq, n)
+
+    # add slack for ≤ → =
+    S_slack = spdiagm(0 => ones(m_ineq))
+    top = hcat(A_eq0, spzeros(Float64, m_eq, m_ineq))
+    bottom = hcat(A_ineq, S_slack)
+    A_full = vcat(top, bottom)
+    b_full = vcat(b_eq, b_ineq)
+    c_full = vcat(c, zeros(m_ineq))
+
+    return A_full, b_full, c_full
+end

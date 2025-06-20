@@ -57,7 +57,7 @@ function __af_conic_log_response_ces(;
     @objective(md, Max, logu)
 
     JuMP.optimize!(md)
-    fisher.x[:, i] .= value.(x)
+    fisher.x[:, i] .= max.(value.(x), 0.0)
     return ResponseInfo(
         objective_value(md),
         # the rest is dummy

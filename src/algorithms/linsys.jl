@@ -3,12 +3,12 @@ function linsolve!(alg, fisher::FisherMarket)
     if alg.option_step == :affinesc
         if alg.linsys ∈ [:direct, :direct_affine]
             __direct!(alg, fisher)
-        elseif alg.linsys == :DRq
+        elseif alg.linsys ∈ [:DRq, :DRq_rep]
             __drqaf(alg, fisher)
         else
         end
     elseif alg.option_step == :logbar
-        if alg.linsys == :DRq
+        if alg.linsys ∈ [:DRq, :DRq_rep]
             __drqpd!(alg, fisher)
         else
             error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
@@ -16,13 +16,13 @@ function linsolve!(alg, fisher::FisherMarket)
     elseif alg.option_step == :damped_ns
         if alg.linsys == :direct
             __directdamped!(alg, fisher)
-        elseif alg.linsys == :DRq
+        elseif alg.linsys ∈ [:DRq, :DRq_rep]
             __drqdamped(alg, fisher)
         else
             error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
         end
     elseif alg.option_step == :homotopy
-        if alg.linsys == :DRq
+        if alg.linsys ∈ [:DRq, :DRq_rep]
             __drqhomo!(alg, fisher)
         else
             error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")

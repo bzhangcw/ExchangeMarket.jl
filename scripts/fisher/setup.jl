@@ -13,10 +13,20 @@ method_kwargs = [
             :linsys => :DRq,
         )
     ],
+    [:PathFol,
+        HessianBar,
+        Dict(
+            :tol => 1e-12, :optimizer => CESAnalytic,
+            :maxiter => 200, :μ => 1e0,
+            :option_mu => :nothing,
+            :option_step => :homotopy,
+            :linsys => :DRq,
+        )
+    ],
     [:LogBarAffineDirect,
         HessianBar,
         Dict(
-            :tol => 1e-10, :maxiter => 20,
+            :tol => 1e-12, :maxiter => 20,
             :optimizer => CESAnalytic,
             :option_mu => :normal,
             :option_step => :affinesc,
@@ -33,16 +43,6 @@ method_kwargs = [
             :option_step => :damped_ns,
             :linsys => :DRq,
             # :linsys => :direct,
-        )
-    ],
-    [:Homotopy,
-        HessianBar,
-        Dict(
-            :tol => 1e-10, :optimizer => CESAnalytic,
-            :maxiter => 200, :μ => 1e0,
-            :option_mu => :nothing,
-            :option_step => :homotopy,
-            :linsys => :DRq,
         )
     ],
     [:Tât,

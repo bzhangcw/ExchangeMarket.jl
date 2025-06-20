@@ -116,8 +116,8 @@ Base.@kwdef mutable struct FisherMarket{T}
         scale=1.0, sparsity=(2.0 / n),
         bool_unit=true,
         bool_unit_wealth=true,
-        bool_ensure_nz=true,
-        bool_force_dense=true
+        bool_ensure_nz=false,
+        bool_force_dense=true,
     )
         ts = time()
         println("FisherMarket initialization started...")
@@ -128,8 +128,8 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.ρ = ρ
         this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ)
         c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
-        # ensure each row and column has at least one non-zero entry
         if bool_ensure_nz
+            # ensure each row and column has at least one non-zero entry
             c = add_nonzero_entries!(c, n, m, scale)
         end
         if bool_force_dense
@@ -173,8 +173,8 @@ Base.@kwdef mutable struct FisherMarket{T}
             # ignore outer power and coeff
             # only compute
             # r := c^(1+σ)'p^(-σ)
-            this.f∇f = (p, i) -> begin
-                _cs = spow.(c[:, i], 1 + σ)
+            this.f∇f = (p, _ci) -> begin
+                _cs = spow.(_ci, 1 + σ)
                 _ps = spow.(p, -σ)
                 _cp = _cs' * _ps
                 f = _cp

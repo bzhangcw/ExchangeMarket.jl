@@ -109,6 +109,7 @@ end
 function iterate!(alg::MirrorDec, fisher::FisherMarket)
     alg.pb .= alg.p
     if (alg.k == 0) && (alg.optimizer.style == :bids)
+        # initialize bids
         fisher.b .= fisher.x .* (1 ./ alg.p)
         sumb = sum(fisher.b, dims=2)[:]
         fisher.b ./= sumb
@@ -181,7 +182,11 @@ function opt!(
     loginterval=20,
     logfile=nothing,
     reset::Bool=true,
-    ground_truth::Union{Matrix{T},Nothing}=nothing,
+    # -----------------------------------------------
+    # stopping criterion if has a ground truth price
+    pₛ::Union{Vector{T},Nothing}=nothing,
+    tol_p=1e-5,
+    # -----------------------------------------------
     kwargs...
 ) where {T}
     ios = logfile === nothing ? [stdout] : [stdout, logfile]
@@ -216,10 +221,10 @@ function opt!(
     printto(ios, __default_logger._sep)
     _k = 0
     for _ in 1:maxiter
-        _D = 0.0
-        if !isnothing(ground_truth)
-            # x - x*
-            _D = sum(abs.(fisher.x - ground_truth))
+        _D = Inf
+        if !isnothing(pₛ)
+            # p - p*
+            _D = sum(abs.(alg.p - pₛ))
         end
         keep_traj && push!(
             traj,
@@ -228,7 +233,7 @@ function opt!(
         _, _logline = iterate!(alg, fisher)
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
-        if compute_stop(_k, alg, fisher)
+        if compute_stop(_k, alg, fisher) || (_D < tol_p)
             # if (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             printto(ios, __default_logger._logheadfo)
             printto(ios, _logline)

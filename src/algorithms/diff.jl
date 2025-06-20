@@ -20,6 +20,8 @@ Base.@kwdef mutable struct SMWDRq{T}
     s::Vector{T}
     Hi::Union{Nothing,Function,SparseMatrixCSC{T,Int}}
     cluster_map::Dict{Int,Vector{Int}}
+    centers::Union{Nothing,Dict{Int,Vector{T}}}
+    cardinality::Vector{T}
     q::Int
 
     function SMWDRq(n::Int, q::Int, m::Int)
@@ -34,6 +36,11 @@ Base.@kwdef mutable struct SMWDRq{T}
         #   cluster/group index g = 1, 2, ..., q
         #   ∀g, this.cluster_map[g] ≡ I_g : the set of player indices in group g
         this.cluster_map = Dict(1 => [1:m...])
+        # cardinality::Vector{T}
+        #   the number of clusters, sᵢ, each player i belongs to
+        #   this is used to reweight the x's by the cardinality of the clusters
+        #   because we will use it sᵢ times in the DRq approximation
+        this.cardinality = ones(m)
         return this
     end
 end
@@ -42,11 +49,15 @@ end
     update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}})
     Update the cluster map of the SMWDRq structure, this decompose the players into clusters.
 """
-update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}) = begin
+update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}, cardinality::Vector{Float64}; centers=nothing) = begin
     alg.Ha.q = length(cluster_map)
     alg.Ha.s = zeros(alg.Ha.q)
     alg.Ha.a = [zeros(alg.n) for _ in 1:alg.Ha.q]
     alg.Ha.cluster_map = cluster_map
+    alg.Ha.cardinality = cardinality
+    if centers !== nothing
+        alg.Ha.centers = centers
+    end
 end
 
 @doc raw"""
@@ -204,6 +215,7 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
         __compute_exact_hess_afcon!(alg, fisher)
     elseif alg.linsys == :DRq
         groups = alg.Ha.cluster_map
+        cards = alg.Ha.cardinality
         q = length(groups)
         n = size(fisher.x, 1)
 
@@ -212,15 +224,37 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
         alg.Ha.a = [zeros(n) for _ in 1:q]
         alg.Ha.s = zeros(q)
 
+        # reweight the x's by the cardinality of the clusters
+        _x = fisher.x ./ cards'
+
         for (i, idxs) in pairs(groups)
-            xsum = sum(fisher.x[:, idxs]; dims=2)[:]
+            xsum = sum(_x[:, idxs]; dims=2)[:]
             wsum = sum(fisher.w[idxs])
             ai = (alg.p .* xsum) ./ wsum
             si = -wsum * fisher.σ
             alg.Ha.a[i] = ai
             alg.Ha.s[i] = si
         end
+    elseif alg.linsys == :DRq_rep
+        # this only works for CES for now
+        # TODO: implement to play!
+        groups = alg.Ha.cluster_map
+        cards = alg.Ha.cardinality
+        q = length(groups)
+        n = size(fisher.x, 1)
+        wealth = Dict(k => sum(fisher.w[v]) for (k, v) in groups)
 
+        alg.Ha.d .= 0.0
+
+        for (k, v) in groups
+            _ck = alg.Ha.centers[k]
+            _vf, _v∇f, _vHf = fisher.f∇f(alg.p, _ck)
+            _x = -wealth[k] ./ _vf ./ fisher.σ .* _v∇f
+            _γ = _x .* alg.p / wealth[k]
+            alg.Ha.d += _γ * (fisher.σ + 1) * wealth[k]
+            alg.Ha.a[k] = _γ
+            alg.Ha.s[k] = -wealth[k] * fisher.σ
+        end
     else
         throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     end

@@ -110,7 +110,6 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.m = m
         this.φ = -1e6
         this.z = z
-        this.μ = μ
         this.∇ = zeros(n)
         this.∇₀ = zeros(n)
         this.H = spzeros(n, n)
@@ -142,7 +141,11 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
             this.s = copy(this.p)
         end
 
-        (this.option_mu != :nothing) && (this.μ = this.p' * this.s / this.n)
+        if this.option_mu ∈ [:pred_corr, :normal]
+            this.μ = this.p' * this.s / this.n
+        else
+            this.μ = μ
+        end
 
         this.ps = zeros(n)
         this.Δs = zeros(n)
@@ -158,9 +161,29 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
             this.py = zeros(linconstr.m)
             this.Δy = zeros(linconstr.m)
         end
-
         return this
     end
+end
+
+function init!(alg::HessianBar, fisher::FisherMarket)
+    fisher.b .= fisher.x .* (1 ./ alg.p)
+    sumb = sum(fisher.b, dims=2)[:]
+    fisher.b ./= sumb
+    fisher.b .*= fisher.w'
+    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, style=:bids)
+    alg.p .= sum(fisher.b, dims=2)[:]
+    grad!(alg, fisher)
+    eval!(alg, fisher)
+    alg.gₙ = norm(alg.∇)
+    alg.α = 1.0
+    alg.gₜ = norm(alg.p .* alg.∇)
+    alg.dₙ = norm(alg.p - alg.pb)
+    _logline = produce_log(
+        __default_logger,
+        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
+    )
+    alg.k += 1
+    return false, _logline
 end
 
 # -----------------------------------------------------------------------
@@ -168,14 +191,6 @@ end
 # -----------------------------------------------------------------------
 function iterate!(alg::HessianBar, fisher::FisherMarket)
     alg.pb .= alg.p
-    # @note: possible initialization
-    # if (alg.k == 0)
-    #     fisher.b .= (1 ./ alg.p') .* fisher.x
-    #     sumb = sum(fisher.b, dims=2)[:]
-    #     fisher.b ./= sumb
-    #     fisher.b .*= fisher.w
-    #     fisher.p .= sum(fisher.b, dims=1)[:]
-    # end
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual, :aff]
         play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
@@ -229,7 +244,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 
         # step size
         αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.ps ./ alg.Δs)..., 1.0)
-        alg.α = α = αₘ * 0.995
+        alg.α = α = αₘ * 0.9995
         alg.p .= alg.pb .+ α * alg.Δ
         alg.s .= alg.ps .+ α * alg.Δs
         alg.y .= alg.py .+ α * alg.Δy
@@ -282,6 +297,12 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.μ = max(alg.μ, 1e-20)
     elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
+    elseif alg.option_mu == :strict
+        if alg.gₙ < 1e2 * alg.μ
+            alg.μ *= 1e-1
+        end
+    elseif alg.option_mu == :nothing
+        # not needed for e.g., Homotopy
     else
         # not needed
         @warn "unknown option for μ: $(alg.option_mu)"
@@ -300,8 +321,12 @@ function opt!(
     loginterval=1,
     logfile=nothing,
     reset::Bool=true,
-    ground_truth::Union{Matrix{T},Nothing}=nothing,
+    # -----------------------------------------------
+    # stopping criterion if has a ground truth price
+    pₛ::Union{Vector{T},Nothing}=nothing,
+    tol_p=1e-5,
     kwargs...
+    # -----------------------------------------------
 ) where {T}
     logfile = logfile === nothing ? open(joinpath(LOGDIR, "log-hessianbar-$(current_date()).log"), "a") : logfile
     ios = [stdout, logfile]
@@ -340,23 +365,33 @@ function opt!(
     _k = 0
     bool_early_stop = false
     while true
-        _D = 0.0
-        if !isnothing(ground_truth)
-            # x - x*
-            _D = sum(abs.(fisher.x - ground_truth))
+        _D = Inf
+        if !isnothing(pₛ)
+            # p - p*
+            _D = sum(abs.(alg.p - pₛ))
         end
         keep_traj && push!(
             traj,
-            StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
+            StateInfo(_k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
-        bool_early_stop, _logline = iterate!(alg, fisher)
+        if alg.k == 0
+            printto(ios, "running Phase I...")
+            printto(ios, __default_logger._loghead)
+            bool_early_stop, _logline = init!(alg, fisher)
+            mod(_k, loginterval) == 0 && printto(ios, _logline)
+            printto(ios, __default_logger._sep)
+            printto(ios, "running Phase II...")
+        else
+            mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
+            bool_early_stop, _logline = iterate!(alg, fisher)
+            mod(_k, loginterval) == 0 && printto(ios, _logline)
+            _k += 1
+        end
         bool_early_stop && break
-        mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
-        mod(_k, loginterval) == 0 && printto(ios, _logline)
+
         if (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol^2) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             break
         end
-        _k += 1
         flush.(ios)
     end
 

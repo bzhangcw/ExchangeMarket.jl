@@ -13,7 +13,8 @@ function play!(
     verbose=false,
     ϵᵢ=1e-7,
     all=false,
-    timed=true
+    timed=true,
+    style=alg.optimizer.style
 )
     _ts = time()
     _k = Threads.Atomic{Int}(0)
@@ -27,6 +28,7 @@ function play!(
         info = solve_substep!(
             alg, fisher, i;
             ϵᵢ=ϵᵢ,
+            style=style
         )
         Threads.atomic_add!(_k, info.k)
         if info.ϵ > ϵᵢ * 1e2
@@ -58,9 +60,10 @@ end
 
 function solve_substep!(
     alg::Algorithm, fisher::FisherMarket, i::Int;
+    style=alg.optimizer.style,
     kwargs...
 )
-    if alg.optimizer.style == :nlp
+    if style == :nlp
         # warm-start
         _x₀ = fisher.x[:, i]
         # provide functions
@@ -70,7 +73,7 @@ function solve_substep!(
         fisher.val_u[i] = _u(info.x)
         fisher.val_∇u[:, i] = _∇u(info.x)
         return info
-    elseif alg.optimizer.style == :linconic
+    elseif style == :linconic
         info = solve!(
             alg.optimizer;
             fisher=fisher,
@@ -83,7 +86,7 @@ function solve_substep!(
         fisher.val_f[i] = fisher.val_u[i]^(1 / fisher.ρ)
         fisher.val_∇u[:, i] = fisher.∇u(fisher.x[:, i], i)
         return info
-    elseif alg.optimizer.style == :linconicaffine
+    elseif style == :linconicaffine
         info = solve!(
             alg.optimizer;
             fisher=fisher,
@@ -99,7 +102,7 @@ function solve_substep!(
         return info
 
 
-    elseif alg.optimizer.style == :analytic
+    elseif style == :analytic
         if fisher.ρ == 1
             ratio = fisher.c[:, i] ./ alg.p
             # argmax returns the index of the maximum value,
@@ -109,7 +112,7 @@ function solve_substep!(
             fisher.x[i, j₊] = fisher.w[i] / alg.p[j₊]
             fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
         else
-            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, i)
+            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, fisher.c[:, i])
             fisher.x[:, i] = -fisher.w[i] ./ fisher.val_f[i] ./ fisher.σ .* fisher.val_∇f[:, i]
             fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
         end
@@ -119,13 +122,13 @@ function solve_substep!(
             1,
             nothing
         )
-    elseif alg.optimizer.style == :bids
+    elseif style == :bids
         # @info "use bids to recover allocation"
         # use bids to recover allocation
         if fisher.ρ >= 0
             fisher.x[:, i] = fisher.b[:, i] ./ alg.p
             fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
-            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, i)
+            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, fisher.c[:, i])
             cs = fisher.c[:, i] .* spow.(fisher.x[:, i], fisher.ρ)
             sumcs = sum(cs)
             # update bids
@@ -133,7 +136,7 @@ function solve_substep!(
         else
             fisher.x[:, i] = fisher.b[:, i] ./ alg.p
             fisher.val_u[i] = fisher.u(fisher.x[:, i], i)
-            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, i)
+            fisher.val_f[i], fisher.val_∇f[:, i], fisher.val_Hf[:, i] = fisher.f∇f(alg.p, fisher.c[:, i])
             cs = spow.(fisher.c[:, i] ./ spow.(alg.p, fisher.ρ), 1 / (1 - fisher.ρ))
             sumcs = sum(cs)
             fisher.b[:, i] .= fisher.w[i] * cs ./ sumcs

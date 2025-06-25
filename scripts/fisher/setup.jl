@@ -1,5 +1,3 @@
-# include after set m,n and f0::FisherMarket
-
 
 method_kwargs = [
     # Keep log-barrier method at first position

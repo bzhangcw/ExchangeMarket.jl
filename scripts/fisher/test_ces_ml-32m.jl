@@ -9,7 +9,7 @@ using ExchangeMarket
 include("../tools.jl")
 include("../plots.jl")
 include("./setup.jl")
-include("./segmentation.jl")
+# include("./segmentation.jl")
 
 switch_to_pdf(;)
 

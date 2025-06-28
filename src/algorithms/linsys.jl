@@ -1,15 +1,21 @@
+using LinearOperators, Krylov
+
 
 function linsolve!(alg, fisher::FisherMarket)
     if alg.option_step == :affinesc
         if alg.linsys ∈ [:direct, :direct_affine]
             __direct!(alg, fisher)
+        elseif alg.linsys == :krylov
+            __krylov_afsc!(alg, fisher)
         elseif alg.linsys ∈ [:DRq, :DRq_rep]
-            __drqaf(alg, fisher)
+            __drqafsc(alg, fisher)
         else
+            error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
         end
     elseif alg.option_step == :logbar
         if alg.linsys ∈ [:DRq, :DRq_rep]
             __drqpd!(alg, fisher)
+
         else
             error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
         end
@@ -41,6 +47,15 @@ end
 
 function __directdamped!(alg, fisher::FisherMarket)
     alg.Δ .= -(alg.H) \ (alg.∇)
+end
+
+# -------------------------------------------------------------------
+# Krylov mode: solving using Krylov subspace methods
+# -------------------------------------------------------------------
+function __krylov_afsc!(alg, fisher::FisherMarket)
+    php_hessop = LinearOperator(Float64, fisher.n, fisher.n, true, true, (buff, v) -> __compute_exact_hessop_afscale!(buff, alg, fisher, v; add_μ=true))
+    d, stats = cg(php_hessop, alg.p .* alg.∇ .- alg.μ)
+    alg.Δ .= -alg.p .* d
 end
 
 # -------------------------------------------------------------------
@@ -78,7 +93,7 @@ end
     Diagonal + Rank-One method for linear system solver.
         applied in :affinesc mode
 """
-function __drqaf(alg, fisher::FisherMarket)
+function __drqafsc(alg, fisher::FisherMarket)
     # -------------------------------------------------------------------
     # solve
     # -------------------------------------------------------------------

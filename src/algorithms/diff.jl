@@ -255,6 +255,8 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
             alg.Ha.a[k] = _γ
             alg.Ha.s[k] = -wealth[k] * fisher.σ
         end
+    elseif alg.linsys == :krylov
+        # no preprocessing needed
     else
         throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     end
@@ -277,12 +279,12 @@ end
 @doc raw"""
     __compute_exact_hessop_afsc!(buff, alg, fisher::FisherMarket, v)
     Compute the exact Hessian-vector product operator 
-        with affine-scaling P∇²fP
+        with affine-scaling P∇²fP + μ (if add_μ=true)
 """
-function __compute_exact_hessop_afscale!(buff, alg, fisher::FisherMarket, v)
+function __compute_exact_hessop_afscale!(buff, alg, fisher::FisherMarket, v; add_μ=false)
     b = alg.p .* fisher.x
     _uu = sum(v .* b; dims=2)
-    buff .= _uu .* (fisher.σ + 1) - fisher.σ * b * (b' ./ fisher.w * v)
+    buff .= _uu .* (fisher.σ + 1) - fisher.σ * b * (b' ./ fisher.w * v) + (add_μ * alg.μ) .* v
 end
 
 # -----------------------------------------------------------------------

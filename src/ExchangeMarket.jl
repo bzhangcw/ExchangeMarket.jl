@@ -31,8 +31,11 @@ include("algorithms/response_ces.jl")
 include("algorithms/response_ces_af.jl")
 include("algorithms/response_nlp.jl")
 include("algorithms/primals.jl")
-include("algorithms/linsys.jl")
 include("algorithms/sampler.jl")
+
+# linear systems, solving all kinds of update
+#   using ∇²
+include("linsys/linsys.jl")
 
 # main algorithms
 include("algorithms/conic.jl")

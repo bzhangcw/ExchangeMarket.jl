@@ -3,73 +3,7 @@
 # @author: Chuwen Zhang <chuwzhang@gmail.com>
 # @date: 2024/11/22
 # -----------------------------------------------------------------------
-@doc raw"""
-    SMWDRq{T}
-    Structure for the SMW DRq approximation of the inverse Hessian.
-    @note:
-        applying the Sherman–Morrison–Woodbury formula to compute the inverse Hessian,
-        which is approximated by Diagonal + Rank-q (DRq) form:
-            diagm(this.d) + sum(this.s[i] * this.a[i] * this.a[i]' for i in 1:q)
-        then the inverse Hessian, `this.Hi`, is given as the linear operator:
-            H⁻¹(x) ≈ (D + ∑ sᵢ aᵢ aᵢ')⁻¹ x
-"""
-Base.@kwdef mutable struct SMWDRq{T}
-    n::Int
-    d::Vector{T}
-    a::Vector{Vector{T}}
-    s::Vector{T}
-    Hi::Union{Nothing,Function,SparseMatrixCSC{T,Int}}
-    cluster_map::Dict{Int,Vector{Int}}
-    centers::Union{Nothing,Dict{Int,Vector{T}}}
-    cardinality::Vector{T}
-    q::Int
-
-    function SMWDRq(n::Int, q::Int, m::Int)
-        this = new{Float64}()
-        this.n = n
-        this.d = zeros(n)
-        this.a = [zeros(n) for _ in 1:q]
-        this.s = zeros(q)
-        this.Hi = nothing
-        this.q = q
-        # cluster_map::Dict{Int, Vector{Int}}
-        #   cluster/group index g = 1, 2, ..., q
-        #   ∀g, this.cluster_map[g] ≡ I_g : the set of player indices in group g
-        this.cluster_map = Dict(1 => [1:m...])
-        # cardinality::Vector{T}
-        #   the number of clusters, sᵢ, each player i belongs to
-        #   this is used to reweight the x's by the cardinality of the clusters
-        #   because we will use it sᵢ times in the DRq approximation
-        this.cardinality = ones(m)
-        return this
-    end
-end
-
-@doc raw"""
-    update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}})
-    Update the cluster map of the SMWDRq structure, this decompose the players into clusters.
-"""
-update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}, cardinality::Vector{Float64}; centers=nothing) = begin
-    alg.Ha.q = length(cluster_map)
-    alg.Ha.s = zeros(alg.Ha.q)
-    alg.Ha.a = [zeros(alg.n) for _ in 1:alg.Ha.q]
-    alg.Ha.cluster_map = cluster_map
-    alg.Ha.cardinality = cardinality
-    if centers !== nothing
-        alg.Ha.centers = centers
-    end
-end
-
-@doc raw"""
-    __assemble_drq_approx(Ha::SMWDRq)
-
-    Assemble the DRq approximation of the inverse Hessian from the SMWDRq structure.
-        for debugging purposes.
-"""
-function __assemble_drq_approx(Ha::SMWDRq)
-    return spdiagm(Ha.d) + sum(Ha.s[i] * Ha.a[i] * Ha.a[i]' for i in 1:Ha.q)
-end
-
+using LinearAlgebra
 # -----------------------------------------------------------------------
 # main functions
 # -----------------------------------------------------------------------
@@ -214,47 +148,7 @@ function __ces_hess_dual!(alg, fisher::FisherMarket)
         # compute the exact Hessian of the affine-constrained problem
         __compute_exact_hess_afcon!(alg, fisher)
     elseif alg.linsys == :DRq
-        groups = alg.Ha.cluster_map
-        cards = alg.Ha.cardinality
-        q = length(groups)
-        n = size(fisher.x, 1)
-
-        pxbar = alg.p .* sum(fisher.x; dims=2)[:]
-        alg.Ha.d .= (fisher.σ + 1) * pxbar
-        alg.Ha.a = [zeros(n) for _ in 1:q]
-        alg.Ha.s = zeros(q)
-
-        # reweight the x's by the cardinality of the clusters
-        _x = fisher.x ./ cards'
-
-        for (i, idxs) in pairs(groups)
-            xsum = sum(_x[:, idxs]; dims=2)[:]
-            wsum = sum(fisher.w[idxs])
-            ai = (alg.p .* xsum) ./ wsum
-            si = -wsum * fisher.σ
-            alg.Ha.a[i] = ai
-            alg.Ha.s[i] = si
-        end
-    elseif alg.linsys == :DRq_rep
-        # this only works for CES for now
-        # TODO: implement to play!
-        groups = alg.Ha.cluster_map
-        cards = alg.Ha.cardinality
-        q = length(groups)
-        n = size(fisher.x, 1)
-        wealth = Dict(k => sum(fisher.w[v]) for (k, v) in groups)
-
-        alg.Ha.d .= 0.0
-
-        for (k, v) in groups
-            _ck = alg.Ha.centers[k]
-            _vf, _v∇f, _vHf = fisher.f∇f(alg.p, _ck)
-            _x = -wealth[k] ./ _vf ./ fisher.σ .* _v∇f
-            _γ = _x .* alg.p / wealth[k]
-            alg.Ha.d += _γ * (fisher.σ + 1) * wealth[k]
-            alg.Ha.a[k] = _γ
-            alg.Ha.s[k] = -wealth[k] * fisher.σ
-        end
+        __compute_approx_hess_drq!(alg, fisher)
     elseif alg.linsys == :krylov
         # no preprocessing needed
     else
@@ -265,26 +159,67 @@ end
 # -----------------------------------------------------------------------
 # compute the exact Hessian
 # -----------------------------------------------------------------------
+@doc raw"""
+    __compute_exact_hess!(alg, fisher::FisherMarket)
+    Compute the exact Hessian of the problem, ∇²f, not affine-scaled
+"""
 function __compute_exact_hess!(alg, fisher::FisherMarket)
-    σ = fisher.σ
-    w = fisher.w
-    _Hi = (i) -> begin
-        _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[:, i]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[:, i] * fisher.val_∇f[:, i]'
-        return _H .* (w[i] / σ)
-    end
-    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    # _Hi = (i) -> begin
+    #     _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[:, i]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[:, i] * fisher.val_∇f[:, i]'
+    #     return _H .* (w[i] / σ)
+    # end
+    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    b = alg.p .* fisher.x
+    pxbar = sum(b; dims=2)[:]
+    γ = 1 ./ fisher.w' .* b
+    u = fisher.w .* fisher.σ
+    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (fisher.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
     @info "use exact Hessian"
 end
 
-@doc raw"""
-    __compute_exact_hessop_afsc!(buff, alg, fisher::FisherMarket, v)
-    Compute the exact Hessian-vector product operator 
-        with affine-scaling P∇²fP + μ (if add_μ=true)
-"""
-function __compute_exact_hessop_afscale!(buff, alg, fisher::FisherMarket, v; add_μ=false)
-    b = alg.p .* fisher.x
-    _uu = sum(v .* b; dims=2)
-    buff .= _uu .* (fisher.σ + 1) - fisher.σ * b * (b' ./ fisher.w * v) + (add_μ * alg.μ) .* v
+
+function __compute_exact_hess_optimized!(alg, fisher::FisherMarket)
+    # On first call, convert alg.H to a dense Matrix if it was sparse:
+    if isa(alg.H, SparseMatrixCSC)
+        alg.H = Matrix(alg.H)
+    end
+
+    # Now alg.H is guaranteed dense
+    p = alg.p             # length-n
+    x = fisher.x          # n×m
+    w = fisher.w          # length-m
+    σ = fisher.σ
+    H = alg.H             # n×n dense Matrix
+    n, m = size(x)
+
+    @assert length(p) == n
+    @assert size(H) == (n, n)
+    @assert length(w) == m
+
+    # 1) sum over columns of x
+    sum_x = vec(sum(x; dims=2))                   # n
+
+    # 2) diag_term = (σ+1)*sum_x ./ p
+    diag_term = @. (σ + 1) * sum_x / p            # n
+
+    # 3) build W = x .* reshape(sqrt(σ ./ w), 1, m)
+    fac = sqrt.(σ ./ w)                           # m
+    W = @. x * fac'                             # n×m
+
+    # 4) H := diag(diag_term) - W*W' using BLAS.syrk!
+    fill!(H, 0.0)
+    @inbounds for i in 1:n
+        H[i, i] = diag_term[i]
+    end
+    LinearAlgebra.BLAS.syrk!('U', 'N', -1.0, W, 1.0, H)
+
+    # mirror upper→lower so H is fully populated
+    @inbounds for j in 1:n, i in j+1:n
+        H[i, j] = H[j, i]
+    end
+
+    @info "use exact Hessian (dense)"
+    return nothing
 end
 
 # -----------------------------------------------------------------------

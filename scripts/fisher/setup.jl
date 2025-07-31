@@ -21,14 +21,15 @@ method_kwargs = [
             :linsys => :DRq,
         )
     ],
-    [:LogBarAffineDirect,
+    [:LogBarAfscKrylov,
         HessianBar,
         Dict(
             :tol => 1e-12, :maxiter => 20,
             :optimizer => CESAnalytic,
             :option_mu => :normal,
             :option_step => :affinesc,
-            :linsys => :DRq,
+            # :linsys => :DRq,
+            :linsys => :krylov,
             # :linsys => :direct,
         )
     ],

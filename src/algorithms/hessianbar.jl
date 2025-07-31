@@ -46,8 +46,9 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     # step size
     α::T
     # Hessian
-    H::SparseMatrixCSC{T,Int}
+    H::Union{SparseMatrixCSC{T,Int},Matrix{T}}
     Ha::SMWDRq{T}
+    Hk::LinsysKrylov{T}
 
     # -------------------------------------------------------------------
     # timers, tolerances, counters
@@ -114,6 +115,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.∇₀ = zeros(n)
         this.H = spzeros(n, n)
         this.Ha = SMWDRq(n, 1, m)
+        this.Hk = LinsysKrylov(n)
         this.ts = time()
         this.maxiter = maxiter
         this.maxtime = maxtime
@@ -277,8 +279,9 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
         # update price
-        alg.α = α = αₘ = 1.0
+        # alg.α = α = αₘ = 1.0
         # alg.α = α = αₘ = 0.999
+        alg.α = α = αₘ = min(proj.(-(alg.pb) ./ alg.Δ)..., 1.0)
         alg.p .= alg.pb .+ α * alg.Δ
     end
 
@@ -293,7 +296,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 
     # update barrier parameter
     if alg.option_mu == :normal
-        alg.μ *= (1 - min(alg.α * 0.9, 0.98))
+        alg.μ *= (1 - min(alg.α * 0.98, 0.98))
         alg.μ = max(alg.μ, 1e-20)
     elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
@@ -321,6 +324,7 @@ function opt!(
     loginterval=1,
     logfile=nothing,
     reset::Bool=true,
+    bool_init_phase::Bool=true,
     # -----------------------------------------------
     # stopping criterion if has a ground truth price
     pₛ::Union{Vector{T},Nothing}=nothing,
@@ -328,7 +332,9 @@ function opt!(
     kwargs...
     # -----------------------------------------------
 ) where {T}
-    logfile = logfile === nothing ? open(joinpath(LOGDIR, "log-hessianbar-$(current_date()).log"), "a") : logfile
+    logfile = logfile === nothing ? open(
+        joinpath(LOGDIR, "log-hessianbar-$(current_date()).log"), "a"
+    ) : logfile
     ios = [stdout, logfile]
     printto(ios, __default_logger._blockheader)
     traj = []
@@ -374,7 +380,7 @@ function opt!(
             traj,
             StateInfo(_k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
-        if alg.k == 0
+        if alg.k == 0 && bool_init_phase == true
             printto(ios, "running Phase I...")
             printto(ios, __default_logger._loghead)
             bool_early_stop, _logline = init!(alg, fisher)

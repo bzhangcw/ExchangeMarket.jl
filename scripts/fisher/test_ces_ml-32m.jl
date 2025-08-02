@@ -17,16 +17,16 @@ bool_part = true
 Random.seed!(1)
 results = []
 results_phi = Dict()
-rrange = [-0.6, 0.6]
+rrange = [0.6]
 
 
-method_filter(name) = name ∈ [:Tât, :PropRes]
+method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :Tât, :PropRes]
 # method_filter(name) = name ∈ [:PropRes]
 table_time = []
 
 @load "scripts/ml-32m.jld2" S
 if bool_part
-    m = 10000
+    m = 2000
     n = 1000
     T = S[1:n, 1:m]
 else
@@ -88,7 +88,7 @@ for ρ in rrange
             break
         end
     end
-    push!(results, ((name, ρ), (alg, traj[1:k_max], f1)))
+    # push!(results, ((name, ρ), (alg, traj[1:k_max], f1)))
     for (name, method, kwargs) in method_kwargs
         !method_filter(name) && continue
 
@@ -106,7 +106,7 @@ for ρ in rrange
             alg, f1;
             keep_traj=true,
             pₛ=pₛ,
-            tol_p=ϵₚ
+            tol_p=ϵₚ,
         )
         push!(table_time, (n, m, name, ρ, traj[end].t))
         push!(results, ((name, ρ), (alg, traj, f1)))
@@ -131,7 +131,7 @@ for ρ in rrange
             # ylabel=L"$\Psi(\mathbf{p}) - \Psi^*$",
             title=L"$\rho := %$ρfmt~(\sigma := %$σfmt)$",
             legendbackgroundcolor=RGBA(1.0, 1.0, 1.0, 0.8),
-            yticks=10.0 .^ (-16:4:3),
+            yticks=10.0 .^ (-13:3:3),
             xtickfont=font(18),
             ytickfont=font(18),
             # xscale=attr == :k ? :log10 : :identity,
@@ -151,11 +151,35 @@ for ρ in rrange
             traj_tt₊ = map(pp -> getfield(pp, attr), traj)
             @info "" traj[end].t
             @info "" traj_pp₊
-            plot!(fig, traj_tt₊, traj_pp₊, label=L"\texttt{%$mm}", linewidth=2, linestyle=:dash, markershape=:circle)
+            if mm ∈ [:Tât]
+                plot!(
+                    fig, traj_tt₊[1:2:end], traj_pp₊[1:2:end],
+                    label=L"\texttt{%$mm}", linewidth=2,
+                    linestyle=:dash,
+                    markershape=marker_style[mm],
+                    color=colors[mm]
+                )
+            elseif mm ∈ [:PropRes]
+                plot!(
+                    fig, traj_tt₊[1:2:end], traj_pp₊[1:2:end],
+                    label=L"\texttt{%$mm}", linewidth=2,
+                    linestyle=:dash,
+                    markershape=marker_style[mm],
+                    color=colors[mm]
+                )
+            else
+                plot!(
+                    fig, traj_tt₊[1:2:end], traj_pp₊[1:2:end],
+                    label=L"\texttt{%$mm}", linewidth=2,
+                    linestyle=:dash,
+                    markershape=marker_style[mm],
+                    color=colors[mm]
+                )
+            end
         end
-        savefig(fig, "$(RESULTSDIR)/traj_x_$(ρfmt)_$(attr).pdf")
-        savefig(fig, "$(RESULTSDIR)/traj_x_$(ρfmt)_$(attr).tex")
-        println("saved to $(RESULTSDIR)/traj_x_$(ρfmt)_$(attr).tex")
+        savefig(fig, "$(RESULTSDIR)/traj-mov-$(ρfmt)_$(attr).pdf")
+        savefig(fig, "$(RESULTSDIR)/traj-mov-$(ρfmt)_$(attr).tex")
+        println("saved to $(RESULTSDIR)/traj-mov-$(ρfmt)_$(attr).tex")
     end
 end
 

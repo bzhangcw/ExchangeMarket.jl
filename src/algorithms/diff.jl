@@ -179,46 +179,50 @@ end
 
 
 function __compute_exact_hess_optimized!(alg, fisher::FisherMarket)
-    # On first call, convert alg.H to a dense Matrix if it was sparse:
+    # — ensure a dense target ———————————————––
     if isa(alg.H, SparseMatrixCSC)
         alg.H = Matrix(alg.H)
     end
-
-    # Now alg.H is guaranteed dense
-    p = alg.p             # length-n
-    x = fisher.x          # n×m
-    w = fisher.w          # length-m
-    σ = fisher.σ
-    H = alg.H             # n×n dense Matrix
-    n, m = size(x)
+    H = alg.H                      # n×n dense
+    # --- unpack ---------------------------------------------------------------
+    p = alg.p                     # length n
+    X = fisher.x                  # n×m
+    w = fisher.w                  # length m  (strictly >0)
+    σ = fisher.σ                  # scalar, may be negative
+    n, m = size(X)
 
     @assert length(p) == n
     @assert size(H) == (n, n)
     @assert length(w) == m
 
-    # 1) sum over columns of x
-    sum_x = vec(sum(x; dims=2))                   # n
+    W = similar(X)                     # n×m
 
-    # 2) diag_term = (σ+1)*sum_x ./ p
-    diag_term = @. (σ + 1) * sum_x / p            # n
+    # --- 1) diagonal term ------------------------------------------------------
+    row_sum = vec(sum(X; dims=2))           # n
+    diag_term = @. (σ + 1) * row_sum / p        # n
 
-    # 3) build W = x .* reshape(sqrt(σ ./ w), 1, m)
-    fac = sqrt.(σ ./ w)                           # m
-    W = @. x * fac'                             # n×m
+    # --- 2) build W = X .* (1 ./ √w)' -----------------------------------------
+    inv_sqrt_w = 1 ./ sqrt.(w)                  # m  (tiny alloc)
+    @inbounds for j in 1:m
+        @views W[:, j] .= X[:, j] .* inv_sqrt_w[j]
+    end
 
-    # 4) H := diag(diag_term) - W*W' using BLAS.syrk!
-    fill!(H, 0.0)
+    # --- 3) H ← diag(diag_term) ------------------------------------------------
+    fill!(H, 0)
     @inbounds for i in 1:n
         H[i, i] = diag_term[i]
     end
-    LinearAlgebra.BLAS.syrk!('U', 'N', -1.0, W, 1.0, H)
 
-    # mirror upper→lower so H is fully populated
-    @inbounds for j in 1:n, i in j+1:n
+    # --- 4) rank-k update: H ← H - σ·W·Wᵀ --------------------------------------
+    #     syrk! only touches the chosen triangle (here 'U')
+    LinearAlgebra.BLAS.syrk!('U', 'N', -σ, W, 1.0, H)
+
+    # --- 5) mirror upper → lower ----------------------------------------------
+    @inbounds for j in 1:n-1, i in j+1:n
         H[i, j] = H[j, i]
     end
 
-    @info "use exact Hessian (dense)"
+    @info "exact dense Hessian built (σ = $σ)"
     return nothing
 end
 

@@ -95,11 +95,21 @@ end
 
 function __krylov_afsc!(alg, fisher::FisherMarket)
     __update_php_hessop!(alg, fisher)
-    # d, stats = cg(alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ)
-    d, stats = cg(alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ; rtol=alg.μ, atol=alg.μ)
-    # d, stats = cg(alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ; rtol=√alg.μ * 10, atol=√alg.μ * 10)
+
+    τ₁ = zeros(fisher.n)
+    ExchangeMarket.__compute_exact_hessop_afscale_optimized!(
+        τ₁, alg, fisher, ones(fisher.n); add_μ=false
+    )
+    # diagonal preconditioner
+    M₁ = diagm(1 ./ τ₁)
+    d, stats = cg(
+        alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ;
+        M=M₁, # diagonal preconditioner
+        rtol=max(alg.μ, 1e-10), atol=max(alg.μ, 1e-10)
+    )
     alg.Hk.niter += stats.niter
     alg.Hk.niter_last = stats.niter
+    @info "apply diagonal preconditioner, niter = $(stats.niter); dim = $(fisher.n)"
     alg.Δ .= -alg.p .* d
 end
 

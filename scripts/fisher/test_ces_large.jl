@@ -15,7 +15,7 @@ switch_to_pdf(;)
 Random.seed!(1)
 results = []
 results_phi = Dict()
-rrange = [-0.9]
+rrange = [0.9]
 nrange = [1000, 2000, 5000]
 mrange = [10000, 50000, 100000]
 maxtime = 200
@@ -29,7 +29,8 @@ end
         and will be saving to $(RESULTSDIR)/table_time.csv
 """
 
-method_filter(name) = name ∈ [:LogBar, :Tât, :PropRes]
+method_filter(name) = name ∈ [:LogBarPCG]
+# method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :Tât, :PropRes]
 table_time = []
 for n in nrange
     for m in mrange

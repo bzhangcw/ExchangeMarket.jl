@@ -11,17 +11,8 @@ method_kwargs = [
             :linsys => :DRq,
         )
     ],
-    [:PathFol,
-        HessianBar,
-        Dict(
-            :tol => 1e-12, :optimizer => CESAnalytic,
-            :maxiter => 200, :μ => 1e0,
-            :option_mu => :nothing,
-            :option_step => :homotopy,
-            :linsys => :DRq,
-        )
-    ],
-    [:LogBarAfscKrylov,
+    # [:LogBarAfscPCG,
+    [:LogBarPCG,
         HessianBar,
         Dict(
             :tol => 1e-12, :maxiter => 20,
@@ -31,6 +22,16 @@ method_kwargs = [
             # :linsys => :DRq,
             :linsys => :krylov,
             # :linsys => :direct,
+        )
+    ],
+    [:PathFol,
+        HessianBar,
+        Dict(
+            :tol => 1e-12, :optimizer => CESAnalytic,
+            :maxiter => 200, :μ => 1e0,
+            :option_mu => :nothing,
+            :option_step => :homotopy,
+            :linsys => :DRq,
         )
     ],
     [:DampedNS,
@@ -62,6 +63,7 @@ method_kwargs = [
     ],
 ]
 
+
 # -----------------------------------------------------------------------
 # setups for more complex best response mappings, 
 #   may include linear constraints
@@ -78,3 +80,19 @@ method_kwargs_br_more_complex = [
         )
     ],
 ]
+
+
+colors = Dict(
+    :LogBar => 1,
+    :LogBarPCG => 2,
+    :PathFol => 3,
+    :Tât => 4,
+    :PropRes => 6,
+)
+marker_style = Dict(
+    :LogBar => :circle,
+    :LogBarPCG => :rect,
+    :PathFol => :dtriangle,
+    :Tât => :rect,
+    :PropRes => :rect,
+)

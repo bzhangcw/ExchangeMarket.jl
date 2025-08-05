@@ -16,6 +16,8 @@ function linsolve!(alg, fisher::FisherMarket)
     elseif alg.option_step == :logbar
         if alg.linsys ∈ [:DRq, :DRq_rep]
             __drq_pd!(alg, fisher)
+        elseif alg.linsys == :krylov
+            __krylov_pd!(alg, fisher)
         else
             error("unsupported linear system solver: $(alg.linsys) for $(alg.option_step)")
         end

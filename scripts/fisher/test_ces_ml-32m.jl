@@ -17,16 +17,18 @@ bool_part = true
 Random.seed!(1)
 results = []
 results_phi = Dict()
-rrange = [0.6]
+# rrange = [-0.9, 0.9]
+rrange = [0.9]
 
 
+# method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :Tât, :PropRes]
 method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :Tât, :PropRes]
 # method_filter(name) = name ∈ [:PropRes]
 table_time = []
 
 @load "scripts/ml-32m.jld2" S
 if bool_part
-    m = 2000
+    m = 20000
     n = 1000
     T = S[1:n, 1:m]
 else
@@ -35,7 +37,7 @@ S, cols, rows = ExchangeMarket.drop_empty(T)
 n, m = size(S)
 # S = Matrix(S)
 S = S .* 2.0
-ϵₚ = 1e-6
+ϵₚ = 1e-9
 
 
 for ρ in rrange
@@ -44,38 +46,28 @@ for ρ in rrange
     linconstr = LinearConstr(1, n, ones(1, n), [sum(f0.w)])
     ρfmt = @sprintf("%+.2f", ρ)
     σfmt = @sprintf("%+.2f", f0.σ)
+
     # -----------------------------------------------------------------------
     # compute ground truth
     # -----------------------------------------------------------------------
     f1 = copy(f0)
-
 
     p₀ = ones(n) * sum(f1.w) ./ (n)
     x₀ = ones(n, m) ./ m
     f1.x .= x₀
     f1.p .= p₀
     # use log-barrier method to compute ground truth
-    (name, method, kwargs) = method_kwargs[1]
+    (name, method, kwargs) = method_kwargs[2]
     alg = method(
         n, m, p₀;
         linconstr=linconstr,
         kwargs...
     )
-    # -----------------------------------------------------------------------
-    # how to do this?
-    # -----------------------------------------------------------------------
-    # Ω = 10
-    # from kmeans
-    # cluster_map, cardinality, r_kmeans, Ξ = cluster_kmeans(f1.c; k=Cc)
-    # ω = (f1.c .> 1e-5) .|> Int |> sparse
-    # naive clique extraction
-    # cluster_map, cardinality, cliques, G = cliques_from_fillin(ω; k=Ω)
-    # update_cluster_map!(alg, cluster_map, cardinality; centers=Dict(i => Ξ[:, i] for i in 1:Cc))
-    # -----------------------------------------------------------------------
 
     traj = opt!(
         alg, f1;
         # loginterval=1,
+        bool_init_phase=false,
         keep_traj=true
     )
     pₛ = copy(alg.p)
@@ -105,8 +97,10 @@ for ρ in rrange
         traj = opt!(
             alg, f1;
             keep_traj=true,
+            bool_init_phase=false,
             pₛ=pₛ,
             tol_p=ϵₚ,
+            maxiter=300,
         )
         push!(table_time, (n, m, name, ρ, traj[end].t))
         push!(results, ((name, ρ), (alg, traj, f1)))
@@ -140,14 +134,14 @@ for ρ in rrange
         if attr == :k
             plot!(
                 fig,
-                xticks=[10, 20, 50, 100, 200, 500]
+                xticks=[10, 50, 100, 200, 500]
             )
         end
         for ((mm, _ρ), (alg, traj, f1)) in results
             if _ρ != ρ
                 continue
             end
-            traj_pp₊ = map(pp -> pp.D, traj)
+            traj_pp₊ = map(pp -> pp.D, traj) .+ 1e-9
             traj_tt₊ = map(pp -> getfield(pp, attr), traj)
             @info "" traj[end].t
             @info "" traj_pp₊

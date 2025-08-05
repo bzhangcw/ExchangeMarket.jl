@@ -11,7 +11,6 @@ method_kwargs = [
             :linsys => :DRq,
         )
     ],
-    # [:LogBarAfscPCG,
     [:LogBarPCG,
         HessianBar,
         Dict(
@@ -19,9 +18,17 @@ method_kwargs = [
             :optimizer => CESAnalytic,
             :option_mu => :normal,
             :option_step => :affinesc,
-            # :linsys => :DRq,
             :linsys => :krylov,
-            # :linsys => :direct,
+        )
+    ],
+    [:LogBarPdPCG,
+        HessianBar,
+        Dict(
+            :tol => 1e-12, :maxiter => 20,
+            :optimizer => CESAnalytic,
+            :option_mu => :pred_corr,
+            :option_step => :logbar,
+            :linsys => :krylov,
         )
     ],
     [:PathFol,
@@ -85,6 +92,7 @@ method_kwargs_br_more_complex = [
 colors = Dict(
     :LogBar => 1,
     :LogBarPCG => 2,
+    :LogBarPdPCG => 2,
     :PathFol => 3,
     :Tât => 4,
     :PropRes => 6,
@@ -92,6 +100,7 @@ colors = Dict(
 marker_style = Dict(
     :LogBar => :circle,
     :LogBarPCG => :rect,
+    :LogBarPdPCG => :rect,
     :PathFol => :dtriangle,
     :Tât => :rect,
     :PropRes => :rect,

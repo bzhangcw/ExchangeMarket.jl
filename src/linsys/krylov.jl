@@ -125,6 +125,96 @@ function __krylov_afsc_with_H!(alg, fisher::FisherMarket)
     alg.Δ .= -alg.p .* d
 end
 
+function __krylov_pd!(alg, fisher::FisherMarket)
+    __update_php_hessop!(alg, fisher)
+    # rescale back to the original scale
+    # n = length(alg.p)
+    # invp = 1 ./ alg.p
+    # Σ = invp .* alg.s
+    # alg.Ha.d .= alg.Ha.d .* invp .^ 2 .+ Σ
+    # alg.Ha.a .= alg.Ha.a .* invp
+    # # compute the inverse operator of ∇^2 f + Σ 
+    # smw_drq!(alg.Ha)
+    n = length(alg.p)
+    invp = 1.0 ./ alg.p
+    Σ = invp .* alg.s
+
+    τ₁ = zeros(fisher.n)
+    ExchangeMarket.__compute_exact_hessop_afscale_optimized!(
+        τ₁, alg, fisher, ones(fisher.n); add_μ=false
+    )
+    # diagonal preconditioner
+    M₁ = diagm(1 ./ τ₁)
+
+    Hi(v) = begin
+        d, stats = cg(
+            alg.Hk.php_hessop, alg.p .* v;
+            M=M₁, # diagonal preconditioner
+            rtol=max(alg.μ, 1e-10), atol=max(alg.μ, 1e-10),
+            timemax=20.0
+        )
+        return d .* alg.p
+    end
+
+    # solve 
+    # |∇^2 f + Σ  A' -I | |Δ |   -|ξ₁|
+    # |A          0     | |Δy| = -|ξ₂|
+    # |S          0   P | |Δs|   -|ξ₃|
+    A, b = alg.linconstr.A, alg.linconstr.b
+    # compute the inverse of the Hessian
+    # !!! only support a simplex constraint for now
+    # GA = alg.Ha.Hi(A')
+    GA = Hi(A[:])[:]
+    _iAGA = 1 / (A*GA)[]
+    # -------------------------------------------------------------------
+    # predictor step
+    # -------------------------------------------------------------------
+    ξ₁ = alg.∇ + A' * alg.y - alg.s
+    ξ₂ = A * alg.p - b
+    ξ₃ = alg.p .* alg.s
+
+    # compute the primal-dual update
+    # g = alg.Ha.Hi(ξ₁ + ξ₃ .* invp)
+    g = Hi(ξ₁ + ξ₃ .* invp)
+    # accumulate the corrector
+    alg.Δy = -_iAGA * (A * g - ξ₂)
+    alg.Δ = -g - Hi(A' * alg.Δy)
+    alg.Δs = -invp .* ξ₃ - Σ .* alg.Δ
+
+    # stepsize for predictor
+    αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.ps ./ alg.Δs)..., 1.0)
+    α = αₘ * 0.9995
+
+    # trial step with stepsize α
+    alg.p .= alg.pb .+ α * alg.Δ
+    alg.s .= alg.ps .+ α * alg.Δs
+    alg.y .= alg.py .+ α * alg.Δy
+    # -------------------------------------------------------------------
+    # corrector step
+    # -------------------------------------------------------------------
+    # new complementarity
+    c₁ = alg.p' * alg.s
+    μ = (c₁ / sum(ξ₃))^2 * c₁ / n
+    begin
+        @debug "predictor stepsize: $αₘ, g: $(sum(ξ₃)), gₐ: $c₁"
+        @debug "gₐ/g $(c₁/sum(ξ₃))"
+        @debug "μ: $μ"
+    end
+    ξ₁ .= 0
+    ξ₂ .= 0
+    ξ₃ .= alg.Δ .* alg.Δs .- μ
+    # compute the primal-dual update
+    g = Hi(ξ₁ + ξ₃ .* invp)
+
+    # accumulate the corrector
+    _cΔy = -_iAGA * (A * g - ξ₂)
+    _cΔ = -g - Hi(A' * _cΔy)
+    _cΔs = -invp .* ξ₃ - Σ .* _cΔ
+    alg.Δy .+= _cΔy
+    alg.Δ .+= _cΔ
+    alg.Δs .+= _cΔs
+end
+
 function __krylov_homo!(alg, fisher::FisherMarket)
     # -------------------------------------------------------------------
     # solve

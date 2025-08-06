@@ -23,3 +23,10 @@ makedocs(
     checkdocs=:none,
     doctest=false,
 )
+
+# Documenter can also automatically deploy documentation to gh-pages.
+# See "Hosting Documentation" and deploydocs() for more information.
+deploydocs(
+    repo="github.com/bzhangcw/ExchangeMarket.jl.git",
+    devbranch="main",
+)

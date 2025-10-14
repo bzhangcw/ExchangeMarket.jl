@@ -24,13 +24,25 @@ mutable struct BatchSampler <: Sampler
 end
 
 
-function sample!(sampler::NullSampler, fisher::FisherMarket)
+function sample!(sampler::NullSampler, market::FisherMarket)
     if !isdefined(sampler, :index_set)
-        sampler.indices = 1:fisher.m
-        sampler.batchsize = fisher.m
+        sampler.indices = 1:market.m
+        sampler.batchsize = market.m
     end
 end
 
-function sample!(sampler::BatchSampler, fisher::FisherMarket)
-    sampler.indices .= shuffle(rng, 1:fisher.m)[1:sampler.batchsize]
+function sample!(sampler::BatchSampler, market::FisherMarket)
+    sampler.indices .= shuffle(rng, 1:market.m)[1:sampler.batchsize]
+end
+
+# Arrow–Debreu overloads
+function sample!(sampler::NullSampler, ad::ArrowDebreuMarket)
+    if !isdefined(sampler, :index_set)
+        sampler.indices = 1:ad.m
+        sampler.batchsize = ad.m
+    end
+end
+
+function sample!(sampler::BatchSampler, ad::ArrowDebreuMarket)
+    sampler.indices .= shuffle(rng, 1:ad.m)[1:sampler.batchsize]
 end

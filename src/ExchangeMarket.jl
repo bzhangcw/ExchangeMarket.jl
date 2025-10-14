@@ -20,6 +20,10 @@ include("utils.jl")
 include("models/tools.jl")
 include("models/constrs.jl")
 include("models/fisher.jl")
+include("models/arrow.jl")
+
+# common union for markets (needed by algorithms)
+const Market = Union{FisherMarket,ArrowDebreuMarket}
 
 
 # algorithms
@@ -45,7 +49,7 @@ include("algorithms/mirror.jl")
 export LOGDIR, RESULTSDIR
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
-export FisherMarket, validate
+export FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
 export eval!, grad!, hess!, iterate!, play!, opt!

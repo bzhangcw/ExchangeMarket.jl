@@ -1,0 +1,1 @@
+# exact recovery if it is linear Fisher/Arrow-Debreu market

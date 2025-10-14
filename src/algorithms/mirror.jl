@@ -106,23 +106,23 @@ end
 # -----------------------------------------------------------------------
 # main iterates
 # -----------------------------------------------------------------------
-function iterate!(alg::MirrorDec, fisher::FisherMarket)
+function iterate!(alg::MirrorDec, market::FisherMarket)
     alg.pb .= alg.p
     if (alg.k == 0) && (alg.optimizer.style == :bids)
         # initialize bids
-        fisher.b .= fisher.x .* (1 ./ alg.p)
-        sumb = sum(fisher.b, dims=2)[:]
-        fisher.b ./= sumb
-        fisher.b .*= fisher.w'
+        market.g .= market.x .* (1 ./ alg.p)
+        sumb = sum(market.g, dims=2)[:]
+        market.g ./= sumb
+        market.g .*= market.w'
     end
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual]
-        play!(alg, fisher; ϵᵢ=1e-4, verbose=false)
+        play!(alg, market; ϵᵢ=1e-4, verbose=false)
         # -------------------------------------------------------------------
         # compute dual function value, gradient and Hessian
         # !evaluate gradient first;
-        grad!(alg, fisher)
-        eval!(alg, fisher)
+        grad!(alg, market)
+        eval!(alg, market)
     else
         throw(ArgumentError("""
         invalid option for gradient: $(alg.option_grad)\n
@@ -133,7 +133,7 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
     # compute mirror-descent step
     if alg.option_stepsize == :cc13
         # use cc'13 step size, see ref[1]
-        alg.α .= 5 * max.(fisher.q, sum(fisher.x, dims=2)[:])
+        alg.α .= 5 * max.(market.q, sum(market.x, dims=2)[:])
     elseif alg.option_stepsize == :cc08
     else
         throw(ArgumentError("""
@@ -147,10 +147,10 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
         alg.dₙ = dₙ = norm(dp)
     elseif alg.option_step == :shmyrev
         if alg.optimizer.style == :bids
-            alg.p .= sum(fisher.b, dims=2)[:]
+            alg.p .= sum(market.g, dims=2)[:]
             alg.dₙ = norm(alg.p - alg.pb)
         else
-            dp = sum(fisher.x, dims=2)[:]
+            dp = sum(market.x, dims=2)[:]
             alg.p .= alg.pb .* dp
             alg.dₙ = dₙ = norm(dp)
         end
@@ -173,7 +173,7 @@ function iterate!(alg::MirrorDec, fisher::FisherMarket)
 end
 
 function opt!(
-    alg::MirrorDec, fisher::FisherMarket;
+    alg::MirrorDec, market::FisherMarket;
     p₀::Union{Vector{T},Nothing}=nothing,
     maxiter=1000,
     maxtime=100.0,
@@ -230,10 +230,10 @@ function opt!(
             traj,
             StateInfo(alg.k, copy(alg.p), alg.∇, alg.gₙ, _D, alg.dₙ, alg.φ, alg.t)
         )
-        _, _logline = iterate!(alg, fisher)
+        _, _logline = iterate!(alg, market)
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
-        if compute_stop(_k, alg, fisher) || (_D < tol_p)
+        if compute_stop(_k, alg, market) || (_D < tol_p)
             # if (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             printto(ios, __default_logger._logheadfo)
             printto(ios, _logline)
@@ -245,7 +245,7 @@ function opt!(
 
     printto(ios, __default_logger._sep)
     printto(ios, " ✓ final play")
-    play!(alg, fisher; verbose=false)
+    play!(alg, market; verbose=false)
     printto(ios, __default_logger._sep)
     return traj
 end

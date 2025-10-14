@@ -19,12 +19,12 @@ import MathOptInterface as MOI
 function __conic_log_response_ces(;
     i::Int=1,
     p::Vector{T}=nothing,
-    fisher::FisherMarket=nothing,
+    market::Market=nothing,
     μ=1e-4,
     verbose=false,
     kwargs...
 ) where {T}
-    ρ = fisher.ρ
+    ρ = market.ρ
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
 
@@ -32,25 +32,25 @@ function __conic_log_response_ces(;
     @variable(md, logu)
     log_to_expcone!(u, logu, md)
 
-    @variable(md, x[1:fisher.n] >= 0)
-    @variable(md, ξ[1:fisher.n] >= 0)
+    @variable(md, x[1:market.n] >= 0)
+    @variable(md, ξ[1:market.n] >= 0)
     # budget constraint
-    @constraint(md, budget, p' * x <= fisher.w[i])
+    @constraint(md, budget, p' * x <= market.w[i])
     # utility constraint
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    _c = fisher.c[:, i] .^ (1 / ρ)
+    _c = market.c[:, i] .^ (1 / ρ)
     @constraint(md, sum(ξ) == u)
     @constraint(
         md,
-        ξc[j=1:fisher.n],
+        ξc[j=1:market.n],
         [_c[j] * x[j], u, ξ[j]] in MOI.PowerCone(ρ)
     )
     @objective(md, Max, logu)
 
     JuMP.optimize!(md)
     # ensure non-negativity
-    fisher.x[:, i] .= max.(value.(x), 0.0)
+    market.x[:, i] .= max.(value.(x), 0.0)
     return ResponseInfo(
         objective_value(md),
         # the rest is dummy
@@ -76,22 +76,22 @@ solve the logarithmic utility maximization problem by JuMP + optimizer
 function __conic_log_response_ces_dual(;
     i::Int=1,
     p::Vector{T}=nothing,
-    fisher::FisherMarket=nothing,
+    market::Market=nothing,
     μ=1e-4,
     verbose=false
 ) where {T}
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
-    @variable(md, s[1:fisher.n] .>= 0)
-    @variable(md, logs[1:fisher.n])
+    @variable(md, s[1:market.n] .>= 0)
+    @variable(md, logs[1:market.n])
     @variable(md, v .>= 0)
     @variable(md, logv)
     log_to_expcone!.(s, logs, md)
     log_to_expcone!(v, logv, md)
-    @objective(md, Min, -fisher.w[i] * logv - μ * sum(logs))
-    @constraint(md, xc, s + v .* fisher.c[:, i] - p .== 0)
+    @objective(md, Min, -market.w[i] * logv - μ * sum(logs))
+    @constraint(md, xc, s + v .* market.c[:, i] - p .== 0)
     JuMP.optimize!(md)
-    fisher.x[:, i] .= abs.(dual.(xc))
+    market.x[:, i] .= abs.(dual.(xc))
     return ResponseInfo(
         objective_value(md),
         # the rest is dummy

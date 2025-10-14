@@ -34,13 +34,13 @@ Base.@kwdef mutable struct Conic
 end
 
 
-function __create_primal(alg::Conic, fisher::FisherMarket)
+function __create_primal(alg::Conic, market::FisherMarket)
     model = alg.model
-    m = fisher.m
-    n = fisher.n
-    u = fisher.u
-    q = fisher.q
-    w = fisher.w
+    m = market.m
+    n = market.n
+    u = market.u
+    q = market.q
+    w = market.w
     @variable(model, x[1:m, 1:n] >= 0)
     @variable(model, v[1:m])
     @variable(model, ℓ[1:m])
@@ -55,42 +55,42 @@ function __create_primal(alg::Conic, fisher::FisherMarket)
     JuMP.optimize!(model)
     # price saved in alg
     alg.p = -dual.(model[:limit])
-    # allocation saved in fisher
-    fisher.x = value.(model[:x])
-    fisher.val_u = value.(model[:ℓ])
+    # allocation saved in market
+    market.x = value.(model[:x])
+    market.val_u = value.(model[:ℓ])
 end
 
-function __create_dual(alg::Conic, fisher::FisherMarket)
+function __create_dual(alg::Conic, market::FisherMarket)
     model = alg.model
-    @variable(model, s[1:fisher.m, 1:fisher.n] .>= 0)
-    @variable(model, p[1:fisher.n])
-    @variable(model, λ[1:fisher.m])
-    @variable(model, logλ[1:fisher.m])
+    @variable(model, s[1:market.m, 1:market.n] .>= 0)
+    @variable(model, p[1:market.n])
+    @variable(model, λ[1:market.m])
+    @variable(model, logλ[1:market.m])
     log_to_expcone!.(λ, logλ, model)
-    @objective(model, Min, p' * fisher.q - sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]))
+    @objective(model, Min, p' * market.q - sum([market.w[i] * logλ[i] for i in 1:market.m]))
 
-    @constraint(model, xc[i=1:fisher.m], s[:, i] + λ[i] * fisher.c[:, i] - p .== 0)
+    @constraint(model, xc[i=1:market.m], s[:, i] + λ[i] * market.c[:, i] - p .== 0)
     JuMP.optimize!(model)
     alg.p = value.(p)
-    fisher.x = hcat([abs.(dual.(xc[i])) for i in 1:fisher.m]...)'
-    fisher.val_u = map(i -> fisher.u(fisher.x[:, i], i), 1:fisher.m)
+    market.x = hcat([abs.(dual.(xc[i])) for i in 1:market.m]...)'
+    market.val_u = map(i -> market.u(market.x[:, i], i), 1:market.m)
     return
 end
 
-function create_primal_linear(alg::Conic, fisher::FisherMarket)
-    __create_primal(alg, fisher)
+function create_primal_linear(alg::Conic, market::FisherMarket)
+    __create_primal(alg, market)
 end
 
-function create_dual_linear(alg::Conic, fisher::FisherMarket)
-    __create_dual(alg, fisher)
+function create_dual_linear(alg::Conic, market::FisherMarket)
+    __create_dual(alg, market)
 end
 
-function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
+function create_primal_ces(alg::Conic, market::FisherMarket, ρ::Float64=0.5)
     model = alg.model
-    m = fisher.m
-    n = fisher.n
-    q = fisher.q
-    w = fisher.w
+    m = market.m
+    n = market.n
+    q = market.q
+    w = market.w
     @variable(model, x[1:m, 1:n] >= 0)
     @variable(model, xp[1:m, 1:n] >= 0)
     # xp = x^ρ
@@ -100,59 +100,59 @@ function create_primal_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
     @variable(model, ℓ[1:m])
     @constraint(model, limit, x' * ones(m) .<= q)
     for i in 1:m
-        @constraint(model, ℓ[i] == sum(fisher.c[:, i] .* xp[:, i]))
+        @constraint(model, ℓ[i] == sum(market.c[:, i] .* xp[:, i]))
         log_to_expcone!(ℓ[i], v[i], model)
     end
-    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]) / ρ) - fisher.w' * log.(fisher.w)
+    @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]) / ρ) - market.w' * log.(market.w)
     # -----------------------------------------------------------------------
     # optimize
     JuMP.optimize!(model)
     # price saved in alg
     alg.p = -dual.(model[:limit])
-    # allocation saved in fisher
-    fisher.x = value.(model[:x])
-    fisher.val_u = value.(model[:ℓ] .^ (1 / ρ))
+    # allocation saved in market
+    market.x = value.(model[:x])
+    market.val_u = value.(model[:ℓ] .^ (1 / ρ))
 end
 
-function create_dual_ces(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
-    create_dual_ces_type_i(alg, fisher, ρ, bool_solve_p)
+function create_dual_ces(alg::Conic, market::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
+    create_dual_ces_type_i(alg, market, ρ, bool_solve_p)
 end
 
-function create_dual_ces_type_i(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
+function create_dual_ces_type_i(alg::Conic, market::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
     model = alg.model
-    @variable(model, p[1:fisher.n] .>= 0)
+    @variable(model, p[1:market.n] .>= 0)
     if !bool_solve_p
         @info "fix price p"
         set_lower_bound.(p, alg.p)
         set_upper_bound.(p, alg.p)
     end
-    @variable(model, λ[1:fisher.m])
-    @variable(model, logλ[1:fisher.m])
+    @variable(model, λ[1:market.m])
+    @variable(model, logλ[1:market.m])
     log_to_expcone!.(λ, logλ, model)
 
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    @variable(model, ξ[1:fisher.m, 1:fisher.n])
+    @variable(model, ξ[1:market.m, 1:market.n])
     @constraint(
         model,
-        λc[i=1:fisher.m],
+        λc[i=1:market.m],
         sum(ξ[:, i]) <= 1
     )
     @constraint(
         model,
-        ξc[i=1:fisher.m, j=1:fisher.n],
-        [p[j], ξ[i, j], fisher.c[i, j] * λ[i]] in MOI.PowerCone(ρ)
+        ξc[i=1:market.m, j=1:market.n],
+        [p[j], ξ[i, j], market.c[i, j] * λ[i]] in MOI.PowerCone(ρ)
     )
     @objective(model, Min,
-        p' * fisher.q -
-        1 / ρ * sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]) +
-        fisher.w' * log.(fisher.w)
+        p' * market.q -
+        1 / ρ * sum([market.w[i] * logλ[i] for i in 1:market.m]) +
+        market.w' * log.(market.w)
     )
     if bool_optimize
         JuMP.optimize!(model)
         alg.p = value.(p)
-        fisher.x = first.(dual.(alg.model[:ξc]))
-        fisher.val_u = map(i -> sum(fisher.c[:, i] .* (fisher.x[:, i] .^ ρ))^(1 / ρ), 1:fisher.m)
+        market.x = first.(dual.(alg.model[:ξc]))
+        market.val_u = map(i -> sum(market.c[:, i] .* (market.x[:, i] .^ ρ))^(1 / ρ), 1:market.m)
     end
     return
 end
@@ -162,38 +162,38 @@ end
 # this is formulation II (non-standard form)
 # I did this via conjugate dual, please see type I, which is more elegant
 # --------------------------------------------------------------------------
-function create_dual_ces_type_ii(alg::Conic, fisher::FisherMarket, ρ::Float64=0.5)
+function create_dual_ces_type_ii(alg::Conic, market::FisherMarket, ρ::Float64=0.5)
     model = alg.model
-    @variable(model, s[1:fisher.m, 1:fisher.n] .>= 0)
-    @variable(model, p[1:fisher.n] .>= 0)
-    @variable(model, Δ[1:fisher.m, 1:fisher.n])
+    @variable(model, s[1:market.m, 1:market.n] .>= 0)
+    @variable(model, p[1:market.n] .>= 0)
+    @variable(model, Δ[1:market.m, 1:market.n])
     # Δ_{ij} = p_j - s_{ij}
-    @constraint(model, Δc[i=1:fisher.m, j=1:fisher.n], Δ[i, j] == p[j] - s[i, j])
-    @variable(model, λ[1:fisher.m])
-    @variable(model, logλ[1:fisher.m])
+    @constraint(model, Δc[i=1:market.m, j=1:market.n], Δ[i, j] == p[j] - s[i, j])
+    @variable(model, λ[1:market.m])
+    @variable(model, logλ[1:market.m])
     log_to_expcone!.(λ, logλ, model)
     # r_{ij} = λ_i * ρ * c_{ij}
-    @variable(model, r[1:fisher.m, 1:fisher.n])
-    @constraint(model, rc[i=1:fisher.m, j=1:fisher.n], r[i, j] == λ[i] * ρ * fisher.c[i, j])
+    @variable(model, r[1:market.m, 1:market.n])
+    @constraint(model, rc[i=1:market.m, j=1:market.n], r[i, j] == λ[i] * ρ * market.c[i, j])
 
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    @variable(model, ξ[1:fisher.m, 1:fisher.n])
+    @variable(model, ξ[1:market.m, 1:market.n])
     @constraint(
         model,
-        ξc[i=1:fisher.m, j=1:fisher.n],
+        ξc[i=1:market.m, j=1:market.n],
         [Δ[i, j], ξ[i, j], r[i, j]] in MOI.PowerCone(ρ)
     )
     @objective(model, Min,
-        p' * fisher.q -
-        1 / ρ * sum([fisher.w[i] * logλ[i] for i in 1:fisher.m]) +
+        p' * market.q -
+        1 / ρ * sum([market.w[i] * logλ[i] for i in 1:market.m]) +
         (1 - ρ) / ρ * sum(ξ)
     )
 
     JuMP.optimize!(model)
     alg.p = value.(p)
-    fisher.x = first.(dual.(alg.model[:ξc]))
-    fisher.val_u = map(i -> sum(fisher.c[:, i] .* (fisher.x[:, i] .^ ρ))^(1 / ρ), 1:fisher.m)
+    market.x = first.(dual.(alg.model[:ξc]))
+    market.val_u = map(i -> sum(market.c[:, i] .* (market.x[:, i] .^ ρ))^(1 / ρ), 1:market.m)
     return
 end
 

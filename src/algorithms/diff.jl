@@ -7,60 +7,60 @@ using LinearAlgebra
 # -----------------------------------------------------------------------
 # main functions
 # -----------------------------------------------------------------------
-function grad!(alg, fisher::FisherMarket)
-    if fisher.ρ == 1.0
-        __linear_grad!(alg, fisher)
+function grad!(alg, market::Market)
+    if market.ρ == 1.0
+        __linear_grad!(alg, market)
     else
-        __ces_grad!(alg, fisher)
+        __ces_grad!(alg, market)
     end
 end
 
-function hess!(alg, fisher::FisherMarket; bool_dbg=false)
-    if fisher.ρ == 1.0
-        __linear_hess!(alg, fisher; bool_dbg=bool_dbg)
+function hess!(alg, market::Market; bool_dbg=false)
+    if market.ρ == 1.0
+        __linear_hess!(alg, market; bool_dbg=bool_dbg)
     else
-        __ces_hess!(alg, fisher; bool_dbg=bool_dbg)
+        __ces_hess!(alg, market; bool_dbg=bool_dbg)
     end
 end
 
-function eval!(alg, fisher::FisherMarket)
-    if fisher.ρ == 1.0
-        __linear_eval!(alg, fisher)
+function eval!(alg, market::Market)
+    if market.ρ == 1.0
+        __linear_eval!(alg, market)
     else
-        __ces_eval!(alg, fisher)
+        __ces_eval!(alg, market)
     end
 end
 
 # -----------------------------------------------------------------------
 # linear case
 # -----------------------------------------------------------------------
-function __linear_grad!(alg, fisher::FisherMarket; bool_dbg=false)
+function __linear_grad!(alg, market::Market; bool_dbg=false)
     if alg.option_grad == :usex
-        __linear_grad_fromx!(alg, fisher)
+        __linear_grad_fromx!(alg, market)
     else
-        # __linear_grad_dual!(alg, fisher)
+        # __linear_grad_dual!(alg, market)
     end
 end
 
-function __linear_hess!(alg, fisher::FisherMarket; bool_dbg=false)
+function __linear_hess!(alg, market::FisherMarket; bool_dbg=false)
     if alg.option_grad == :usex
-        __linear_hess_fromx!(alg, fisher; bool_dbg=bool_dbg)
+        __linear_hess_fromx!(alg, market; bool_dbg=bool_dbg)
     else
-        # __linear_hess_dual!(alg, fisher)
+        # __linear_hess_dual!(alg, market)
     end
 end
 
-function __linear_eval!(alg, fisher::FisherMarket)
+function __linear_eval!(alg, market::Market)
     if alg.option_grad == :usex
-        __linear_eval_fromx!(alg, fisher)
+        __linear_eval_fromx!(alg, market)
     else
-        # __linear_eval_dual!(alg, fisher)
+        # __linear_eval_dual!(alg, market)
     end
 end
 
 # :usex mode
-function __linear_grad_fromx!(alg, fisher::FisherMarket)
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - fisher.sumx
+function __linear_grad_fromx!(alg, market::Market)
+    alg.∇ .= market.q .* (alg.sampler.batchsize / market.m) - market.sumx
 end
 
 # compute Jacobian: -dx/dp
@@ -77,13 +77,13 @@ function __linear_jacpx_fromx(Xi₂, u, c, w, μ)
     return μ * Xi₂ + r * c * c'
 end
 
-function __linear_hess_fromx!(alg, fisher::FisherMarket; bool_dbg=false)
-    X2 = fisher.x[alg.sampler.indices, :] .^ 2
+function __linear_hess_fromx!(alg, market::FisherMarket; bool_dbg=false)
+    X2 = market.x[alg.sampler.indices, :] .^ 2
     Di(i) = begin
         X₂ = spdiagm(X2[:, i])
-        u = fisher.val_u[i]
-        c = fisher.val_∇u[:, i]
-        w = fisher.w[i]
+        u = market.val_u[i]
+        c = market.val_∇u[:, i]
+        w = market.w[i]
         jxp = __linear_jacxp_fromx(X₂, u, c, w, alg.μ)
         if bool_dbg
             Xi₂ = spdiagm(1 ./ X2[:, i])
@@ -92,15 +92,15 @@ function __linear_hess_fromx!(alg, fisher::FisherMarket; bool_dbg=false)
         end
         return jxp
     end
-    alg.H = mapreduce(Di, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    alg.H = mapreduce(Di, +, alg.sampler.indices, init=spzeros(market.n, market.n))
 end
 
-function __linear_eval_fromx!(alg, fisher::FisherMarket)
+function __linear_eval_fromx!(alg, market::Market)
     alg.φ = (
-        logbar(fisher.val_u, fisher.w) +
-        alg.μ * logbar(fisher.x) +
+        logbar(market.val_u, market.w) +
+        alg.μ * logbar(market.x) +
         alg.μ * logbar(alg.p) +
-        alg.p' * alg.∇ - alg.μ * fisher.n
+        alg.p' * alg.∇ - alg.μ * market.n
     )
 end
 
@@ -109,46 +109,46 @@ end
 # -----------------------------------------------------------------------
 # general CES case: ρ < 1
 # -----------------------------------------------------------------------
-function __ces_grad!(alg, fisher::FisherMarket; bool_dbg=false)
-    __ces_grad_dual!(alg, fisher)
+function __ces_grad!(alg, market::Market; bool_dbg=false)
+    __ces_grad_dual!(alg, market)
 end
 
-function __ces_hess!(alg, fisher::FisherMarket; bool_dbg=false)
-    __ces_hess_dual!(alg, fisher)
+function __ces_hess!(alg, market::Market; bool_dbg=false)
+    __ces_hess_dual!(alg, market)
 end
 
-function __ces_eval!(alg, fisher::FisherMarket)
-    __ces_eval_dual!(alg, fisher)
+function __ces_eval!(alg, market::Market)
+    __ces_eval_dual!(alg, market)
 end
 
 
 # -----------------------------------------------------------------------
 # general CES case: ρ < 1, :dual mode
 # -----------------------------------------------------------------------
-function __ces_eval_dual!(alg, fisher::FisherMarket)
-    σ = fisher.σ
-    w = fisher.w
+function __ces_eval_dual!(alg, market::Market)
+    σ = market.σ
+    w = market.w
     alg.φ = min(
-        alg.p' * fisher.q +
-        sum(w[i] * log(fisher.val_u[i]) for i in 1:fisher.m),
+        alg.p' * market.q +
+        sum(w[i] * log(market.val_u[i]) for i in 1:market.m),
         1e8
     )
 end
 
-function __ces_grad_dual!(alg, fisher::FisherMarket)
-    @assert fisher.ρ < 1
-    alg.∇ .= fisher.q .* (alg.sampler.batchsize / fisher.m) - fisher.sumx
+function __ces_grad_dual!(alg, market::Market)
+    @assert market.ρ < 1
+    alg.∇ .= market.q .* (alg.sampler.batchsize / market.m) - market.sumx
 end
 
-function __ces_hess_dual!(alg, fisher::FisherMarket)
+function __ces_hess_dual!(alg, market::FisherMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
     if alg.linsys == :direct
-        __compute_exact_hess!(alg, fisher)
+        __compute_exact_hess!(alg, market)
     elseif alg.linsys == :direct_affine
         # compute the exact Hessian of the affine-constrained problem
-        __compute_exact_hess_afcon!(alg, fisher)
+        __compute_exact_hess_afcon!(alg, market)
     elseif alg.linsys == :DRq
-        __compute_approx_hess_drq!(alg, fisher)
+        __compute_approx_hess_drq!(alg, market)
     elseif alg.linsys == :krylov
         # no preprocessing needed
     else
@@ -160,25 +160,27 @@ end
 # compute the exact Hessian
 # -----------------------------------------------------------------------
 @doc raw"""
-    __compute_exact_hess!(alg, fisher::FisherMarket)
+    __compute_exact_hess!(alg, market::FisherMarket)
     Compute the exact Hessian of the problem, ∇²f, not affine-scaled
 """
-function __compute_exact_hess!(alg, fisher::FisherMarket)
+function __compute_exact_hess!(alg, market::FisherMarket)
     # _Hi = (i) -> begin
-    #     _H = spdiagm(1 / fisher.val_f[i] .* fisher.val_Hf[:, i]) - (1 / fisher.val_f[i])^2 * fisher.val_∇f[:, i] * fisher.val_∇f[:, i]'
+    #     _H = spdiagm(1 / market.val_f[i] .* market.val_Hf[:, i]) - (1 / market.val_f[i])^2 * market.val_∇f[:, i] * market.val_∇f[:, i]'
     #     return _H .* (w[i] / σ)
     # end
-    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
-    b = alg.p .* fisher.x
+    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
+    b = alg.p .* market.x
     pxbar = sum(b; dims=2)[:]
-    γ = 1 ./ fisher.w' .* b
-    u = fisher.w .* fisher.σ
-    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (fisher.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+    γ = 1 ./ market.w' .* b
+    u = market.w .* market.σ
+    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
     @info "use exact Hessian"
 end
 
-
-function __compute_exact_hess_optimized!(alg, fisher::FisherMarket)
+# -----------------------------------------------------------------------
+# compute the exact Hessian
+# -----------------------------------------------------------------------
+function __compute_exact_hess_optimized!(alg, market::FisherMarket)
     # — ensure a dense target ———————————————––
     if isa(alg.H, SparseMatrixCSC)
         alg.H = Matrix(alg.H)
@@ -186,9 +188,9 @@ function __compute_exact_hess_optimized!(alg, fisher::FisherMarket)
     H = alg.H                      # n×n dense
     # --- unpack ---------------------------------------------------------------
     p = alg.p                     # length n
-    X = fisher.x                  # n×m
-    w = fisher.w                  # length m  (strictly >0)
-    σ = fisher.σ                  # scalar, may be negative
+    X = market.x                  # n×m
+    w = market.w                  # length m  (strictly >0)
+    σ = market.σ                  # scalar, may be negative
     n, m = size(X)
 
     @assert length(p) == n
@@ -233,28 +235,88 @@ end
 This computes the exact Hessian of the affine-constrained problem,
     namely, the log-UMP has an affine constraint on the allocation
 """
-function __compute_exact_hess_afcon!(alg, fisher::FisherMarket)
+function __compute_exact_hess_afcon!(alg, market::FisherMarket)
 
     _Hi = (i) -> begin
-        _γ = fisher.x[:, i] .* alg.p / fisher.w[i]
+        _γ = market.x[:, i] .* alg.p / market.w[i]
         _W = begin
-            ((1 - fisher.ρ) * diagm(alg.p .^ 2 ./ _γ) +
-             fisher.ρ * alg.p * alg.p') ./ (fisher.w[i]^2)
+            ((1 - market.ρ) * diagm(alg.p .^ 2 ./ _γ) +
+             market.ρ * alg.p * alg.p') ./ (market.w[i]^2)
         end
-        _constr_x = fisher.constr_x[i]
-        @assert _constr_x.n == fisher.n
+        _constr_x = market.constr_x[i]
+        @assert _constr_x.n == market.n
 
         # Z = [_W _constr_x.A'; _constr_x.A spzeros(_constr_x.m, _constr_x.m)]
-        # rhs = [1 / fisher.w[i] * I(fisher.n); zeros(_constr_x.m, _constr_x.n)]
+        # rhs = [1 / market.w[i] * I(market.n); zeros(_constr_x.m, _constr_x.n)]
         # sol = Z \ rhs
         # # first n rows
-        # _H = sol[1:fisher.n, :]
-        _iW = fisher.w[i]^2 / (1 - fisher.ρ) * diagm(1 ./ alg.p) * (diagm(_γ) - fisher.ρ * _γ * _γ') * diagm(1 ./ alg.p)
-        _iH = 1 / fisher.w[i] .* (
+        # _H = sol[1:market.n, :]
+        _iW = market.w[i]^2 / (1 - market.ρ) * diagm(1 ./ alg.p) * (diagm(_γ) - market.ρ * _γ * _γ') * diagm(1 ./ alg.p)
+        _iH = 1 / market.w[i] .* (
             _iW - _iW * _constr_x.A' * inv(_constr_x.A * _iW * _constr_x.A' + 1e-12 * I) * _constr_x.A * _iW
         )
         return _iH
     end
-    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(fisher.n, fisher.n))
+    alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
     @info "use exact Hessian from affine-constrained UMP"
+end
+
+# -----------------------------------------------------------------------
+# for ArrowDebreuMarket
+# -----------------------------------------------------------------------
+function __ces_hess_dual!(alg, market::ArrowDebreuMarket)
+    # compute 1/σ w_i * log(cs_i'p^{-σ})
+    if alg.linsys == :direct
+        __compute_exact_hess!(alg, market)
+    elseif alg.linsys == :direct_affine
+        # compute the exact Hessian of the affine-constrained problem
+        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
+    elseif alg.linsys == :DRq
+        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
+    elseif alg.linsys == :krylov
+        # no preprocessing needed
+        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
+    else
+        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
+    end
+end
+# -----------------------------------------------------------------------
+# compute the exact Hessian 
+# -----------------------------------------------------------------------
+@doc raw"""
+    __compute_exact_hess_only_fisher!(alg, market::Market)
+    Compute the exact Hessian of the problem, ∇²f, not affine-scaled
+    only for the `Fisher` part. i.e., ignore fact that budget is from `<price, endowment>`.
+"""
+function __compute_exact_hess_only_fisher!(alg, market::ArrowDebreuMarket)
+    # _Hi = (i) -> begin
+    #     _H = spdiagm(1 / market.val_f[i] .* market.val_Hf[:, i]) - (1 / market.val_f[i])^2 * market.val_∇f[:, i] * market.val_∇f[:, i]'
+    #     return _H .* (w[i] / σ)
+    # end
+    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
+    b = alg.p .* market.x
+    pxbar = sum(b; dims=2)[:]
+    γ = 1 ./ market.w' .* b
+    u = market.w .* market.σ
+    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+    @info "use exact Hessian"
+end
+
+function __compute_exact_hess!(alg, market::ArrowDebreuMarket)
+    # _Hi = (i) -> begin
+    #     _H = spdiagm(1 / market.val_f[i] .* market.val_Hf[:, i]) - (1 / market.val_f[i])^2 * market.val_∇f[:, i] * market.val_∇f[:, i]'
+    #     return _H .* (w[i] / σ)
+    # end
+    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
+    b = alg.p .* market.x
+    pxbar = sum(b; dims=2)[:]
+    γ = 1 ./ market.w' .* b
+    u = market.w .* market.σ
+    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+
+    # add the endowment term
+    θ = 1 ./ market.w' .* (alg.p .* market.b)
+    alg.H += -diagm(1 ./ alg.p) * γ * diagm(market.w) * θ' * diagm(1 ./ alg.p)
+
+    @info "use exact Hessian"
 end

@@ -67,25 +67,25 @@ end
     __compute_approx_hess_drq!(alg, fisher::FisherMarket)
     Compute needed information of for DRq approximation of the inverse Hessian.
 """
-function __compute_approx_hess_drq!(alg, fisher::FisherMarket)
+function __compute_approx_hess_drq!(alg, market::FisherMarket)
     groups = alg.Ha.cluster_map
     cards = alg.Ha.cardinality
     q = length(groups)
-    n = size(fisher.x, 1)
+    n = size(market.x, 1)
 
-    pxbar = alg.p .* sum(fisher.x; dims=2)[:]
-    alg.Ha.d .= (fisher.σ + 1) * pxbar
+    pxbar = alg.p .* sum(market.x; dims=2)[:]
+    alg.Ha.d .= (market.σ + 1) * pxbar
     alg.Ha.a = [zeros(n) for _ in 1:q]
     alg.Ha.s = zeros(q)
 
     # reweight the x's by the cardinality of the clusters
-    _x = fisher.x ./ cards'
+    _x = market.x ./ cards'
 
     for (i, idxs) in pairs(groups)
         xsum = sum(_x[:, idxs]; dims=2)[:]
-        wsum = sum(fisher.w[idxs])
+        wsum = sum(market.w[idxs])
         ai = (alg.p .* xsum) ./ wsum
-        si = -wsum * fisher.σ
+        si = -wsum * market.σ
         alg.Ha.a[i] = ai
         alg.Ha.s[i] = si
     end
@@ -153,7 +153,7 @@ end
     Diagonal + Rank-One method for linear system solver.
         applied in :affinesc mode
 """
-function __drq_afsc!(alg, fisher::FisherMarket)
+function __drq_afsc!(alg, market::FisherMarket)
     # -------------------------------------------------------------------
     # solve
     # -------------------------------------------------------------------
@@ -168,7 +168,7 @@ end
     Solve the linear system in the primal-dual update
         the inverse Hessian is computed by DR1 update.
 """
-function __drq_pd!(alg, fisher::FisherMarket)
+function __drq_pd!(alg, market::FisherMarket)
     # rescale back to the original scale
     # n = length(alg.p)
     # invp = 1 ./ alg.p
@@ -253,7 +253,7 @@ end
         see Nesterov (2018) Dvurechensky and Nesterov (2024)
         the inverse Hessian is computed by DR1 update.
 """
-function __drq_damped!(alg, fisher::FisherMarket)
+function __drq_damped!(alg, market::FisherMarket)
     # -------------------------------------------------------------------
     # solve
     # -------------------------------------------------------------------
@@ -270,7 +270,7 @@ end
         see Nesterov (2018) Dvurechensky and Nesterov (2024)
         the inverse Hessian is computed by DR1 update.
 """
-function __drq_homo!(alg, fisher::FisherMarket)
+function __drq_homo!(alg, market::FisherMarket)
     # -------------------------------------------------------------------
     # solve
     # -------------------------------------------------------------------

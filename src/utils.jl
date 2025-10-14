@@ -40,6 +40,8 @@ end
 
 # projection back (stepsize control)
 proj(x) = x < 0 ? Inf : x
+# safe power function
+spow(x, y) = x == 0.0 ? 0.0 : x^y
 
 # -----------------------------------------------------------------------
 # self-concordant barrier functions

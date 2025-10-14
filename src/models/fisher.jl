@@ -35,8 +35,6 @@ function toy_fisher(ρ)
     return fisher
 end
 
-spow(x, y) = x == 0.0 ? 0.0 : x^y
-
 Base.@kwdef mutable struct FisherMarket{T}
     m::Int # number of agents
     n::Int # number of goods
@@ -47,7 +45,7 @@ Base.@kwdef mutable struct FisherMarket{T}
     # -------------------------------------------------------------------
     # for propotional dynamics and IPMs
     # -------------------------------------------------------------------
-    b::Matrix{T} # bids
+    g::Matrix{T} # bids (rename from b to avoid endowment name clash)
 
     # -----------------------------------------------------------------------
     # utility function
@@ -146,7 +144,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.x = similar(c)
         this.sumx = zeros(n)
         # sometimes use bids instead of allocation
-        this.b = similar(c)
+        this.g = similar(c)
         this.df = DataFrame()
         this.constr_x = constr_x
         this.constr_p = constr_p
@@ -200,50 +198,6 @@ Base.@kwdef mutable struct FisherMarket{T}
         return this
     end
 end
-
-@doc """
-    __validate(fisher::FisherMarket)
-    -----------------------------------------------------------------------
-    validate the equilibrium of the Fisher Market.
-    use the price attached in the FisherMarket if no alg is provided.
-    inner use only.
-"""
-function __validate(fisher::FisherMarket)
-    validate(fisher, nothing)
-end
-
-function validate(fisher::FisherMarket, alg)
-    m = fisher.m
-    n = fisher.n
-    u = fisher.u
-    x = fisher.x
-    p = isnothing(alg) ? fisher.p : alg.p
-    μ = isnothing(alg) ? 0.0 : alg.μ
-    w = fisher.w
-
-    fisher.df = df = DataFrame(
-        :utility => fisher.val_u,
-        :left_budget => w - x' * p,
-    )
-    println(__default_sep)
-    @printf(" :problem size\n")
-
-    @printf(" :    number of agents: %d\n", fisher.m)
-    @printf(" :    number of goods: %d\n", fisher.n)
-    @printf(" :    avg number of nonzero entries in c: %.4f\n",
-        length(sparse(fisher.c).nzval) / (fisher.m * fisher.n)
-    )
-    @printf(" :equilibrium information\n")
-    @printf(" :method: %s\n", alg.name)
-    println(__default_sep)
-    println(first(df, 10))
-    println(__default_sep)
-    _excess = (sum(fisher.x; dims=2)[:] - fisher.q) ./ maximum(fisher.q)
-    @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
-    @printf(" :            social welfare:  %.8e\n", (log.(fisher.val_u))' * fisher.w)
-    println(__default_sep)
-end
-
 
 Base.copy(z::FisherMarket{T}) where {T} = begin
     this = FisherMarket(z.m, z.n)

@@ -167,15 +167,15 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     end
 end
 
-function init!(alg::HessianBar, fisher::FisherMarket)
-    fisher.b .= fisher.x .* (1 ./ alg.p)
-    sumb = sum(fisher.b, dims=2)[:]
-    fisher.b ./= sumb
-    fisher.b .*= fisher.w'
-    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, style=:bids)
-    alg.p .= sum(fisher.b, dims=2)[:]
-    grad!(alg, fisher)
-    eval!(alg, fisher)
+function init!(alg::HessianBar, market::FisherMarket)
+    market.g .= market.x .* (1 ./ alg.p)
+    sumb = sum(market.g, dims=2)[:]
+    market.g ./= sumb
+    market.g .*= market.w'
+    play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false, style=:bids)
+    alg.p .= sum(market.g, dims=2)[:]
+    grad!(alg, market)
+    eval!(alg, market)
     alg.gₙ = norm(alg.∇)
     alg.α = 1.0
     alg.gₜ = norm(alg.p .* alg.∇)
@@ -191,17 +191,17 @@ end
 # -----------------------------------------------------------------------
 # main iterates
 # -----------------------------------------------------------------------
-function iterate!(alg::HessianBar, fisher::FisherMarket)
+function iterate!(alg::HessianBar, market::FisherMarket)
     alg.pb .= alg.p
     # update all sub-problems of all agents i ∈ I
     if alg.option_grad in [:usex, :dual, :aff]
-        play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false)
+        play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
         # -------------------------------------------------------------------
         # compute dual function value, gradient and Hessian
         # !evaluate gradient first;
-        grad!(alg, fisher)
-        eval!(alg, fisher)
-        hess!(alg, fisher)
+        grad!(alg, market)
+        eval!(alg, market)
+        hess!(alg, market)
     else
         throw(ArgumentError("""
         invalid option for gradient: $(alg.option_grad)\n
@@ -220,7 +220,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
             @warn "linear constraint is not supported for affine scaling"
         end
         # compute affine-scaling Newton step
-        linsolve!(alg, fisher)
+        linsolve!(alg, market)
         alg.gₙ = gₙ = norm(alg.∇)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
@@ -234,7 +234,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.ps .= alg.s
         alg.py .= alg.y
 
-        linsolve!(alg, fisher)
+        linsolve!(alg, market)
         # standard ℓ₂ norm
         alg.gₙ = gₙ = norm(alg.∇)
         # local dual norm
@@ -261,7 +261,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
             use damped Newton step
         """
 
-        linsolve!(alg, fisher)
+        linsolve!(alg, market)
         alg.gₙ = gₙ = norm(alg.∇)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
@@ -274,7 +274,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
         alg.p .= alg.pb .+ α * alg.Δ
 
     elseif alg.option_step == :homotopy
-        linsolve!(alg, fisher)
+        linsolve!(alg, market)
         alg.gₙ = gₙ = norm(alg.∇)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇)
         alg.dₙ = dₙ = norm(alg.Δ)
@@ -315,7 +315,7 @@ function iterate!(alg::HessianBar, fisher::FisherMarket)
 end
 
 function opt!(
-    alg::HessianBar, fisher::FisherMarket;
+    alg::HessianBar, market::FisherMarket;
     p₀::Union{Vector{T},Nothing}=nothing,
     maxiter=1000,
     maxtime=100.0,
@@ -383,13 +383,13 @@ function opt!(
         if alg.k == 0 && bool_init_phase == true
             printto(ios, "running Phase I...")
             printto(ios, __default_logger._loghead)
-            bool_early_stop, _logline = init!(alg, fisher)
+            bool_early_stop, _logline = init!(alg, market)
             mod(_k, loginterval) == 0 && printto(ios, _logline)
             printto(ios, __default_logger._sep)
             printto(ios, "running Phase II...")
         else
             mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
-            bool_early_stop, _logline = iterate!(alg, fisher)
+            bool_early_stop, _logline = iterate!(alg, market)
             mod(_k, loginterval) == 0 && printto(ios, _logline)
             _k += 1
         end
@@ -404,7 +404,7 @@ function opt!(
 
     printto(ios, __default_logger._sep)
     printto(ios, " ✓  final play")
-    play!(alg, fisher; ϵᵢ=0.1 * alg.μ, verbose=false, all=true, timed=false)
+    play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false, all=true, timed=false)
     l = @sprintf(" ✓  finished in        %4d steps", alg.k)
     printto(ios, l)
     l = @sprintf("             in %.5e seconds", alg.t)

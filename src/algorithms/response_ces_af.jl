@@ -20,12 +20,12 @@ import MathOptInterface as MOI
 function __af_conic_log_response_ces(;
     i::Int=1,
     p::Vector{T}=nothing,
-    fisher::FisherMarket=nothing,
+    market::Market=nothing,
     μ=1e-4,
     verbose=false,
     kwargs...
 ) where {T}
-    ρ = fisher.ρ
+    ρ = market.ρ
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
 
@@ -33,31 +33,31 @@ function __af_conic_log_response_ces(;
     @variable(md, logu)
     log_to_expcone!(u, logu, md)
 
-    @variable(md, x[1:fisher.n] >= 0)
-    @variable(md, ξ[1:fisher.n] >= 0)
+    @variable(md, x[1:market.n] >= 0)
+    @variable(md, ξ[1:market.n] >= 0)
 
-    if !isnothing(fisher.constr_x)
-        @constraint(md, flow_balance, fisher.constr_x[i].A * x == fisher.constr_x[i].b)
+    if !isnothing(market.constr_x)
+        @constraint(md, flow_balance, market.constr_x[i].A * x == market.constr_x[i].b)
     else
         @warn "no constraint imposed on x, where is the affine constraint?"
     end
 
     # budget constraint
-    @constraint(md, budget, p' * x <= fisher.w[i])
+    @constraint(md, budget, p' * x <= market.w[i])
     # utility constraint
     # Δ^{ρ} ξ^{1-ρ}≥ r 
     # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    _c = fisher.c[:, i] .^ (1 / ρ)
+    _c = market.c[:, i] .^ (1 / ρ)
     @constraint(md, sum(ξ) == u)
     @constraint(
         md,
-        ξc[j=1:fisher.n],
+        ξc[j=1:market.n],
         [_c[j] * x[j], u, ξ[j]] in MOI.PowerCone(ρ)
     )
     @objective(md, Max, logu)
 
     JuMP.optimize!(md)
-    fisher.x[:, i] .= max.(value.(x), 0.0)
+    market.x[:, i] .= max.(value.(x), 0.0)
     return ResponseInfo(
         objective_value(md),
         # the rest is dummy

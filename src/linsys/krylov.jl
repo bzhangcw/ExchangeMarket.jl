@@ -47,15 +47,23 @@ end
         ∇²f + μ P⁻² = ∇² (f - μ⟨1, log(p)⟩)
 """
 function __compute_exact_hessop_afscale!(buff, alg, market::FisherMarket, v; add_μ=false)
-    b = alg.Hk.b
-    _uu = sum(v .* b; dims=2)
-    buff .= _uu .* (market.σ + 1) - market.σ * b * (b' ./ market.w * v) + (add_μ * alg.μ) .* v
+    b = alg.Hk.b                        # n×m (p .* x)
+    σ = market.σ                        # m
+    w = market.w                        # m
+    # diag term: (b * (1 .+ σ)) .* v  ≡ diag(γ*(w+u)) v
+    diag_term = b * (1 .+ σ)
+    # off-diagonal: - b * (σ .* ((b' * v) ./ w))
+    t = (transpose(b) * v) ./ w
+    buff .= diag_term .* v - b * (σ .* t) + (add_μ * alg.μ) .* v
 end
 
-function __compute_exact_hessop_afscale!(alg, market::FisherMarket, v; add_μ=false)
+function __compute_exact_hessop_afscale(alg, market::FisherMarket, v; add_μ=false)
     b = alg.Hk.b
-    _uu = sum(v .* b; dims=2)
-    return _uu .* (market.σ + 1) - market.σ * b * (b' ./ market.w * v) + (add_μ * alg.μ) .* v
+    σ = market.σ
+    w = market.w
+    diag_term = b * (1 .+ σ)
+    t = (transpose(b) * v) ./ w
+    return diag_term .* v - b * (σ .* t) + (add_μ * alg.μ) .* v
 end
 
 function __compute_exact_hessop_afscale_optimized!(
@@ -74,8 +82,8 @@ function __compute_exact_hessop_afscale_optimized!(
     b_t_v = zeros(T, m)
     ones_m = ones(T, m)
 
-    # 1) row_sum = b * ones_m     ⇒  Σ_j b[i,j]
-    mul!(row_sum, b, ones_m)          # BLAS gemv
+    # 1) diag term vector = b * (1 .+ σ)
+    mul!(row_sum, b, 1 .+ σ)          # BLAS gemv
 
     # 2) b_t_v  = b' * v           ⇒  Σ_i b[i,j]*v[i]
     mul!(b_t_v, transpose(b), v)      # BLAS gemv
@@ -83,12 +91,13 @@ function __compute_exact_hessop_afscale_optimized!(
     # 3) scale   b_t_v  .=  b_t_v ./ w
     @. b_t_v /= w
 
-    # 4) buff    = b * b_t_v       ⇒  s[i] = Σ_j b[i,j]*t[j]
+    # 4) off-diagonal product term: b * (σ .* b_t_v)
+    @. b_t_v = σ * b_t_v
     mul!(buff, b, b_t_v)             # BLAS gemv
 
     # 5) fuse the rest
     μ_eff = add_μ ? μ : zero(μ)
-    @. buff = (σ + 1) * (row_sum * v) - σ * buff + μ_eff * v
+    @. buff = row_sum * v - buff + μ_eff * v
 
     return buff
 end
@@ -97,7 +106,7 @@ function __krylov_afsc!(alg, market::FisherMarket)
     __update_php_hessop!(alg, market)
 
     τ₁ = zeros(market.n)
-    ExchangeMarket.__compute_exact_hessop_afscale_optimized!(
+    ExchangeMarket.__compute_exact_hessop_afscale!(
         τ₁, alg, market, ones(market.n); add_μ=false
     )
     # diagonal preconditioner
@@ -109,8 +118,11 @@ function __krylov_afsc!(alg, market::FisherMarket)
     )
     alg.Hk.niter += stats.niter
     alg.Hk.niter_last = stats.niter
-    @info "apply diagonal preconditioner, niter = $(stats.niter); dim = $(market.n)"
     alg.Δ .= -alg.p .* d
+    alg.kᵢ = alg.Hk.niter
+    if stats.niter >= 10
+        alg.linsys_msg = @sprintf("        |-> apply diagonal scaling, niter = %d; dim = %d", stats.niter, market.n)
+    end
 end
 
 function __krylov_afsc_with_H!(alg, market::FisherMarket)
@@ -123,6 +135,7 @@ function __krylov_afsc_with_H!(alg, market::FisherMarket)
     alg.Hk.niter += stats.niter
     alg.Hk.niter_last = stats.niter
     alg.Δ .= -alg.p .* d
+    alg.kᵢ = alg.Hk.niter
 end
 
 function __krylov_pd!(alg, market::FisherMarket)
@@ -213,6 +226,7 @@ function __krylov_pd!(alg, market::FisherMarket)
     alg.Δy .+= _cΔy
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
+    alg.kᵢ = alg.Hk.niter
 end
 
 function __krylov_homo!(alg, market::FisherMarket)
@@ -240,6 +254,6 @@ function __krylov_homo!(alg, market::FisherMarket)
     )
     alg.Hk.niter += stats.niter
     alg.Hk.niter_last = stats.niter
-
     alg.Δ .= -alg.p .* _d
+    alg.kᵢ = alg.Hk.niter
 end

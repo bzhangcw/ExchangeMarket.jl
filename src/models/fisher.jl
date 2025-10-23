@@ -71,9 +71,9 @@ Base.@kwdef mutable struct FisherMarket{T}
     c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
     # sum of x (for a limited samples)
     sumx::Vector{T}
-    # CES parameter
-    ρ::T
-    σ::T
+    # CES parameters (per-agent)
+    ρ::Vector{T}
+    σ::Vector{T}
 
     # -----------------------------------------------------------------------
     # dataframe for logging and display
@@ -123,8 +123,10 @@ Base.@kwdef mutable struct FisherMarket{T}
         this = new{Float64}()
         this.m = m
         this.n = n
-        this.ρ = ρ
-        this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ)
+        # handle scalar or vector ρ with helper
+        _ρ, _σ = normalize_rho_sigma(ρ, m)
+        this.ρ = copy(_ρ)
+        this.σ = copy(_σ)
         c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
         if bool_ensure_nz
             # ensure each row and column has at least one non-zero entry
@@ -134,7 +136,7 @@ Base.@kwdef mutable struct FisherMarket{T}
             c = Matrix(c)
         end
         this.c = copy(c)
-        println("FisherMarket cost matrix initialized in $(time() - ts) seconds")
+        @printf("FisherMarket cost matrix initialized in %.4f seconds\n", time() - ts)
         this.uₛ = (x, i) -> c[:, i]' * x
 
         this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
@@ -149,43 +151,53 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        if ρ == 1.0
-            # linear utility
-            this.u = this.uₛ
-            this.∇u = (x, i) -> c[:, i]
-            this.f = (p, i) -> begin
-                w[i] * maximum(c[:, i] ./ p)
+        # utility and indirect utility definitions supporting per-agent ρ/σ
+        this.u = (x, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return this.uₛ(x, i)
+            else
+                return sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
             end
-            this.f∇f = (p, i) -> begin
+        end
+        this.∇u = (x, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return c[:, i]
+            else
+                s = sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ - 1)
+                return s .* spow.(x, ρᵢ - 1) .* c[:, i]
+            end
+        end
+        # f and f∇f with per-agent σ
+        this.f = (p, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return w[i] * maximum(c[:, i] ./ p)
+            else
+                σᵢ = this.σ[i]
+                _cs = spow.(c[:, i], (1 + σᵢ))
+                _ps = spow.(p, (-σᵢ))
+                return _cs' * _ps
+            end
+        end
+        this.f∇f = (p, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                # return dummy smooth pieces for linear (not used in linear branches)
                 f = w[i] * maximum(c[:, i] ./ p)
-                ∇f = nothing # nonsmooth
-                return f, ∇f
-            end
-        else
-            # CES utility, ρ < 1
-            this.u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ)
-            this.∇u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ - 1) .*
-                                spow.(x, ρ - 1) .* c[:, i]
-
-            # the derivatives respect to p
-            # ignore outer power and coeff
-            # only compute
-            # r := c^(1+σ)'p^(-σ)
-            this.f∇f = (p, _ci) -> begin
-                _cs = spow.(_ci, 1 + σ)
-                _ps = spow.(p, -σ)
+                n = length(p)
+                return f, zeros(n), zeros(n)
+            else
+                σᵢ = this.σ[i]
+                _ci = c[:, i]
+                _cs = spow.(_ci, 1 + σᵢ)
+                _ps = spow.(p, -σᵢ)
                 _cp = _cs' * _ps
                 f = _cp
-                ∇f = -σ .* _cs .* spow.(p, (-σ - 1))
-                Hf = σ * (σ + 1) .* _cs .* (spow.(p, -σ - 2))
+                ∇f = -σᵢ .* _cs .* spow.(p, (-σᵢ - 1))
+                Hf = σᵢ * (σᵢ + 1) .* _cs .* (spow.(p, -σᵢ - 2))
                 return f, ∇f, Hf
-            end
-            this.f = (p, i) -> begin
-                _cs = spow.(c[:, i], (1 + σ))
-                _ps = spow.(p, (-σ))
-                _cp = _cs' * _ps
-                f = _cp
-                return f
             end
         end
 
@@ -194,7 +206,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.val_f = zeros(m)
         this.val_∇f = similar(c)
         this.val_Hf = similar(c)
-        println("FisherMarket initialized in $(time() - ts) seconds")
+        @printf("FisherMarket initialized in %.4f seconds\n", time() - ts)
         return this
     end
 end

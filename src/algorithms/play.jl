@@ -29,7 +29,6 @@ function play!(
         Threads.atomic_add!(_k, info.k)
     end
     timed && (alg.tₗ += time() - _ts)
-    alg.kᵢ = _k.value / market.n
     verbose && validate(market, alg.μ)
     market.sumx .= sum(market.x[:, alg.sampler.indices]; dims=2)[:]
 end
@@ -96,7 +95,7 @@ function solve_substep!(
 
 
     elseif style == :analytic
-        if market.ρ == 1
+        if is_linear_market(market)
             ratio = market.c[:, i] ./ alg.p
             # argmax returns the index of the maximum value,
             # it is always the smallest one among the ties.
@@ -105,8 +104,8 @@ function solve_substep!(
             market.x[j₊, i] = market.w[i] / alg.p[j₊]
             market.val_u[i] = market.u(market.x[:, i], i)
         else
-            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, market.c[:, i])
-            market.x[:, i] = -market.w[i] ./ market.val_f[i] ./ market.σ .* market.val_∇f[:, i]
+            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, i)
+            market.x[:, i] = -market.w[i] ./ market.val_f[i] ./ market.σ[i] .* market.val_∇f[:, i]
             market.val_u[i] = market.u(market.x[:, i], i)
         end
         return ResponseInfo(
@@ -118,19 +117,19 @@ function solve_substep!(
     elseif style == :bids
         # @info "use bids to recover allocation"
         # use bids to recover allocation
-        if market.ρ >= 0
+        if all(market.ρ .>= 0)
             market.x[:, i] = market.g[:, i] ./ alg.p
             market.val_u[i] = market.u(market.x[:, i], i)
-            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, market.c[:, i])
-            cs = market.c[:, i] .* spow.(market.x[:, i], market.ρ)
+            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, i)
+            cs = market.c[:, i] .* spow.(market.x[:, i], market.ρ[i])
             sumcs = sum(cs)
             # update bids
             market.g[:, i] .= market.w[i] * cs ./ sumcs
         else
             market.x[:, i] = market.g[:, i] ./ alg.p
             market.val_u[i] = market.u(market.x[:, i], i)
-            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, market.c[:, i])
-            cs = spow.(market.c[:, i] ./ spow.(alg.p, market.ρ), 1 / (1 - market.ρ))
+            market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(alg.p, i)
+            cs = spow.(market.c[:, i] ./ spow.(alg.p, market.ρ[i]), 1 / (1 - market.ρ[i]))
             sumcs = sum(cs)
             market.g[:, i] .= market.w[i] * cs ./ sumcs
         end

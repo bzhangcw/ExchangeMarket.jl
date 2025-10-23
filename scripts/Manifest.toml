@@ -2,7 +2,7 @@
 
 julia_version = "1.10.3"
 manifest_format = "2.0"
-project_hash = "829986e365546c130613abf996d3c5db0337a429"
+project_hash = "90be82704bc2d97797e8831ed092fd5e997e1a05"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "e2478490447631aedba0823d4d7a80b2cc8cdb32"
@@ -210,6 +210,12 @@ version = "1.0.9+0"
 git-tree-sha1 = "389ad5c84de1ae7cf0e28e381131c98ea87d54fc"
 uuid = "fa961155-64e5-5f13-b03f-caf6b980ea82"
 version = "0.5.0"
+
+[[deps.COPT]]
+deps = ["LazyArtifacts", "Libdl", "LinearAlgebra", "MathOptInterface", "Pkg", "Random", "SparseArrays"]
+git-tree-sha1 = "b5676403221271d2fb90e2fad9277a7af32607d2"
+uuid = "227a2e2d-e949-4d8e-a1da-7384fe6f0b9f"
+version = "1.1.28"
 
 [[deps.CPUSummary]]
 deps = ["CpuId", "IfElse", "PrecompileTools", "Static"]
@@ -2617,7 +2623,7 @@ uuid = "8e850ede-7688-5339-a07c-302acd2aaf8d"
 version = "1.52.0+1"
 
 [[deps.oneTBB_jll]]
-deps = ["Artifacts", "JLLWrappers", "Libdl"]
+deps = ["Artifacts", "JLLWrappers", "LazyArtifacts", "Libdl"]
 git-tree-sha1 = "d5a767a3bb77135a99e433afe0eb14cd7f6914c3"
 uuid = "1317d2d5-d96f-522e-a858-c73665f53c3e"
 version = "2022.0.0+0"

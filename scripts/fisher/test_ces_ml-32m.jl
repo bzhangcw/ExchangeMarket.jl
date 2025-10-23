@@ -26,7 +26,7 @@ method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :Tât, :PropRes]
 # method_filter(name) = name ∈ [:PropRes]
 table_time = []
 
-@load "scripts/ml-32m.jld2" S
+@load "dataset/ml-32m.jld2" S
 if bool_part
     m = 20000
     n = 1000
@@ -45,7 +45,6 @@ for ρ in rrange
     f0 = FisherMarket(m, n; c=S, ρ=ρ, bool_unit=true, bool_unit_wealth=true, scale=0.1, bool_ensure_nz=true)
     linconstr = LinearConstr(1, n, ones(1, n), [sum(f0.w)])
     ρfmt = @sprintf("%+.2f", ρ)
-    σfmt = @sprintf("%+.2f", f0.σ)
 
     # -----------------------------------------------------------------------
     # compute ground truth

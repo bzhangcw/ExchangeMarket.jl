@@ -66,6 +66,8 @@ end
 @doc raw"""
     __compute_approx_hess_drq!(alg, fisher::FisherMarket)
     Compute needed information of for DRq approximation of the inverse Hessian.
+        the inverse Hessian is approximated by the DRq form:
+            H⁻¹(x) ≈ (D + ∑ sᵢ aᵢ aᵢ')⁻¹ x
 """
 function __compute_approx_hess_drq!(alg, market::FisherMarket)
     groups = alg.Ha.cluster_map
@@ -73,42 +75,24 @@ function __compute_approx_hess_drq!(alg, market::FisherMarket)
     q = length(groups)
     n = size(market.x, 1)
 
-    pxbar = alg.p .* sum(market.x; dims=2)[:]
-    alg.Ha.d .= (market.σ + 1) * pxbar
+    # bidding matrix shape: n×m
+    γ = (alg.p .* market.x) ./ market.w'
+    u = market.w .* market.σ
+
+
+    alg.Ha.d .= γ * (market.w .+ u)
     alg.Ha.a = [zeros(n) for _ in 1:q]
     alg.Ha.s = zeros(q)
 
-    # reweight the x's by the cardinality of the clusters
-    _x = market.x ./ cards'
 
+    # for each cluster
     for (i, idxs) in pairs(groups)
-        xsum = sum(_x[:, idxs]; dims=2)[:]
-        wsum = sum(market.w[idxs])
-        ai = (alg.p .* xsum) ./ wsum
-        si = -wsum * market.σ
-        alg.Ha.a[i] = ai
-        alg.Ha.s[i] = si
+        Ω = sum(u[idxs])
+        ω = u[idxs] ./ Ω
+        ξ = γ[:, idxs] * ω
+        alg.Ha.a[i] = ξ
+        alg.Ha.s[i] = -Ω
     end
-    # elseif alg.linsys == :DRq_rep
-    #     # this only works for CES for now
-    #     # TODO: implement to play!
-    #     groups = alg.Ha.cluster_map
-    #     cards = alg.Ha.cardinality
-    #     q = length(groups)
-    #     n = size(fisher.x, 1)
-    #     wealth = Dict(k => sum(fisher.w[v]) for (k, v) in groups)
-
-    #     alg.Ha.d .= 0.0
-
-    #     for (k, v) in groups
-    #         _ck = alg.Ha.centers[k]
-    #         _vf, _v∇f, _vHf = fisher.f∇f(alg.p, _ck)
-    #         _x = -wealth[k] ./ _vf ./ fisher.σ .* _v∇f
-    #         _γ = _x .* alg.p / wealth[k]
-    #         alg.Ha.d += _γ * (fisher.σ + 1) * wealth[k]
-    #         alg.Ha.a[k] = _γ
-    #         alg.Ha.s[k] = -wealth[k] * fisher.σ
-    #     end
 end
 
 @doc raw"""
@@ -124,7 +108,10 @@ end
 @doc raw"""
     smw_drq!(Ha::SMWDRq)
 
-    Iteratively apply Sherman–Morrison updates for each (sᵢ, aᵢ) to compute inverse Hessian operator.
+    Iteratively apply Sherman–Morrison updates for each (sᵢ, aᵢ) 
+        to compute inverse Hessian operator.
+        the inverse Hessian is approximated by the DRq form:
+            H⁻¹(x) ≈ (D + ∑ sᵢ aᵢ aᵢ')⁻¹ x
     returns a linear operator of the inverse Hessian.
 """
 function smw_drq!(Ha::SMWDRq)
@@ -244,6 +231,7 @@ function __drq_pd!(alg, market::FisherMarket)
     alg.Δy .+= _cΔy
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
+    alg.kᵢ += 1
 end
 
 @doc raw"""

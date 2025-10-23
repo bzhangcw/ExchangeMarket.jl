@@ -8,7 +8,7 @@ using LinearAlgebra
 # main functions
 # -----------------------------------------------------------------------
 function grad!(alg, market::Market)
-    if market.ρ == 1.0
+    if is_linear_market(market)
         __linear_grad!(alg, market)
     else
         __ces_grad!(alg, market)
@@ -16,7 +16,7 @@ function grad!(alg, market::Market)
 end
 
 function hess!(alg, market::Market; bool_dbg=false)
-    if market.ρ == 1.0
+    if is_linear_market(market)
         __linear_hess!(alg, market; bool_dbg=bool_dbg)
     else
         __ces_hess!(alg, market; bool_dbg=bool_dbg)
@@ -24,7 +24,7 @@ function hess!(alg, market::Market; bool_dbg=false)
 end
 
 function eval!(alg, market::Market)
-    if market.ρ == 1.0
+    if is_linear_market(market)
         __linear_eval!(alg, market)
     else
         __ces_eval!(alg, market)
@@ -126,7 +126,6 @@ end
 # general CES case: ρ < 1, :dual mode
 # -----------------------------------------------------------------------
 function __ces_eval_dual!(alg, market::Market)
-    σ = market.σ
     w = market.w
     alg.φ = min(
         alg.p' * market.q +
@@ -136,14 +135,14 @@ function __ces_eval_dual!(alg, market::Market)
 end
 
 function __ces_grad_dual!(alg, market::Market)
-    @assert market.ρ < 1
+    @assert all(market.ρ .< 1)
     alg.∇ .= market.q .* (alg.sampler.batchsize / market.m) - market.sumx
 end
 
 function __ces_hess_dual!(alg, market::FisherMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
     if alg.linsys == :direct
-        __compute_exact_hess!(alg, market)
+        __compute_exact_hess_optimized!(alg, market)
     elseif alg.linsys == :direct_affine
         # compute the exact Hessian of the affine-constrained problem
         __compute_exact_hess_afcon!(alg, market)
@@ -164,16 +163,10 @@ end
     Compute the exact Hessian of the problem, ∇²f, not affine-scaled
 """
 function __compute_exact_hess!(alg, market::FisherMarket)
-    # _Hi = (i) -> begin
-    #     _H = spdiagm(1 / market.val_f[i] .* market.val_Hf[:, i]) - (1 / market.val_f[i])^2 * market.val_∇f[:, i] * market.val_∇f[:, i]'
-    #     return _H .* (w[i] / σ)
-    # end
-    # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
-    b = alg.p .* market.x
-    pxbar = sum(b; dims=2)[:]
-    γ = 1 ./ market.w' .* b
+    # bidding matrix shape: n×m
+    γ = (alg.p .* market.x) ./ market.w'
     u = market.w .* market.σ
-    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+    alg.H .= diagm(1 ./ alg.p) * (diagm(γ * (market.w .+ u)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
     @info "use exact Hessian"
 end
 
@@ -190,7 +183,7 @@ function __compute_exact_hess_optimized!(alg, market::FisherMarket)
     p = alg.p                     # length n
     X = market.x                  # n×m
     w = market.w                  # length m  (strictly >0)
-    σ = market.σ                  # scalar, may be negative
+    σv = market.σ                 # length m (heterogeneous allowed)
     n, m = size(X)
 
     @assert length(p) == n
@@ -200,8 +193,10 @@ function __compute_exact_hess_optimized!(alg, market::FisherMarket)
     W = similar(X)                     # n×m
 
     # --- 1) diagonal term ------------------------------------------------------
-    row_sum = vec(sum(X; dims=2))           # n
-    diag_term = @. (σ + 1) * row_sum / p        # n
+    # From H = P⁻¹[diag(γ*(w+u)) - γ diag(u) γ']P⁻¹, diag part becomes
+    # diag_k = (∑_i X[k,i]*(1+σ_i)) / p_k
+    row_weighted = X * (1 .+ σv)
+    diag_term = @. row_weighted / p
 
     # --- 2) build W = X .* (1 ./ √w)' -----------------------------------------
     inv_sqrt_w = 1 ./ sqrt.(w)                  # m  (tiny alloc)
@@ -215,16 +210,17 @@ function __compute_exact_hess_optimized!(alg, market::FisherMarket)
         H[i, i] = diag_term[i]
     end
 
-    # --- 4) rank-k update: H ← H - σ·W·Wᵀ --------------------------------------
-    #     syrk! only touches the chosen triangle (here 'U')
-    LinearAlgebra.BLAS.syrk!('U', 'N', -σ, W, 1.0, H)
+    # --- 4) rank-k update: H ← H - ∑ᵢ σᵢ·W[:,i]·W[:,i]ᵀ -----------------------
+    for j in 1:m
+        LinearAlgebra.BLAS.syr!('U', -σv[j], view(W, :, j), H)
+    end
 
     # --- 5) mirror upper → lower ----------------------------------------------
     @inbounds for j in 1:n-1, i in j+1:n
         H[i, j] = H[j, i]
     end
 
-    @info "exact dense Hessian built (σ = $σ)"
+    @info "exact dense Hessian built (heterogeneous σ)"
     return nothing
 end
 
@@ -239,9 +235,10 @@ function __compute_exact_hess_afcon!(alg, market::FisherMarket)
 
     _Hi = (i) -> begin
         _γ = market.x[:, i] .* alg.p / market.w[i]
+        ρᵢ = market.ρ[i]
         _W = begin
-            ((1 - market.ρ) * diagm(alg.p .^ 2 ./ _γ) +
-             market.ρ * alg.p * alg.p') ./ (market.w[i]^2)
+            ((1 - ρᵢ) * diagm(alg.p .^ 2 ./ _γ) +
+             ρᵢ * alg.p * alg.p') ./ (market.w[i]^2)
         end
         _constr_x = market.constr_x[i]
         @assert _constr_x.n == market.n
@@ -251,7 +248,7 @@ function __compute_exact_hess_afcon!(alg, market::FisherMarket)
         # sol = Z \ rhs
         # # first n rows
         # _H = sol[1:market.n, :]
-        _iW = market.w[i]^2 / (1 - market.ρ) * diagm(1 ./ alg.p) * (diagm(_γ) - market.ρ * _γ * _γ') * diagm(1 ./ alg.p)
+        _iW = market.w[i]^2 / (1 - ρᵢ) * diagm(1 ./ alg.p) * (diagm(_γ) - ρᵢ * _γ * _γ') * diagm(1 ./ alg.p)
         _iH = 1 / market.w[i] .* (
             _iW - _iW * _constr_x.A' * inv(_constr_x.A * _iW * _constr_x.A' + 1e-12 * I) * _constr_x.A * _iW
         )
@@ -295,10 +292,10 @@ function __compute_exact_hess_only_fisher!(alg, market::ArrowDebreuMarket)
     # end
     # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
     b = alg.p .* market.x
-    pxbar = sum(b; dims=2)[:]
     γ = 1 ./ market.w' .* b
     u = market.w .* market.σ
-    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+    diag_term = b * (market.σ .+ 1)
+    alg.H .= diagm(1 ./ alg.p) * (diagm(diag_term) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
     @info "use exact Hessian"
 end
 
@@ -309,14 +306,14 @@ function __compute_exact_hess!(alg, market::ArrowDebreuMarket)
     # end
     # alg.H .= mapreduce(_Hi, +, alg.sampler.indices, init=spzeros(market.n, market.n))
     b = alg.p .* market.x
-    pxbar = sum(b; dims=2)[:]
     γ = 1 ./ market.w' .* b
     u = market.w .* market.σ
-    alg.H .= diagm(1 ./ alg.p) * (diagm(pxbar .* (market.σ + 1)) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
+    diag_term = b * (market.σ .+ 1)
+    alg.H .= diagm(1 ./ alg.p) * (diagm(diag_term) - γ * diagm(u) * γ') * diagm(1 ./ alg.p)
 
     # add the endowment term
     θ = 1 ./ market.w' .* (alg.p .* market.b)
     alg.H += -diagm(1 ./ alg.p) * γ * diagm(market.w) * θ' * diagm(1 ./ alg.p)
 
-    @info "use exact Hessian"
+    # @info "use exact Hessian"
 end

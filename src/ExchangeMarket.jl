@@ -24,7 +24,7 @@ include("models/arrow.jl")
 
 # common union for markets (needed by algorithms)
 const Market = Union{FisherMarket,ArrowDebreuMarket}
-
+include("models/validate.jl")
 
 # algorithms
 include("algorithms/algbase.jl")

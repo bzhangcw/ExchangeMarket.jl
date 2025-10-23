@@ -11,8 +11,6 @@ using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
-spow(x, y) = x == 0.0 ? 0.0 : x^y
-
 Base.@kwdef mutable struct ArrowDebreuMarket{T}
     m::Int # number of agents
     n::Int # number of goods
@@ -44,8 +42,8 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T}
     # parameters
     c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
     sumx::Vector{T}
-    ρ::T
-    σ::T
+    ρ::Vector{T}
+    σ::Vector{T}
 
     # dataframe for logging
     df::Union{DataFrame,Nothing} = nothing
@@ -77,8 +75,10 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T}
         this = new{Float64}()
         this.m = m
         this.n = n
-        this.ρ = ρ
-        this.σ = σ = ρ == 1.0 ? Inf : ρ / (1.0 - ρ)
+        # allow scalar or vector ρ via helper
+        _ρ, _σ = normalize_rho_sigma(ρ, m)
+        this.ρ = copy(_ρ)
+        this.σ = copy(_σ)
 
         # utilities parameter c (n × m)
         c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
@@ -105,40 +105,51 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T}
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        if ρ == 1.0
-            # linear utility
-            this.u = this.uₛ
-            this.∇u = (x, i) -> c[:, i]
-            this.f = (p, i) -> begin
-                maximum(c[:, i] ./ p)
+        # utility and indirect utility with per-agent ρ/σ
+        this.u = (x, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return this.uₛ(x, i)
+            else
+                return sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
             end
-            this.f∇f = (p, i) -> begin
+        end
+        this.∇u = (x, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return c[:, i]
+            else
+                s = sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ - 1)
+                return s .* spow.(x, ρᵢ - 1) .* c[:, i]
+            end
+        end
+        this.f = (p, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
+                return maximum(c[:, i] ./ p)
+            else
+                σᵢ = this.σ[i]
+                _cs = spow.(c[:, i], (1 + σᵢ))
+                _ps = spow.(p, (-σᵢ))
+                return _cs' * _ps
+            end
+        end
+        this.f∇f = (p, i) -> begin
+            ρᵢ = this.ρ[i]
+            if ρᵢ == 1.0
                 f = maximum(c[:, i] ./ p)
-                ∇f = nothing # nonsmooth
-                return f, ∇f
-            end
-        else
-            # CES utility, ρ < 1
-            this.u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ)
-            this.∇u = (x, i) -> sum(c[:, i] .* spow.(x, ρ))^(1 / ρ - 1) .*
-                                spow.(x, ρ - 1) .* c[:, i]
-
-            # indirect utility pieces
-            this.f∇f = (p, _ci) -> begin
-                _cs = spow.(_ci, 1 + σ)
-                _ps = spow.(p, -σ)
+                n = length(p)
+                return f, zeros(n), zeros(n)
+            else
+                σᵢ = this.σ[i]
+                _ci = c[:, i]
+                _cs = spow.(_ci, 1 + σᵢ)
+                _ps = spow.(p, -σᵢ)
                 _cp = _cs' * _ps
                 f = _cp
-                ∇f = -σ .* _cs .* spow.(p, (-σ - 1))
-                Hf = σ * (σ + 1) .* _cs .* (spow.(p, -σ - 2))
+                ∇f = -σᵢ .* _cs .* spow.(p, (-σᵢ - 1))
+                Hf = σᵢ * (σᵢ + 1) .* _cs .* (spow.(p, -σᵢ - 2))
                 return f, ∇f, Hf
-            end
-            this.f = (p, i) -> begin
-                _cs = spow.(c[:, i], (1 + σ))
-                _ps = spow.(p, (-σ))
-                _cp = _cs' * _ps
-                f = _cp
-                return f
             end
         end
 

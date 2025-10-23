@@ -16,12 +16,11 @@ Random.seed!(1)
 results = []
 results_phi = Dict()
 rrange = [0.9]
-n = 1000
-m = 3000
+n = 100
+m = 300
 
 # method_filter(name) = name ∈ [:LogBar, :Tât, :PropRes]
 method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :PathFol, :Tât, :PropRes]
-# method_filter(name) = name ∈ [:LogBar, :LogBarPCG, :PathFol, :Tât, :PropRes]
 table_time = []
 
 
@@ -30,7 +29,6 @@ for ρ in rrange
     f0 = FisherMarket(m, n; ρ=ρ, bool_unit=true, scale=30.0, sparsity=0.8)
     linconstr = LinearConstr(1, n, ones(1, n), [sum(f0.w)])
     ρfmt = @sprintf("%+.2f", ρ)
-    σfmt = @sprintf("%+.2f", f0.σ)
     # -----------------------------------------------------------------------
     # compute ground truth
     # -----------------------------------------------------------------------

@@ -45,7 +45,7 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
     # iteration counters
     k::Int = 0
     # avg iterations per subproblem
-    kᵢ::Float64 = 0.0
+    kᵢ::Int = 0
     # termination tolerance
     maxiter::Int
     maxtime::Float64
@@ -93,7 +93,7 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
         this.maxtime = maxtime
         this.tol = tol
         this.k = 0
-        this.kᵢ = 0.0
+        this.kᵢ = 0
         this.optimizer = optimizer
         this.option_grad = option_grad
         this.option_step = option_step
@@ -163,7 +163,7 @@ function iterate!(alg::MirrorDec, market::FisherMarket)
     alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
-        [alg.k alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ maximum(alg.α) alg.kᵢ];
+        [alg.k alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ maximum(alg.α)];
         fo=true
     )
     alg.k += 1

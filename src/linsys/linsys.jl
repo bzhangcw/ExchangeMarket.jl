@@ -2,6 +2,7 @@ using LinearAlgebra, SparseArrays
 
 
 function linsolve!(alg, market::FisherMarket)
+    alg.linsys_msg = ""
     if alg.option_step == :affinesc
         if alg.linsys ∈ [:direct, :direct_affine]
             __direct!(alg, market)

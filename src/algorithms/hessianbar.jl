@@ -60,7 +60,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     # iteration counters
     k::Int = 0
     # avg iterations per subproblem
-    kᵢ::Float64 = 0.0
+    kᵢ::Int = 0
     # termination tolerance
     maxiter::Int
     maxtime::Float64
@@ -73,6 +73,8 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     optimizer::ResponseOptimizer
     # linear system solver
     linsys::Symbol
+    # message for linear system solver
+    linsys_msg::String
     # random sampler to choose players
     sampler::Sampler
     option_grad::Symbol
@@ -120,8 +122,12 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.maxiter = maxiter
         this.maxtime = maxtime
         this.tol = tol
+        # main iterations
         this.k = 0
-        this.kᵢ = 0.0
+        # auxiliary iterations; 
+        # e.g., for CG it means the number of iterations 
+        #   for the Krylov subspace method
+        this.kᵢ = 0
         this.optimizer = optimizer
         # options
         this.option_grad = option_grad
@@ -182,9 +188,11 @@ function init!(alg::HessianBar, market::FisherMarket)
     alg.dₙ = norm(alg.p - alg.pb)
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
+        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
     )
     alg.k += 1
+
+
     return false, _logline
 end
 
@@ -216,9 +224,6 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     #  B(p) = -<log(p), 1>
     if alg.option_step == :affinesc
         @debug "use (primal) affine scaling step"
-        if !isnothing(alg.linconstr)
-            @warn "linear constraint is not supported for affine scaling"
-        end
         # compute affine-scaling Newton step
         linsolve!(alg, market)
         alg.gₙ = gₙ = norm(alg.∇)
@@ -289,7 +294,7 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     alg.t = alg.te - alg.ts
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α alg.kᵢ]
+        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
     )
     alg.k += 1
     ϵ = [alg.gₙ alg.dₙ]
@@ -359,13 +364,19 @@ function opt!(
     l = @sprintf(" subproblem solver style       := %s", alg.optimizer.style)
     printto(ios, l)
     l = @sprintf(" lin-system solver alias       := %s", alg.linsys)
-    printto(ios, l)
+    if alg.linsys == :krylov
+        l = l * " + optimal diagonal scaling"
+        printto(ios, l)
+    end
     l = @sprintf(" option for gradient           := %s", alg.option_grad)
     printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
     l = @sprintf(" option for μ                  := %s", alg.option_mu)
     printto(ios, l)
+    if (alg.option_step == :affinesc) && (!isnothing(alg.linconstr))
+        printto(ios, " !!! linear constraint is not supported for affine-scaling and will be ignored")
+    end
     printto(ios, __default_logger._sep)
     flush.(ios)
     _k = 0
@@ -390,7 +401,12 @@ function opt!(
         else
             mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._loghead)
             bool_early_stop, _logline = iterate!(alg, market)
-            mod(_k, loginterval) == 0 && printto(ios, _logline)
+            mod(_k, loginterval) == 0 && begin
+                printto(ios, _logline)
+                if !isempty(alg.linsys_msg)
+                    printto(ios, alg.linsys_msg)
+                end
+            end
             _k += 1
         end
         bool_early_stop && break
@@ -406,6 +422,8 @@ function opt!(
     printto(ios, " ✓  final play")
     play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false, all=true, timed=false)
     l = @sprintf(" ✓  finished in        %4d steps", alg.k)
+    printto(ios, l)
+    l = @sprintf(" ✓  using subiter.     %4d steps", alg.kᵢ)
     printto(ios, l)
     l = @sprintf("             in %.5e seconds", alg.t)
     printto(ios, l)

@@ -24,7 +24,8 @@ function __conic_log_response_ces(;
     verbose=false,
     kwargs...
 ) where {T}
-    ρ = market.ρ
+    ρ = market.ρ[i]
+    ρ = market.ρ[i]
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
 

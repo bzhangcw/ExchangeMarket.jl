@@ -71,7 +71,6 @@ end
 """
 function __compute_approx_hess_drq!(alg, market::FisherMarket)
     groups = alg.Ha.cluster_map
-    cards = alg.Ha.cardinality
     q = length(groups)
     n = size(market.x, 1)
 

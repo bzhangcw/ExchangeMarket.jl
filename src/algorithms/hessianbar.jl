@@ -227,7 +227,7 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         # compute affine-scaling Newton step
         linsolve!(alg, market)
         alg.gₙ = gₙ = norm(alg.∇)
-        alg.gₜ = gₜ = norm(alg.p .* alg.∇)
+        alg.gₜ = gₜ = norm(alg.p .* alg.∇ .- alg.μ)
         alg.dₙ = dₙ = norm(alg.Δ)
         # update price
         αₘ = min(proj.(-(alg.pb) ./ alg.Δ)..., 1.0)
@@ -243,7 +243,7 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         # standard ℓ₂ norm
         alg.gₙ = gₙ = norm(alg.∇)
         # local dual norm
-        alg.gₜ = gₜ = norm(alg.p .* alg.∇)
+        alg.gₜ = gₜ = norm(alg.p .* alg.∇ .- alg.μ)
         alg.dₙ = dₙ = norm(alg.Δ)
         if any(isnan.([gₜ, gₙ, dₙ]))
             return true, ""
@@ -306,7 +306,8 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
     elseif alg.option_mu == :strict
-        if alg.gₙ < 1e2 * alg.μ
+        println("gt: $(alg.gₜ)")
+        if alg.gₜ < 1e-1 * alg.μ
             alg.μ *= 1e-1
         end
     elseif alg.option_mu == :nothing

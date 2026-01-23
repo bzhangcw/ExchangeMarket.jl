@@ -49,7 +49,7 @@ include("algorithms/mirror.jl")
 export LOGDIR, RESULTSDIR
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
-export FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!
+export FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
 export eval!, grad!, hess!, iterate!, play!, opt!

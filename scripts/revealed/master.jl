@@ -38,8 +38,9 @@ function produce_revealed_preferences(alg, f1::FisherMarket, K::Int;
         alg.p .= p_k
 
         # Compute demand via play!
+        println("Computing demand for observation $k at prices: ", p_k)
         play!(alg, f1)
-
+        
         # Aggregate demand: sum over all agents
         g_k = sum(f1.x, dims=2)[:]
 
@@ -48,7 +49,7 @@ function produce_revealed_preferences(alg, f1::FisherMarket, K::Int;
 
     return Ξ
 end
-
+  
 """
     compute_gamma_from_market(f1::FisherMarket, Ξ)
 
@@ -252,4 +253,162 @@ function validate_strong_duality(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     println("Dual solution μ:          ", μ)
 
     return Q_primal, Q_dual, w, u, μ
+end
+
+# ------------------------------------------------
+# Piecewise-linear pricing
+# ------------------------------------------------
+
+"""
+    compute_demand_from_market(f1::FisherMarket, Ξ, alg)
+
+Compute the demand matrix x[i,k,:] for a FisherMarket given revealed preferences Ξ.
+For piecewise linear agents, uses greedy algorithm to compute demand.
+For CES agents, can use analytic formula or compute via play!.
+
+Returns x as a 3D array of size (m, K, n).
+"""
+function compute_demand_from_market(f1::FisherMarket, Ξ::Vector{Tuple{Vector{T},Vector{T}}}, alg) where T
+    m, n = f1.m, f1.n
+    K = length(Ξ)
+    
+    x = zeros(T, m, K, n)
+    
+    for i in 1:m
+        for k in 1:K
+            p_k, _ = Ξ[k]
+            
+            # Check if agent is general piecewise linear
+            if f1.A_planes !== nothing && f1.b_planes !== nothing && size(f1.A_planes, 3) >= i
+                # General piecewise linear: solve LP with agent's actual budget
+                x[i, k, :] = compute_general_pwl_demand(p_k, f1.A_planes, f1.b_planes, f1.w[i], i)
+            else
+                # CES: use existing method or compute via play!
+                alg.p .= p_k
+                temp_market = FisherMarket(1, n; ρ=[f1.ρ[i]], c=f1.c[:, i:i], w=[1.0])
+                play!(alg, temp_market)
+                x[i, k, :] = temp_market.x[:, 1]
+            end
+        end
+    end
+    
+    return x
+end
+"""
+    solve_master_problem_piecewise(Ξ, x; verbose=false)
+
+Solve the master problem using demand vectors directly (for piecewise linear):
+    Q = min_{λ, s} sum_{k∈[K]} ||s_k||_∞
+    s.t.  s_j^k + sum_{r∈[N]} λ_r x_{rj}(p^k) ≥ g_j^k, ∀j, k
+          s_j^k - sum_{r∈[N]} λ_r x_{rj}(p^k) ≥ -g_j^k, ∀j, k
+          sum_{r∈[N]} λ_r = 1, λ ≥ 0
+
+Arguments:
+- Ξ: Vector of (p_k, g_k) tuples, K observations
+- x: Demand matrix of size (N, K, n) where N is number of agents
+
+Returns:
+- λ: Optimal weights
+- s: Slack matrix of size (K, n)
+- model: JuMP model
+"""
+function solve_master_problem_piecewise(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    x::Array{T,3};
+    verbose=false) where T
+    N, K, n = size(x)
+    
+    model = Model(() -> Gurobi.Optimizer())
+    set_silent(model)
+    if verbose
+        unset_silent(model)
+    end
+    
+    # Variables
+    @variable(model, λ[1:N] >= 0)
+    @variable(model, s[1:K, 1:n] >= 0)
+    @variable(model, t[1:K] >= 0)  # t_k = ||s_k||_∞
+    
+    # Constraints: s_j^k + sum_r λ_r x_{rj}(p^k) ≥ g_j^k
+    # and: s_j^k - sum_r λ_r x_{rj}(p^k) ≥ -g_j^k
+    for k in 1:K
+        _, g_k = Ξ[k]
+        for j in 1:n
+            @constraint(model, s[k, j] + sum(λ[r] * x[r, k, j] for r in 1:N) >= g_k[j])
+            @constraint(model, s[k, j] - sum(λ[r] * x[r, k, j] for r in 1:N) >= -g_k[j])
+        end
+    end
+    
+    # t_k >= s_k (infinity norm)
+    for k in 1:K
+        for j in 1:n
+            @constraint(model, t[k] >= s[k, j])
+        end
+    end
+    
+    # sum_r λ_r = 1
+    @constraint(model, sum(λ) == 1)
+    
+    # Objective: min sum_k t_k
+    @objective(model, Min, sum(t))
+    
+    optimize!(model)
+    
+    return value.(λ), value.(s), model
+end
+
+"""
+    solve_dual_problem_piecewise(Ξ, x; verbose=false)
+
+Solve the dual problem using demand vectors:
+    Q_* = max_{u_k, μ} sum_{k∈[K]} <u_k, g_k> - μ
+    s.t.  sum_{k∈[K]} <u_k, x_r(p^k)> ≤ μ, ∀r∈[N]
+          ||u_k||_1 ≤ 1, u_k ∈ ℝ^n_+, ∀k∈[K]
+
+Arguments:
+- Ξ: Vector of (p_k, g_k) tuples
+- x: Demand matrix of size (N, K, n)
+
+Returns:
+- u: Dual variables matrix of size (K, n)
+- μ: Dual variable (scalar)
+- model: JuMP model
+"""
+function solve_dual_problem_piecewise(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    x::Array{T,3};
+    verbose=false) where T
+    N, K, n = size(x)
+    
+    model = Model(() -> Gurobi.Optimizer())
+    set_silent(model)
+    if verbose
+        unset_silent(model)
+    end
+    
+    # Variables
+    @variable(model, u_pos[1:K, 1:n] >= 0)
+    @variable(model, u_neg[1:K, 1:n] >= 0)
+    @variable(model, μ)
+
+    # sum_k <u_k, x_r(p^k)> ≤ μ, with u = u_pos - u_neg
+    for r in 1:N
+        @constraint(model,
+            sum(sum((u_pos[k,j] - u_neg[k,j]) * x[r,k,j] for j in 1:n) for k in 1:K) <= μ
+        )
+    end
+
+    # ||u_k||_1 ≤ 1
+    for k in 1:K
+        @constraint(model, sum(u_pos[k, :] + u_neg[k, :]) <= 1)
+    end
+
+    obj = sum(
+        (u_pos[k,j] - u_neg[k,j]) * Ξ[k][2][j]
+        for k in 1:K, j in 1:n
+    ) - μ
+    @objective(model, Max, obj)
+
+    optimize!(model)
+
+    u = value.(u_pos) .- value.(u_neg)
+    return u, value(μ), model
 end

@@ -52,6 +52,7 @@ end
 
 function solve_substep!(
     alg::Algorithm, market::Market, i::Int;
+    ϵᵢ=1e-7,
     style=alg.optimizer.style,
     kwargs...
 )
@@ -139,5 +140,18 @@ function solve_substep!(
             1,
             nothing
         )
+    elseif style == :linprog
+        # For piecewise linear utilities, use LP solver
+        info = solve!(
+            alg.optimizer;
+            fisher=market,
+            i=i,
+            p=alg.p,
+            μ=alg.μ,
+            verbose=false,
+            kwargs...
+        )
+        market.val_u[i] = market.u(market.x[:, i], i)
+        return info
     end
 end

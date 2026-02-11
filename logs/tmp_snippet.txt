@@ -1,0 +1,51 @@
+CELL 12 code
+# whole test set evaluation
+errs = Float64[]
+fa_train_whole = copy(fa)
+for (p_k, g_k) in Ξ_train
+    alg.p .= p_k
+    play!(alg, fa_train_whole)
+    ĝ_k = sum(fa_train_whole.x, dims=2)[:]
+    push!(errs, mean(abs.(p_k .* (ĝ_k .- g_k))))
+end
+println("price-weighted RMSE over K: ", sqrt(mean(errs .^ 2)))
+---
+CELL 16 code
+# ------------------------------
+# Out-of-sample test (single point)
+# ------------------------------
+p_test, g_test = Ξ_test[1]
+fa_test_single = copy(fa)
+alg = HessianBar(n, fa_test_single.m, copy(p_test); linconstr=linconstr)
+alg.p .= p_test
+play!(alg, fa_test_single)
+ga = sum(fa_test_single.x, dims=2)[:]
+println("Observed aggregate demand g_test: ", g_test)
+println("Fitted aggregate demand ga:   ", ga)
+println("Difference:                ", abs.(ga - g_test))
+println("Max difference:            ", maximum(abs.(ga - g_test)))
+
+# ------------------------------
+# Out-of-sample test (whole set)
+# ------------------------------
+errs = Float64[]
+fa_test_whole = copy(fa)
+for (p_k, g_k) in Ξ_test
+    alg.p .= p_k
+    play!(alg, fa_test_whole)
+    ĝ_k = sum(fa_test_whole.x, dims=2)[:]
+    push!(errs, mean(abs.(p_k .* (ĝ_k .- g_k))))
+end
+println("Out-of-sample price-weighted RMSE over K: ", sqrt(mean(errs .^ 2)))
+---
+SCALE CELL 20 markdown
+## Scale-out Experiments
+---
+SCALE CELL 21 code
+# =========================================================
+# Scale-out Experiments: vary m / n / K
+# For each economy: plot android count vs train/test error
+# CES and Linear in the same figure
+# =========================================================
+using Random, Statistics, LinearAlgebra, Plot
+---

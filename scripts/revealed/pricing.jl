@@ -2,7 +2,8 @@ using LinearAlgebra
 using Optim
 using LogExpFunctions: logsumexp
 using ExchangeMarket
-
+using JuMP
+import MathOptInterface as MOI
 #=
 Two formulations for the pricing problem:
 
@@ -74,8 +75,8 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     y_init = zeros(T, n)
     x0 = vcat(y_init, σ_init)
-    lower = vcat(fill(-Inf, n), T(-0.99))  # σ > -1 required for ρ < 1
-    upper = vcat(fill(Inf, n), T(100.0))
+    lower = vcat(fill(-20.0, n), T(-0.99))  # σ > -1 required for ρ < 1
+    upper = vcat(fill(20.0, n), T(30.0))
 
     result = optimize(
         neg_objective, neg_gradient!,
@@ -245,4 +246,201 @@ function recover_ces_params(y::Vector{T}, σ::T) where T
     c = exp.(y ./ (1 + σ))
     ρ = σ / (1 + σ)
     return c, ρ
+end
+
+# -----------------------------------------------------------------------
+# General piecewise-linear pricing
+# -----------------------------------------------------------------------
+
+"""
+    compute_general_pwl_demand(p, A_planes, b_planes, w, i)
+
+Compute demand for general piecewise linear concave utility:
+    u_i(x) = min_l { a_{i,l}^T x + b_{i,l} }
+by solving the LP with an auxiliary variable z.
+"""
+function compute_general_pwl_demand(
+    p::Vector{T},
+    A_planes::Array{T,3},
+    b_planes::Matrix{T},
+    w::T,
+    i::Int
+) where T
+    n = length(p)
+    L = size(A_planes, 2)
+
+    md = try
+        ExchangeMarket.__generate_empty_jump_model(; verbose=false, tol=1e-8)
+    catch
+        Model()
+    end
+
+    @variable(md, x[1:n] >= 0)
+    @variable(md, z)
+    for l in 1:L
+        @constraint(md, z <= dot(@view(A_planes[:, l, i]), x) + b_planes[l, i])
+    end
+    @constraint(md, dot(p, x) <= w)
+    @objective(md, Max, z)
+
+    JuMP.optimize!(md)
+
+    if termination_status(md) != MOI.OPTIMAL && termination_status(md) != MOI.SLOW_PROGRESS
+        @warn "General PWL demand LP failed with status: $(termination_status(md))"
+        return zeros(T, n)
+    end
+
+    return [max(0.0, JuMP.value(x[j])) for j in 1:n]
+end
+function compute_linear_demand(p::AbstractVector{T}, A_planes::Array{T,3}, w::T, i::Int) where T
+    n = length(p)
+    x = zeros(T, n)
+    # argmax of 1/p (i.e., min price)
+    ratio = A_planes[:, 1, i] ./ p
+    maxv = maximum(ratio)
+    idxs = findall(ratio .== maxv)
+    x[idxs] .= (w / length(idxs)) ./ p[idxs]
+    return x
+end
+"""
+    solve_pricing_piecewise(Ξ, u; M=20, verbose=false)
+
+Heuristic pricing for general PWL agents: sample M candidate agents
+and keep the one maximizing sum_k <u_k, x_candidate(p^k)>.
+"""
+function solve_pricing_piecewise(
+    Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T};
+    M::Int=20,
+    L_max::Int=4,
+    b_min::T=-1.0,
+    b_max::T=1.0,
+    verbose=false
+) where T
+    K = length(Ξ)
+    n = length(Ξ[1][1])
+
+    best_obj = -Inf
+    best_params = nothing
+    best_x = zeros(T, K, n)
+
+    for _ in 1:M
+        A_planes_candidate, b_planes_candidate = generate_random_piecewise_params(n; L_max=L_max, b_min=b_min, b_max=b_max)
+
+        x_candidate = zeros(T, K, n)
+        for k in 1:K
+            p_k = Ξ[k][1]
+            if L_max == 1
+                x_candidate[k, :] = compute_linear_demand(p_k, A_planes_candidate, 1.0, 1)
+            else
+                x_candidate[k, :] = compute_general_pwl_demand(
+                    p_k, A_planes_candidate, b_planes_candidate, 1.0, 1
+                )
+            end
+        end
+
+        obj = sum(dot(u[k, :], x_candidate[k, :]) for k in 1:K)
+        if obj > best_obj
+            best_obj = obj
+            best_params = (A_planes_candidate, b_planes_candidate)
+            best_x = x_candidate
+        end
+    end
+
+    verbose && println("Piecewise pricing: best_obj=$best_obj")
+    if best_params === nothing
+        error("No valid candidate found")
+    end
+
+    A_best, b_best = best_params
+    return A_best, b_best, best_x, best_obj
+end
+"""
+    add_piecewise_to_market!(f1, A_planes_new, b_planes_new, w_new)
+
+Add a new general PWL agent to an existing FisherMarket.
+"""
+function add_piecewise_to_market!(
+    f1::FisherMarket,
+    A_planes_new::Array{T,3},
+    b_planes_new::Matrix{T},
+    w_new::T
+) where T
+    expand_players!(f1, f1.m + 1;
+        A_planes_new=A_planes_new,
+        b_planes_new=b_planes_new,
+        w_new=[w_new]
+    )
+    return f1
+end
+
+"""
+    generate_random_piecewise_params(n; L_max=4, a_max=10.0, b_min=-1.0, b_max=1.0)
+
+Generate random general PWL parameters:
+- A_planes: (n, L_max, 1)
+- b_planes: (L_max, 1)
+"""
+function generate_random_piecewise_params(
+    n::Int;
+    L_max=4,
+    a_max=10.0,
+    b_min=-1.0,
+    b_max=1.0
+)
+    A_planes = zeros(Float64, n, L_max, 1)
+    b_planes = zeros(Float64, L_max, 1)
+
+    for l in 1:L_max
+        for j in 1:n
+            A_planes[j, l, 1] = rand() * a_max
+        end
+        b_planes[l, 1] = rand() * (b_max - b_min) + b_min
+    end
+
+    return A_planes, b_planes
+end
+
+"""
+    reduced_cost_piecewise(x_new, u, μ)
+
+Compute reduced cost for general PWL agent using demand vectors.
+    rc = sum_k <u_k, x_new(p^k)> - μ
+"""
+function reduced_cost_piecewise(x_new::Matrix{T}, u::Matrix{T}, μ::T) where T
+    K, n = size(x_new)
+    rc = sum(dot(u[k, :], x_new[k, :]) for k in 1:K) - μ
+    return rc
+end
+
+"""
+    add_to_demand!(x_ref::Ref{Array{T,3}}, x_new)
+
+Add a new agent's demand vectors to the existing demand matrix.
+Similar to add_to_gamma! but for demand vectors.
+"""
+function add_to_demand!(x_ref::Ref{Array{T,3}}, x_new::Matrix{T}) where T
+    x = x_ref[]
+    N, K, n = size(x)
+    @assert size(x_new) == (K, n) "x_new must be (K, n) = ($K, $n)"
+    x_expanded = zeros(T, N + 1, K, n)
+    x_expanded[1:N, :, :] .= x
+    x_expanded[N+1, :, :] .= x_new
+    x_ref[] = x_expanded
+    return nothing
+end
+
+"""
+    update_pwl_optimizer_from_market!(alg, market)
+
+Update the PiecewiseLPResponse optimizer in the algorithm to include all agents in the market.
+This is needed after column generation adds new agents.
+"""
+function update_pwl_optimizer_from_market!(alg, market::FisherMarket)
+    if market.A_planes === nothing
+        error("Market does not have general piecewise linear parameters (A_planes, b_planes)")
+    end
+
+    alg.optimizer = PiecewiseLPResponse()
+    return alg
 end

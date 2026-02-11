@@ -114,6 +114,36 @@ function create_primal_ces(alg::Conic, market::FisherMarket, ρ::Float64=0.5)
     market.val_u = value.(model[:ℓ] .^ (1 / ρ))
 end
 
+function create_primal_pwl(alg::Conic, market::FisherMarket)  # TODO  
+    model = alg.model
+    m = market.m
+    n = market.n
+    q = market.q
+    w = market.w
+
+    @variable(model, x[1:n, 1:m] >= 0) # allocation
+    @variable(model, z[1:m] >= 0)      # utility
+    @variable(model, t[1:m])           # log(utility)
+
+    @objective(model, Max, sum(w[i] * t[i] for i in 1:m))
+
+    @constraint(model, util[i=1:m, l=1:size(market.A_planes,2)], z[i] <= dot(@view(market.A_planes[:, l, i]), x[:, i]) + market.b_planes[l, i])
+    @constraint(model, log_util[i=1:m], [t[i], 1, z[i]] in MOI.ExponentialCone())
+    @constraint(model, supply, x * ones(m) .<= q)
+    # -----------------------------------------------------------------------
+    # optimize
+    JuMP.optimize!(model)
+    # price saved in alg
+    alg.p = -dual.(model[:supply])
+    # allocation saved in market
+    market.x = value.(model[:x])
+    market.val_u = value.(model[:z])
+    return alg.p
+end
+
+function create_dual_pwl(alg::Conic, market::FisherMarket)  # TODO:  p with fixed surrogate price,
+    pass # TODO: calculate optimized x
+end
 function create_dual_ces(alg::Conic, market::FisherMarket, ρ::Float64=0.5, bool_solve_p=true, bool_optimize=true)
     create_dual_ces_type_i(alg, market, ρ, bool_solve_p)
 end

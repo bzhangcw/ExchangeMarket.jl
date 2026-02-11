@@ -51,6 +51,15 @@ Base.@kwdef mutable struct FisherMarket{T}
     # utility function
     # default utility function: linear
     uₛ::Union{Function,Nothing} = nothing
+
+    # General Piecewise Linear Utility Support (New)
+    # u_i(x) = min_{l} { (A_planes[:, l, i])ᵀ x + b_planes[l, i] }
+    # A_planes[:, l, i]
+    # Dimensions: n (goods) × L_max (segments) × m (agents)
+    A_planes::Union{Array{T,3},Nothing} = nothing
+    # b_planes[l, i] 
+    # Dimensions: L_max (segments) × m (agents)
+    b_planes::Union{Matrix{T},Nothing} = nothing
     # override utility function
     # - utility function and gradient function of utility 
     u::Union{Function,Nothing} = nothing
@@ -110,7 +119,7 @@ Base.@kwdef mutable struct FisherMarket{T}
     function FisherMarket(m, n; ρ=1.0,
         constr_x=nothing,
         constr_p=nothing,
-        c=nothing, w=nothing, seed=1,
+        c=nothing, w=nothing, seed=1, A_planes=nothing, b_planes=nothing,
         scale=1.0, sparsity=(2.0 / n),
         bool_unit=true,
         bool_unit_wealth=true,
@@ -136,8 +145,11 @@ Base.@kwdef mutable struct FisherMarket{T}
             c = Matrix(c)
         end
         this.c = copy(c)
+        this.A_planes = A_planes
+        this.b_planes = b_planes
         @printf("FisherMarket cost matrix initialized in %.4f seconds\n", time() - ts)
-        this.uₛ = (x, i) -> c[:, i]' * x
+        # use this.c so it stays consistent after expand_players!
+        this.uₛ = (x, i) -> this.c[:, i]' * x
 
         this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
         this.w = w = (isnothing(w) ? rand(m) : w) * scale
@@ -151,9 +163,22 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        # utility and indirect utility definitions supporting per-agent ρ/σ
-        # NOTE: use this.c, this.w, this.ρ, this.σ to support expand_players!
         this.u = (x, i) -> begin
+            # ---------- General PWL branch ----------
+            if this.A_planes !== nothing
+                L = size(this.A_planes, 2)
+                min_val = Inf
+                # u_i(x) = min_l (a_il ⋅ x + b_il)
+                for l in 1:L
+                    val = dot(@view(this.A_planes[:, l, i]), x) + this.b_planes[l, i]
+                    if val < min_val
+                        min_val = val
+                    end
+                end
+                return min_val
+            end
+
+            # ---------- original CES / linear ----------
             ρᵢ = this.ρ[i]
             if ρᵢ == 1.0
                 return this.uₛ(x, i)
@@ -161,7 +186,25 @@ Base.@kwdef mutable struct FisherMarket{T}
                 return sum(this.c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
             end
         end
+
         this.∇u = (x, i) -> begin
+            # ---------- General PWL subgradient ----------
+            if this.A_planes !== nothing
+                L = size(this.A_planes, 2)
+                min_val = Inf
+                best_l = 1
+                
+                for l in 1:L
+                    val = dot(@view(this.A_planes[:, l, i]), x) + this.b_planes[l, i]
+                    if val < min_val
+                        min_val = val
+                        best_l = l
+                    end
+                end
+                return this.A_planes[:, best_l, i]
+            end
+
+            # ---------- original CES / linear ----------
             ρᵢ = this.ρ[i]
             if ρᵢ == 1.0
                 return this.c[:, i]
@@ -219,24 +262,28 @@ Base.copy(z::FisherMarket{T}) where {T} = begin
 end
 
 """
-    expand_players!(this::FisherMarket, m_new; c_new=nothing, ρ_new=nothing, w_new=nothing)
+    expand_players!(this::FisherMarket, m_new; c_new=nothing, rho_new=nothing, w_new=nothing, A_planes_new=nothing, b_planes_new=nothing)
 
 Expand a FisherMarket from m to m_new players in-place.
-Reallocates arrays to accommodate new players.
+Now supports both CES and general piecewise linear agents.
 
 Arguments:
 - this: FisherMarket to expand (modified in-place)
 - m_new: New number of players (must be >= this.m)
-- c_new: Coefficients for new players (n × (m_new - m)), default random
-- ρ_new: CES parameters for new players ((m_new - m)-vector), default same as this.ρ[1]
+- c_new: Coefficients for new players (n ? (m_new - m)), default random
+- ρ_new: CES parameters for new players ((m_new - m)-vector), default same as this.?[1]
 - w_new: Budgets for new players ((m_new - m)-vector), default equal share
+- A_planes_new: General PWL planes for new players (n ? L_max ? (m_new - m)), default nothing
+- b_planes_new: General PWL intercepts for new players (L_max ? (m_new - m)), default nothing
 
 Returns this (modified).
 """
 function expand_players!(this::FisherMarket{T}, m_new::Int;
     c_new::Union{Matrix{T},Nothing}=nothing,
     ρ_new::Union{Vector{T},Nothing}=nothing,
-    w_new::Union{Vector{T},Nothing}=nothing
+    w_new::Union{Vector{T},Nothing}=nothing,
+    A_planes_new::Union{Array{T,3},Nothing}=nothing,
+    b_planes_new::Union{Matrix{T},Nothing}=nothing
 ) where T
     m_old = this.m
     n = this.n
@@ -248,44 +295,61 @@ function expand_players!(this::FisherMarket{T}, m_new::Int;
         return this
     end
 
-    # Default new coefficients: zero
     if isnothing(c_new)
         c_new = zeros(T, n, m_add)
     end
     @assert size(c_new) == (n, m_add) "c_new must be (n, m_add) = ($n, $m_add)"
 
-    # Default new ρ: same as first player
     if isnothing(ρ_new)
         ρ_new = fill(this.ρ[1], m_add)
     end
     @assert length(ρ_new) == m_add "ρ_new must have length $m_add"
 
-    # Default new budgets: zero
     if isnothing(w_new)
         w_new = zeros(T, m_add)
     end
     @assert length(w_new) == m_add "w_new must have length $m_add"
 
-    # Compute σ_new from ρ_new
     σ_new = ρ_new ./ (1 .- ρ_new)
 
-    # Update m
     this.m = m_new
-
-    # Expand per-agent parameter arrays
     this.c = hcat(this.c, c_new)
     this.ρ = vcat(this.ρ, ρ_new)
     this.σ = vcat(this.σ, σ_new)
     this.w = vcat(this.w, w_new)
 
-    # Expand allocation arrays (n × m)
+    if this.A_planes !== nothing
+        if isnothing(A_planes_new)
+            L_max = size(this.A_planes, 2)
+            A_planes_new = zeros(T, n, L_max, m_add)
+        end
+        @assert size(A_planes_new) == (n, size(this.A_planes, 2), m_add) "A_planes_new must match A_planes dimensions"
+        this.A_planes = cat(this.A_planes, A_planes_new, dims=3)
+    elseif A_planes_new !== nothing
+        L_max = size(A_planes_new, 2)
+        this.A_planes = zeros(T, n, L_max, m_old)
+        this.A_planes = cat(this.A_planes, A_planes_new, dims=3)
+    end
+
+    if this.b_planes !== nothing
+        if isnothing(b_planes_new)
+            L_max = size(this.b_planes, 1)
+            b_planes_new = zeros(T, L_max, m_add)
+        end
+        @assert size(b_planes_new) == (size(this.b_planes, 1), m_add) "b_planes_new must match b_planes dimensions"
+        this.b_planes = hcat(this.b_planes, b_planes_new)
+    elseif b_planes_new !== nothing
+        L_max = size(b_planes_new, 1)
+        this.b_planes = zeros(T, L_max, m_old)
+        this.b_planes = hcat(this.b_planes, b_planes_new)
+    end
+
     this.x = hcat(this.x, zeros(T, n, m_add))
     this.g = hcat(this.g, zeros(T, n, m_add))
     this.val_∇u = hcat(this.val_∇u, zeros(T, n, m_add))
     this.val_∇f = hcat(this.val_∇f, zeros(T, n, m_add))
     this.val_Hf = hcat(this.val_Hf, zeros(T, n, m_add))
 
-    # Expand per-agent value arrays (m)
     this.val_u = vcat(this.val_u, zeros(T, m_add))
     this.val_f = vcat(this.val_f, zeros(T, m_add))
 

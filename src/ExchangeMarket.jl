@@ -34,6 +34,7 @@ include("algorithms/response.jl")
 include("algorithms/response_ces.jl")
 include("algorithms/response_ces_af.jl")
 include("algorithms/response_nlp.jl")
+include("algorithms/response_piecewise.jl")
 include("algorithms/primals.jl")
 include("algorithms/sampler.jl")
 
@@ -51,13 +52,13 @@ export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 export create_primal_linear, create_dual_linear
-export create_primal_ces, create_dual_ces
+export create_primal_ces, create_dual_ces, create_primal_pwl
 export eval!, grad!, hess!, iterate!, play!, opt!
 export Conic
 export HessianBar
 export MirrorDec
 
-export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
+export ResponseInfo, PiecewiseLPResponse, solve!, solve_substep!, produce_functions_from_subproblem
 export CESConic, DualCESConic, CESAnalytic
 export PR # proportional response
 export ONR

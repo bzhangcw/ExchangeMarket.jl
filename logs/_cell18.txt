@@ -1,0 +1,134 @@
+# ------------------------------
+# Linear baseline (ρ = 1) via "good-specialist" agents (c = e_j)
+# ------------------------------
+using Statistics
+
+K_fit = length(Ξ_train)
+
+onehot_gamma(j, K, n) = begin
+    γ = zeros(Float64, K, n)
+    γ[:, j] .= 1.0
+    γ
+end
+
+function init_linear_market_with_good(j0::Int, n::Int)
+    fa_lin = FisherMarket(1, n; ρ=ones(1), scale=30.0, sparsity=0.99)
+    fa_lin.c .= 0.0
+    fa_lin.c[j0, 1] = 1.0
+    return fa_lin
+end
+
+# init with one random good
+goods = [rand(1:n)]
+fa_lin = init_linear_market_with_good(goods[1], n)
+γ_ref_lin = Ref(reshape(onehot_gamma(goods[1], K_fit, n), 1, K_fit, n))
+
+history_lin = Dict(
+    :primal_obj => Float64[],
+    :dual_obj => Float64[],
+    :reduced_cost => Float64[],
+    :num_agents => Int[]
+)
+
+max_iters_lin = n
+tol_lin = 1e-6
+
+println("=== Column Generation for Linear (ρ=1) Good-Specialists ===\n")
+for iter in 1:max_iters_lin
+    println("--- Iteration $iter ($(fa_lin.m) agents) ---")
+
+    w, s, model_primal = solve_master_problem(Ξ, γ_ref_lin[]; verbose=false)
+    u, μ, model_dual = solve_dual_problem(Ξ, γ_ref_lin[]; verbose=false)
+
+    primal_obj = objective_value(model_primal)
+    dual_obj = objective_value(model_dual)
+
+    push!(history_lin[:primal_obj], primal_obj)
+    push!(history_lin[:dual_obj], dual_obj)
+    push!(history_lin[:num_agents], fa_lin.m)
+
+    # pricing over goods: rc_j = sum_k u[k,j] - μ, with γ_new = onehot(j)
+    rc_best = -Inf
+    j_best = 1
+    for j in 1:n
+        j in goods && continue
+        rc_j = sum(u[:, j]) - μ
+        if rc_j > rc_best
+            rc_best = rc_j
+            j_best = j
+        end
+    end
+
+    push!(history_lin[:reduced_cost], rc_best)
+
+    println("  Primal obj: $(round(primal_obj, digits=6))")
+    println("  Dual obj:   $(round(dual_obj, digits=6))")
+    println("  Best rc:    $(round(rc_best, digits=6)) at good j=$j_best")
+    println("  Weights w:  $(round.(w, digits=4))")
+
+    if rc_best <= tol_lin
+        println("\n✓ Converged! No improving good-specialist (rc ≤ $tol_lin)")
+        break
+    end
+
+    # update existing budgets
+    fa_lin.w .= w
+
+    # add new column γ_new
+    γ_new = onehot_gamma(j_best, K_fit, n)
+    add_to_gamma!(γ_ref_lin, γ_new)
+    push!(goods, j_best)
+
+    # add new linear agent (ρ=1, c=e_j)
+    c_new = zeros(Float64, n); c_new[j_best] = 1.0
+    w_new = 0.0
+    add_to_market!(fa_lin, c_new, 1.0, w_new)
+end
+
+w_final_lin, _, _ = solve_master_problem(Ξ_train, γ_ref_lin[]; verbose=false)
+fa_lin.w .= w_final_lin
+
+println("\n=== Linear Final Results ===")
+println("Number of fitted agents: $(fa_lin.m)")
+println("Number of nonzero agents: $(sum(w_final_lin .> 1e-6))")
+println("Final weights: $(round.(w_final_lin, digits=4))")
+
+# ------------------------------
+# Plot CES vs Linear (same figure)
+# Assumes your CES CG stored in `history` and market in `fa`
+# ------------------------------
+using Plots
+
+p_cmp = plot(history[:primal_obj], label="CES Primal", xlabel="Iteration", ylabel="Objective", title="CG Convergence: CES vs Linear")
+plot!(p_cmp, history[:dual_obj], label="CES Dual")
+plot!(p_cmp, history_lin[:primal_obj], label="Linear Primal")
+plot!(p_cmp, history_lin[:dual_obj], label="Linear Dual")
+display(p_cmp)
+
+# ------------------------------
+# Fit diagnostics for Linear (same style as CES diagnostics)
+# ------------------------------
+p0_eval = ones(n) ./ n
+alg_eval_lin = HessianBar(n, fa_lin.m, copy(p0_eval); linconstr=linconstr)
+alg_eval_lin.linsys = :direct
+
+err_inf_lin = zeros(Float64, K_fit)
+err_l1_lin  = zeros(Float64, K_fit)
+rel_l1_lin  = zeros(Float64, K_fit)
+
+for k in 1:K_fit
+    p_k, g_k = Ξ[k]
+    alg_eval_lin.p .= p_k
+    play!(alg_eval_lin, fa_lin; all=true)
+    ga_k = sum(fa_lin.x, dims=2)[:]
+    d = ga_k - g_k
+    err_inf_lin[k] = maximum(abs.(d))
+    err_l1_lin[k]  = sum(abs.(d))
+    rel_l1_lin[k]  = err_l1_lin[k] / (sum(abs.(g_k)) + 1e-12)
+end
+
+println("\n=== Fit Diagnostics (Linear surrogate vs PWL truth) ===")
+println("K = ", K_fit, ", fa_lin.m = ", fa_lin.m, ", nonzero weights = ", sum(fa_lin.w .> 1e-6))
+println("inf err: max = ", maximum(err_inf_lin), ", mean = ", mean(err_inf_lin))
+println("L1  err: max = ", maximum(err_l1_lin),  ", mean = ", mean(err_l1_lin))
+println("rel L1:  max = ", maximum(rel_l1_lin),  ", mean = ", mean(rel_l1_lin))

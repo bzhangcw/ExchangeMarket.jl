@@ -35,7 +35,7 @@ function toy_fisher(ρ)
     return fisher
 end
 
-Base.@kwdef mutable struct FisherMarket{T}
+Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     m::Int # number of agents
     n::Int # number of goods
     x::Union{Matrix{T},SparseMatrixCSC{T}} # allocation
@@ -74,6 +74,10 @@ Base.@kwdef mutable struct FisherMarket{T}
     # CES parameters (per-agent)
     ρ::Vector{T}
     σ::Vector{T}
+    # log-barrier regularization parameter (per-agent, for linear markets)
+    ε_br_play::Vector{T}
+    # dual LP slack variables s_j = p_j - λ_i c_j (n × m)
+    s::Union{Matrix{T},SparseMatrixCSC{T}}
 
     # -----------------------------------------------------------------------
     # dataframe for logging and display
@@ -108,6 +112,7 @@ Base.@kwdef mutable struct FisherMarket{T}
     - `bool_force_dense::Bool`: Whether to force dense matrix (default: true)
     """
     function FisherMarket(m, n; ρ=1.0,
+        ε_br_play=1e-8,
         constr_x=nothing,
         constr_p=nothing,
         c=nothing, w=nothing, seed=1,
@@ -127,6 +132,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         _ρ, _σ = normalize_rho_sigma(ρ, m)
         this.ρ = copy(_ρ)
         this.σ = copy(_σ)
+        this.ε_br_play = isa(ε_br_play, Number) ? fill(Float64(ε_br_play), m) : copy(ε_br_play)
         c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
         if bool_ensure_nz
             # ensure each row and column has at least one non-zero entry
@@ -147,6 +153,7 @@ Base.@kwdef mutable struct FisherMarket{T}
         this.sumx = zeros(n)
         # sometimes use bids instead of allocation
         this.g = similar(c)
+        this.s = zeros(n, m)
         this.df = DataFrame()
         this.constr_x = constr_x
         this.constr_p = constr_p
@@ -281,6 +288,7 @@ function expand_players!(this::FisherMarket{T}, m_new::Int;
     # Expand allocation arrays (n × m)
     this.x = hcat(this.x, zeros(T, n, m_add))
     this.g = hcat(this.g, zeros(T, n, m_add))
+    this.s = hcat(this.s, zeros(T, n, m_add))
     this.val_∇u = hcat(this.val_∇u, zeros(T, n, m_add))
     this.val_∇f = hcat(this.val_∇f, zeros(T, n, m_add))
     this.val_Hf = hcat(this.val_Hf, zeros(T, n, m_add))

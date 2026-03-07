@@ -11,7 +11,7 @@ using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
-Base.@kwdef mutable struct ArrowDebreuMarket{T}
+Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     m::Int # number of agents
     n::Int # number of goods
     x::Union{Matrix{T},SparseMatrixCSC{T}} # allocation (n × m)

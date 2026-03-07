@@ -56,7 +56,6 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
     # -------------------------------------------------------------------
     name::Symbol
     optimizer::ResponseOptimizer
-    option_grad::Symbol
     option_step::Symbol = :eg
     option_stepsize::Symbol = :cc13
 
@@ -71,7 +70,6 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
         optimizer::ResponseOptimizer=OptimjlNewtonResponse,
-        option_grad::Symbol=:dual,
         option_step::Symbol=:eg,
         option_stepsize::Symbol=:cc13,
         sampler::Sampler=NullSampler(),
@@ -95,7 +93,6 @@ Base.@kwdef mutable struct MirrorDec{T} <: Algorithm
         this.k = 0
         this.kᵢ = 0
         this.optimizer = optimizer
-        this.option_grad = option_grad
         this.option_step = option_step
         this.option_stepsize = option_stepsize
         this.sampler = sampler
@@ -116,19 +113,12 @@ function iterate!(alg::MirrorDec, market::FisherMarket)
         market.g .*= market.w'
     end
     # update all sub-problems of all agents i ∈ I
-    if alg.option_grad in [:usex, :dual]
-        play!(alg, market; ϵᵢ=1e-4, verbose=false)
-        # -------------------------------------------------------------------
-        # compute dual function value, gradient and Hessian
-        # !evaluate gradient first;
-        grad!(alg, market)
-        eval!(alg, market)
-    else
-        throw(ArgumentError("""
-        invalid option for gradient: $(alg.option_grad)\n
-        only [:usex, :dual] are supported
-        """))
-    end
+    play!(alg, market; ϵᵢ=1e-4, verbose=false)
+    # -------------------------------------------------------------------
+    # compute dual function value, gradient and Hessian
+    # !evaluate gradient first;
+    grad!(alg, market)
+    eval!(alg, market)
 
     # compute mirror-descent step
     if alg.option_stepsize == :cc13
@@ -212,8 +202,6 @@ function opt!(
     printto(ios, l)
     l = @sprintf(" subproblem solver style       := %s", alg.optimizer.style)
     printto(ios, l)
-    l = @sprintf(" option for gradient           := %s", alg.option_grad)
-    printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
     l = @sprintf(" option for step size          := %s", alg.option_stepsize)
@@ -250,4 +238,4 @@ function opt!(
     return traj
 end
 
-PR = ProportionalResponse = ResponseOptimizer(nothing, :bids, "ProportionalResponse")
+# Bids is now defined in response_bids.jl

@@ -64,12 +64,12 @@ update_cluster_map!(alg::Algorithm, cluster_map::Dict{Int,Vector{Int}}, cardinal
 end
 
 @doc raw"""
-    __compute_approx_hess_drq!(alg, fisher::FisherMarket)
+    __ces_compute_approx_hess_drq!(alg, fisher::FisherMarket)
     Compute needed information of for DRq approximation of the inverse Hessian.
         the inverse Hessian is approximated by the DRq form:
             H⁻¹(x) ≈ (D + ∑ sᵢ aᵢ aᵢ')⁻¹ x
 """
-function __compute_approx_hess_drq!(alg, market::FisherMarket)
+function __ces_compute_approx_hess_drq!(alg, market::FisherMarket)
     groups = alg.Ha.cluster_map
     q = length(groups)
     n = size(market.x, 1)

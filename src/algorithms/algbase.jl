@@ -21,16 +21,16 @@ Base.@kwdef mutable struct StateInfo{T}
 end
 
 function compute_stop(k::Int, alg::Algorithm, market::FisherMarket)
-    if alg.optimizer.style ∈ (:analytic, :linconic)
+    if alg.optimizer.style ∈ (:analytic, :linconic, :dual_lp, :dual_lp_conic)
         return (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol^2) || (alg.t >= alg.maxtime) || (k >= alg.maxiter)
     elseif alg.optimizer.style == :bids
         # this cannot ensure the subproblem is optimal for each player
-        return (alg.dₙ / maximum(alg.p) < (alg.tol)) || (alg.t >= alg.maxtime) || (k >= alg.maxiter)
+        return (alg.dₙ / maximum(alg.p) < (alg.tol^1.5)) || (alg.t >= alg.maxtime) || (k >= alg.maxiter)
     end
 end
 
 function compute_stop(k::Int, alg::Algorithm, ad::ArrowDebreuMarket)
-    if alg.optimizer.style ∈ (:analytic, :linconic)
+    if alg.optimizer.style ∈ (:analytic, :linconic, :dual_lp, :dual_lp_conic)
         return (alg.gₙ < alg.tol) || (alg.dₙ < alg.tol^2) || (alg.t >= alg.maxtime) || (k >= alg.maxiter)
     elseif alg.optimizer.style == :bids
         return (alg.dₙ / maximum(alg.p) < (alg.tol)) || (alg.t >= alg.maxtime) || (k >= alg.maxiter)

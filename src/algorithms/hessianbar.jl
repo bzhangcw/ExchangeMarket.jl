@@ -26,6 +26,7 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     z::Vector{T}
     # barrier parameter
     μ::T
+    μₗ::T
 
     # -------------------------------------------------------------------
     # main iterates
@@ -77,7 +78,6 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
     linsys_msg::String
     # random sampler to choose players
     sampler::Sampler
-    option_grad::Symbol
     option_step::Symbol
     option_mu::Symbol
 
@@ -96,7 +96,6 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         maxtime::Float64=100.0,
         tol::Float64=1e-6,
         optimizer::ResponseOptimizer=CESAnalytic,
-        option_grad::Symbol=:dual,
         option_step::Symbol=:affinesc,
         option_mu::Symbol=:normal,
         linconstr::Union{LinearConstr,Nothing}=nothing,
@@ -130,7 +129,6 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
         this.kᵢ = 0
         this.optimizer = optimizer
         # options
-        this.option_grad = option_grad
         this.option_step = option_step
         this.option_mu = option_mu
         this.linsys = linsys
@@ -169,16 +167,30 @@ Base.@kwdef mutable struct HessianBar{T} <: Algorithm
             this.py = zeros(linconstr.m)
             this.Δy = zeros(linconstr.m)
         end
+        this.μₗ = 1e-20
         return this
     end
 end
 
+@doc raw"""
+    init!(alg::HessianBar, market::FisherMarket)
+
+Initialize the Hessian barrier algorithm (Phase I). Computes initial bids
+from the current allocation, runs one round of proportional response to
+obtain a feasible starting point, then evaluates the gradient and objective.
+
+This always uses `Bids` for the initialization round, temporarily overriding
+`alg.optimizer`. Skipped when `opt!` is called with `bool_init_phase=false`.
+"""
 function init!(alg::HessianBar, market::FisherMarket)
     market.g .= market.x .* (1 ./ alg.p)
     sumb = sum(market.g, dims=2)[:]
     market.g ./= sumb
     market.g .*= market.w'
-    play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false, style=:bids)
+    _opt = alg.optimizer
+    alg.optimizer = Bids
+    play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
+    alg.optimizer = _opt
     alg.p .= sum(market.g, dims=2)[:]
     grad!(alg, market)
     eval!(alg, market)
@@ -202,20 +214,13 @@ end
 function iterate!(alg::HessianBar, market::FisherMarket)
     alg.pb .= alg.p
     # update all sub-problems of all agents i ∈ I
-    if alg.option_grad in [:usex, :dual, :aff]
-        play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
-        # -------------------------------------------------------------------
-        # compute dual function value, gradient and Hessian
-        # !evaluate gradient first;
-        grad!(alg, market)
-        eval!(alg, market)
-        hess!(alg, market)
-    else
-        throw(ArgumentError("""
-        invalid option for gradient: $(alg.option_grad)\n
-        only [:usex, :dual] are supported
-        """))
-    end
+    play!(alg, market; ϵᵢ=5e1 * alg.μ, verbose=false)
+    # -------------------------------------------------------------------
+    # compute dual function value, gradient and Hessian
+    # !evaluate gradient first;
+    grad!(alg, market)
+    eval!(alg, market)
+    hess!(alg, market)
 
     # -------------------------------------------------------------------
     # choice for Newton step of price
@@ -229,10 +234,18 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         alg.gₙ = gₙ = norm(alg.∇)
         alg.gₜ = gₜ = norm(alg.p .* alg.∇ .- alg.μ)
         alg.dₙ = dₙ = norm(alg.Δ)
-        # update price
+        # update price with backtracking
+        φ_old = alg.φ
         αₘ = min(proj.(-(alg.pb) ./ alg.Δ)..., 1.0)
-        alg.α = α = αₘ * 0.9995
-        alg.p .= alg.pb .+ α * alg.Δ
+        α = αₘ * 0.995
+        for _ in 1:20
+            alg.p .= alg.pb .+ α .* alg.Δ
+            play!(alg, market; all=true, timed=false)
+            eval!(alg, market)
+            alg.φ <= φ_old && break
+            α *= 0.5
+        end
+        alg.α = α
 
     elseif alg.option_step == :logbar
         @debug "use primal-dual step"
@@ -294,7 +307,8 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     alg.t = alg.te - alg.ts
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
+        # [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
+        [alg.k log10(alg.μ) alg.φ alg.gₜ alg.dₙ alg.t alg.tₗ alg.α]
     )
     alg.k += 1
     ϵ = [alg.gₙ alg.dₙ]
@@ -302,14 +316,17 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     # update barrier parameter
     if alg.option_mu == :normal
         alg.μ *= (1 - min(alg.α * 0.98, 0.98))
-        alg.μ = max(alg.μ, 1e-20)
+        alg.μ = max(alg.μ, alg.μₗ)
     elseif alg.option_mu == :pred_corr
-        alg.μ = max(alg.p' * alg.s / alg.n, 1e-25)
+        alg.μ = max(alg.p' * alg.s / alg.n, alg.μₗ)
     elseif alg.option_mu == :strict
         println("gt: $(alg.gₜ)")
         if alg.gₜ < 1e-1 * alg.μ
             alg.μ *= 1e-1
         end
+    elseif alg.option_mu == :linear
+        println("gt: $(alg.gₜ)")
+        alg.μ *= 9.8e-1
     elseif alg.option_mu == :nothing
         # not needed for e.g., Homotopy
     else
@@ -369,8 +386,6 @@ function opt!(
         l = l * " + optimal diagonal scaling"
         printto(ios, l)
     end
-    l = @sprintf(" option for gradient           := %s", alg.option_grad)
-    printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
     l = @sprintf(" option for μ                  := %s", alg.option_mu)

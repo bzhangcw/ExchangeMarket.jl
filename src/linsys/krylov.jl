@@ -39,74 +39,11 @@ function __update_php_hessop!(alg::Algorithm, market::FisherMarket)
     )
 end
 
-@doc raw"""
-    __compute_exact_hessop_afsc!(buff, alg, market::FisherMarket, v)
-    Compute the exact Hessian-vector product operator 
-        with affine-scaling P∇²fP + μ (if add_μ=true)
-    add_μ means we are using affine-scaling to the barrier problem:
-        ∇²f + μ P⁻² = ∇² (f - μ⟨1, log(p)⟩)
-"""
-function __compute_exact_hessop_afscale!(buff, alg, market::FisherMarket, v; add_μ=false)
-    b = alg.Hk.b                        # n×m (p .* x)
-    σ = market.σ                        # m
-    w = market.w                        # m
-    # diag term: (b * (1 .+ σ)) .* v  ≡ diag(γ*(w+u)) v
-    diag_term = b * (1 .+ σ)
-    # off-diagonal: - b * (σ .* ((b' * v) ./ w))
-    t = (transpose(b) * v) ./ w
-    buff .= diag_term .* v - b * (σ .* t) + (add_μ * alg.μ) .* v
-end
-
-function __compute_exact_hessop_afscale(alg, market::FisherMarket, v; add_μ=false)
-    b = alg.Hk.b
-    σ = market.σ
-    w = market.w
-    diag_term = b * (1 .+ σ)
-    t = (transpose(b) * v) ./ w
-    return diag_term .* v - b * (σ .* t) + (add_μ * alg.μ) .* v
-end
-
-function __compute_exact_hessop_afscale_optimized!(
-    buff::Vector{T}, alg, market::FisherMarket{T}, v::Vector{T}; add_μ::Bool=false,
-) where {T}
-
-    b = alg.Hk.b              # n×m
-    σ = market.σ
-    μ = alg.μ
-    w = market.w              # length-m
-    n, m = size(b)
-
-    @assert length(v) == n && length(buff) == n && length(w) == m
-
-    row_sum = zeros(T, n)
-    b_t_v = zeros(T, m)
-    ones_m = ones(T, m)
-
-    # 1) diag term vector = b * (1 .+ σ)
-    mul!(row_sum, b, 1 .+ σ)          # BLAS gemv
-
-    # 2) b_t_v  = b' * v           ⇒  Σ_i b[i,j]*v[i]
-    mul!(b_t_v, transpose(b), v)      # BLAS gemv
-
-    # 3) scale   b_t_v  .=  b_t_v ./ w
-    @. b_t_v /= w
-
-    # 4) off-diagonal product term: b * (σ .* b_t_v)
-    @. b_t_v = σ * b_t_v
-    mul!(buff, b, b_t_v)             # BLAS gemv
-
-    # 5) fuse the rest
-    μ_eff = add_μ ? μ : zero(μ)
-    @. buff = row_sum * v - buff + μ_eff * v
-
-    return buff
-end
-
 function __krylov_afsc!(alg, market::FisherMarket)
     __update_php_hessop!(alg, market)
 
     τ₁ = zeros(market.n)
-    ExchangeMarket.__compute_exact_hessop_afscale!(
+    __compute_exact_hessop_afscale_optimized!(
         τ₁, alg, market, ones(market.n); add_μ=false
     )
     # diagonal preconditioner
@@ -123,19 +60,6 @@ function __krylov_afsc!(alg, market::FisherMarket)
     if stats.niter >= 10
         alg.linsys_msg = @sprintf("        |-> apply diagonal scaling, niter = %d; dim = %d", stats.niter, market.n)
     end
-end
-
-function __krylov_afsc_with_H!(alg, market::FisherMarket)
-    __compute_exact_hess!(alg, market)
-    H = diagm(alg.p) * alg.H * diagm(alg.p)
-
-    # d, stats = cg(alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ)
-    d, stats = cg(H, alg.p .* alg.∇ .- alg.μ; rtol=alg.μ, atol=alg.μ)
-    # d, stats = cg(alg.Hk.php_hessop, alg.p .* alg.∇ .- alg.μ; rtol=√alg.μ * 10, atol=√alg.μ * 10)
-    alg.Hk.niter += stats.niter
-    alg.Hk.niter_last = stats.niter
-    alg.Δ .= -alg.p .* d
-    alg.kᵢ = alg.Hk.niter
 end
 
 function __krylov_pd!(alg, market::FisherMarket)

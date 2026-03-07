@@ -17,23 +17,29 @@ __default_sep = repeat("-", 60)
 include("utils.jl")
 
 # models
+abstract type AbstractMarket end
+
 include("models/tools.jl")
 include("models/constrs.jl")
 include("models/fisher.jl")
 include("models/arrow.jl")
 
-# common union for markets (needed by algorithms)
-const Market = Union{FisherMarket,ArrowDebreuMarket}
+const Market = AbstractMarket
 include("models/validate.jl")
 
 # algorithms
 include("algorithms/algbase.jl")
-include("algorithms/diff.jl")
+include("algorithms/diff/diff.jl")
+include("algorithms/diff/diff_afcon.jl")
+include("algorithms/diff/diff_arrow.jl")
 include("algorithms/play.jl")
-include("algorithms/response.jl")
-include("algorithms/response_ces.jl")
-include("algorithms/response_ces_af.jl")
-include("algorithms/response_nlp.jl")
+include("algorithms/response/response.jl")
+include("algorithms/response/response_ces.jl")
+include("algorithms/response/response_ces_af.jl")
+include("algorithms/response/response_nlp.jl")
+include("algorithms/response/response_bids.jl")
+include("algorithms/response/response_approx_lin.jl")
+include("algorithms/response/response_dual_lp.jl")
 include("algorithms/primals.jl")
 include("algorithms/sampler.jl")
 
@@ -49,7 +55,7 @@ include("algorithms/mirror.jl")
 export LOGDIR, RESULTSDIR
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
-export FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
+export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
 export eval!, grad!, hess!, iterate!, play!, opt!
@@ -57,9 +63,11 @@ export Conic
 export HessianBar
 export MirrorDec
 
-export ResponseInfo, solve!, solve_substep!, produce_functions_from_subproblem
+export solve!, solve_substep!, produce_functions_from_subproblem
 export CESConic, DualCESConic, CESAnalytic
-export PR # proportional response
+export Bids # proportional response
+export ApproxLin, ApproxLinConic
+export DualLP, DualLPConic
 export ONR
 # affine-constrained response
 export AFCESConic

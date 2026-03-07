@@ -73,14 +73,7 @@ function __optim_newton(;
     res = optimize(
         obj, dfc, x₀, __optim_ipnewton, __get_options(tol, verbose, store_trace)
     )
-    return ResponseInfo(
-        res.minimizer,
-        res.minimum,
-        g(res.minimizer),
-        res.g_residual,
-        res.iterations,
-        res
-    )
+    return nothing
 end
 
 ONR = OptimjlNewtonResponse = ResponseOptimizer(__optim_newton, :nlp, "Optim.jl-Newton")

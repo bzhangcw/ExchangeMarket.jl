@@ -15,6 +15,69 @@ Two formulations for the pricing problem:
 
 The convex surrogate replaces γ with log(γ), making it concave in (y, σ).
 =#
+"""
+    reduced_cost(γ_new, u, μ)
+
+Compute the reduced cost for a new android with bidding vectors γ_new.
+    reduced_cost = Σ_k <u_k, γ_new_k> - μ
+
+If reduced_cost > 0, adding this android can improve the master problem.
+"""
+function reduced_cost(γ_new::Matrix{T}, u::Matrix{T}, μ::T) where T
+    K, n = size(γ_new)
+    rc = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K) - μ
+    return rc
+end
+
+"""
+    recover_ces_params(y, σ)
+
+Recover CES parameters (c, ρ) from the log-reparameterization (y, σ).
+    y = log(c^{1+σ})  =>  c = exp(y / (1+σ))
+    σ = r/(1-r)       =>  r = σ/(1+σ)
+"""
+function recover_ces_params(y::Vector{T}, σ::T) where T
+    c = exp.(y ./ (1 + σ))
+    ρ = σ / (1 + σ)
+    return c, ρ
+end
+
+"""
+    add_to_gamma!(γ_ref::Ref{Array{T,3}}, γ_new)
+
+Add a new android's bidding vectors to the existing γ matrix in-place.
+γ_ref is a Ref containing γ with shape (m, K, n), γ_new has shape (K, n).
+Mutates γ_ref to contain the expanded γ with shape (m+1, K, n).
+"""
+function add_to_gamma!(γ_ref::Ref{Array{T,3}}, γ_new::Matrix{T}) where T
+    γ = γ_ref[]
+    m, K, n = size(γ)
+    @assert size(γ_new) == (K, n) "γ_new must be (K, n) = ($K, $n)"
+    γ_expanded = zeros(T, m + 1, K, n)
+    γ_expanded[1:m, :, :] .= γ
+    γ_expanded[m+1, :, :] .= γ_new
+    γ_ref[] = γ_expanded
+    return nothing
+end
+
+"""
+    add_to_market!(f1::FisherMarket, c_new, ρ_new, w_new)
+
+Add a new CES agent to an existing FisherMarket in-place.
+- c_new: coefficient vector (n-dim)
+- ρ_new: CES parameter ρ
+- w_new: budget for the new agent
+
+Uses expand_players! from ExchangeMarket.
+"""
+function add_to_market!(f1::FisherMarket, c_new::Vector{T}, ρ_new::T, w_new::T) where T
+    expand_players!(f1, f1.m + 1;
+        c_new=reshape(c_new, :, 1),
+        ρ_new=[ρ_new],
+        w_new=[w_new]
+    )
+    return f1
+end
 
 """
     solve_pricing_original(Ξ, u; σ_init=0.5, verbose=false)
@@ -31,6 +94,7 @@ Returns:
 """
 function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
+    y_init::Union{Vector{T},Nothing}=nothing,
     σ_init::T=0.5,
     verbose=false) where T
 
@@ -72,10 +136,9 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
-    y_init = zeros(T, n)
-    x0 = vcat(y_init, σ_init)
-    lower = vcat(fill(-Inf, n), T(-0.99))  # σ > -1 required for ρ < 1
-    upper = vcat(fill(Inf, n), T(100.0))
+    x0 = vcat(isnothing(y_init) ? zeros(T, n) : y_init, σ_init)
+    lower = vcat(fill(-100, n), T(-0.98))  # σ > -1 required for ρ < 1
+    upper = vcat(fill(100, n), T(40.0))
 
     result = optimize(
         neg_objective, neg_gradient!,
@@ -96,43 +159,6 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     verbose && println("Original pricing: σ=$σ_opt, obj=$obj_val")
     return y_opt, σ_opt, γ_new, obj_val
-end
-
-"""
-    add_to_gamma!(γ_ref::Ref{Array{T,3}}, γ_new)
-
-Add a new android's bidding vectors to the existing γ matrix in-place.
-γ_ref is a Ref containing γ with shape (m, K, n), γ_new has shape (K, n).
-Mutates γ_ref to contain the expanded γ with shape (m+1, K, n).
-"""
-function add_to_gamma!(γ_ref::Ref{Array{T,3}}, γ_new::Matrix{T}) where T
-    γ = γ_ref[]
-    m, K, n = size(γ)
-    @assert size(γ_new) == (K, n) "γ_new must be (K, n) = ($K, $n)"
-    γ_expanded = zeros(T, m + 1, K, n)
-    γ_expanded[1:m, :, :] .= γ
-    γ_expanded[m+1, :, :] .= γ_new
-    γ_ref[] = γ_expanded
-    return nothing
-end
-
-"""
-    add_to_market!(f1::FisherMarket, c_new, ρ_new, w_new)
-
-Add a new CES agent to an existing FisherMarket in-place.
-- c_new: coefficient vector (n-dim)
-- ρ_new: CES parameter ρ
-- w_new: budget for the new agent
-
-Uses expand_players! from ExchangeMarket.
-"""
-function add_to_market!(f1::FisherMarket, c_new::Vector{T}, ρ_new::T, w_new::T) where T
-    expand_players!(f1, f1.m + 1;
-        c_new=reshape(c_new, :, 1),
-        ρ_new=[ρ_new],
-        w_new=[w_new]
-    )
-    return f1
 end
 
 """
@@ -196,7 +222,7 @@ function solve_pricing_convex(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     y_init = zeros(T, n)
     x0 = vcat(y_init, σ_init)
-    lower = vcat(fill(-Inf, n), T(-0.99))  # σ > -1 required for ρ < 1
+    lower = vcat(fill(-Inf, n), T(-0.95))  # σ > -1 required for ρ < 1
     upper = vcat(fill(Inf, n), T(100.0))
 
     result = optimize(
@@ -220,29 +246,40 @@ function solve_pricing_convex(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     return y_opt, σ_opt, γ_new, obj_val
 end
 
-"""
-    reduced_cost(γ_new, u, μ)
-
-Compute the reduced cost for a new android with bidding vectors γ_new.
-    reduced_cost = Σ_k <u_k, γ_new_k> - μ
-
-If reduced_cost > 0, adding this android can improve the master problem.
-"""
-function reduced_cost(γ_new::Matrix{T}, u::Matrix{T}, μ::T) where T
-    K, n = size(γ_new)
-    rc = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K) - μ
-    return rc
-end
 
 """
-    recover_ces_params(y, σ)
+    solve_pricing_dual_lp(Ξ, u; δ₁=nothing, verbose=false)
 
-Recover CES parameters (c, ρ) from the log-reparameterization (y, σ).
-    y = log(c^{1+σ})  =>  c = exp(y / (1+σ))
-    σ = r/(1-r)       =>  r = σ/(1+σ)
+Pricing via direct dual normalization + LP matching.
+Normalizes each dual vector u_k to the simplex to obtain a bidding vector,
+then calls `_linear_prog_ces_gamma_single` to recover (y, δ).
 """
-function recover_ces_params(y::Vector{T}, σ::T) where T
-    c = exp.(y ./ (1 + σ))
-    ρ = σ / (1 + σ)
-    return c, ρ
+function solve_pricing_dual_lp(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T};
+    δ₁::Union{Float64,Nothing}=nothing,
+    verbose=false) where T
+
+    K = length(Ξ)
+    n = length(Ξ[1][1])
+
+    pmat = hcat([Ξ[k][1] for k in 1:K]...)  # n × K
+    gmat = similar(pmat)
+    for k in 1:K
+        u_k = max.(u[k, :], eps(T))
+        gmat[:, k] = u_k ./ sum(u_k)
+    end
+
+    y_opt, δ_opt, A_opt, md = _linear_prog_ces_gamma_single(;
+        pmat=pmat, gmat=gmat, δ₁=δ₁, verbose=verbose
+    )
+
+    γ_new = zeros(T, K, n)
+    for k in 1:K
+        z_k = y_opt .- δ_opt .* log.(Ξ[k][1])
+        γ_new[k, :] = exp.(z_k .- logsumexp(z_k))
+    end
+
+    obj_val = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K)
+    verbose && println("Dual-LP pricing: δ=$δ_opt, obj=$obj_val")
+    return y_opt, δ_opt, γ_new, obj_val
 end

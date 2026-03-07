@@ -64,7 +64,7 @@ method_kwargs = [
         MirrorDec,
         Dict(
             :tol => 1e-7, :α => 500.0,
-            :optimizer => PR,
+            :optimizer => Bids,
             :option_step => :shmyrev
         )
     ],

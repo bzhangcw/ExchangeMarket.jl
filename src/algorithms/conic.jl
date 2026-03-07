@@ -56,13 +56,13 @@ function __create_primal(alg::Conic, market::FisherMarket)
     # price saved in alg
     alg.p = -dual.(model[:limit])
     # allocation saved in market
-    market.x = value.(model[:x])
+    market.x = value.(model[:x])'
     market.val_u = value.(model[:ℓ])
 end
 
 function __create_dual(alg::Conic, market::FisherMarket)
     model = alg.model
-    @variable(model, s[1:market.m, 1:market.n] .>= 0)
+    @variable(model, s[1:market.n, 1:market.m] .>= 0)
     @variable(model, p[1:market.n])
     @variable(model, λ[1:market.m])
     @variable(model, logλ[1:market.m])
@@ -72,7 +72,7 @@ function __create_dual(alg::Conic, market::FisherMarket)
     @constraint(model, xc[i=1:market.m], s[:, i] + λ[i] * market.c[:, i] - p .== 0)
     JuMP.optimize!(model)
     alg.p = value.(p)
-    market.x = hcat([abs.(dual.(xc[i])) for i in 1:market.m]...)'
+    market.x = hcat([abs.(dual.(xc[i])) for i in 1:market.m]...)
     market.val_u = map(i -> market.u(market.x[:, i], i), 1:market.m)
     return
 end

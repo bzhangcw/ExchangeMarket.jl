@@ -45,6 +45,9 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     ρ::Vector{T}
     σ::Vector{T}
 
+    # sparsity of cost matrix c (fraction of nonzeros)
+    sparsity::Float64 = 1.0
+
     # dataframe for logging
     df::Union{DataFrame,Nothing} = nothing
 
@@ -75,6 +78,7 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         this = new{Float64}()
         this.m = m
         this.n = n
+        this.sparsity = sparsity
         # allow scalar or vector ρ via helper
         _ρ, _σ = normalize_rho_sigma(ρ, m)
         this.ρ = copy(_ρ)

@@ -11,14 +11,16 @@ import MathOptInterface as MOI
 using Printf, DataFrames
 
 function add_nonzero_entries!(c, m, n, scale)
-    rows = 1:m
-    cols = rand(1:n, m)
-    vals = fill(scale, m)
-    c += sparse(rows, cols, vals, m, n)
-    cols = 1:n
-    rows = rand(1:m, n)
-    vals = fill(scale, n)
-    c += sparse(rows, cols, vals, m, n)
+    # Ensure each row has at least one nonzero
+    for i in 1:m
+        j = rand(1:n)
+        c[i, j] += scale
+    end
+    # Ensure each column has at least one nonzero
+    for j in 1:n
+        i = rand(1:m)
+        c[i, j] += scale
+    end
     return c
 end
 
@@ -79,6 +81,9 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     # dual LP slack variables s_j = p_j - λ_i c_j (n × m)
     s::Union{Matrix{T},SparseMatrixCSC{T}}
 
+    # sparsity of cost matrix c (fraction of nonzeros)
+    sparsity::Float64 = 1.0
+
     # -----------------------------------------------------------------------
     # dataframe for logging and display
     df::Union{DataFrame,Nothing} = nothing
@@ -126,6 +131,7 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         println("FisherMarket initialization started...")
         Random.seed!(seed)
         this = new{Float64}()
+        this.sparsity = sparsity
         this.m = m
         this.n = n
         # handle scalar or vector ρ with helper

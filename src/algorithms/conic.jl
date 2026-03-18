@@ -62,14 +62,14 @@ end
 
 function __create_dual(alg::Conic, market::FisherMarket)
     model = alg.model
-    @variable(model, s[1:market.n, 1:market.m] .>= 0)
+
     @variable(model, p[1:market.n])
     @variable(model, λ[1:market.m])
     @variable(model, logλ[1:market.m])
     log_to_expcone!.(λ, logλ, model)
     @objective(model, Min, p' * market.q - sum([market.w[i] * logλ[i] for i in 1:market.m]))
 
-    @constraint(model, xc[i=1:market.m], s[:, i] + λ[i] * market.c[:, i] - p .== 0)
+    @constraint(model, xc[i=1:market.m], λ[i] * market.c[:, i] - p .<= 0)
     JuMP.optimize!(model)
     alg.p = value.(p)
     market.x = hcat([abs.(dual.(xc[i])) for i in 1:market.m]...)

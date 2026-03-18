@@ -94,16 +94,16 @@ mutable struct ExchangeLoggerUtil
 
     ExchangeLoggerUtil() = (
         this = new();
-        this._logheadvals = ["k" "lg(μ)" "φ" "|∇φ|" "|Δp|" "t" "tₗ" "α"];
-        this._logformats = ["%7d |" " %+6.2f |" " %+10.6e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
-        this._dummy = [1 1.33e-12 1e-3 1e-3 1e2 1e4 1e4 1e4];
+        this._logheadvals = ["k" "lg(μ)" "φ" "|∇φ|" "|Δp|" "Δu" "t" "tₗ" "α"];
+        this._logformats = ["%7d |" " %+6.2f |" " %+10.6e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
+        this._dummy = [1 1.33e-12 1e-3 1e-3 1e2 1e2 1e4 1e4 1e4];
         this._dummyslots = map((y, ff) -> Printf.format(ff, y), this._dummy, this._logformats) .|> length;
         this._loghead = mapreduce((y, l) -> Printf.format(Printf.Format("%$(l-2)s |"), y), *, this._logheadvals, this._dummyslots)[1:end-1];
         (this._blockheader, this._sep) = format_header(this._loghead);
         # format for the first-order method
-        this._logheadvalsfo = ["k" "φ" "|∇φ|" "|Δp|" "t" "tₗ" "α"];
-        this._logformatsfo = ["%7d |" " %+10.6e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
-        this._dummyfo = [1 1e-3 1e-3 1e2 1e4 1e4 1e4];
+        this._logheadvalsfo = ["k" "φ" "|∇φ|" "|Δp|" "Δu" "t" "tₗ" "α"];
+        this._logformatsfo = ["%7d |" " %+10.6e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e |" " %.1e "] .|> Printf.Format;
+        this._dummyfo = [1 1e-3 1e-3 1e2 1e2 1e4 1e4 1e4];
         this._dummyslotsfo = map((y, ff) -> Printf.format(ff, y), this._dummyfo, this._logformatsfo) .|> length;
         this._logheadfo = mapreduce((y, l) -> Printf.format(Printf.Format("%$(l-2)s |"), y), *, this._logheadvalsfo, this._dummyslotsfo)[1:end-1];
         (this._blockheaderfo, this._sepfo) = format_header(this._logheadfo);

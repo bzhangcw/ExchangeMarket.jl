@@ -148,12 +148,18 @@ function iterate!(alg::MirrorDec, market::FisherMarket)
     alg.gₙ = gₙ = norm(alg.∇)
 
     # @assert all(alg.p .>= 0)
+    # check pareto gap if optimizer is not CESAnalytic
+    _Δu = 0.0
+    if alg.optimizer.name != "CESAnalytic"
+        _Δu = check_pareto(alg, market, CESAnalytic)
+    end
+
     alg.te = time()
     alg.t = alg.te - alg.ts
     alg.tₗ = alg.te - alg.ts # todo
     _logline = produce_log(
         __default_logger,
-        [alg.k alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ maximum(alg.α)];
+        [alg.k alg.φ alg.gₙ alg.dₙ _Δu alg.t alg.tₗ maximum(alg.α)];
         fo=true
     )
     alg.k += 1
@@ -222,7 +228,6 @@ function opt!(
         mod(_k, 20 * loginterval) == 0 && printto(ios, __default_logger._logheadfo)
         mod(_k, loginterval) == 0 && printto(ios, _logline)
         if compute_stop(_k, alg, market) || (_D < tol_p)
-            # if (alg.dₙ < alg.tol) || (alg.t >= alg.maxtime) || (_k >= alg.maxiter)
             printto(ios, __default_logger._logheadfo)
             printto(ios, _logline)
             break

@@ -40,6 +40,7 @@ include("algorithms/response/response_nlp.jl")
 include("algorithms/response/response_bids.jl")
 include("algorithms/response/response_approx_lin.jl")
 include("algorithms/response/response_dual_lp.jl")
+include("algorithms/response/response_lse.jl")
 include("algorithms/primals.jl")
 include("algorithms/sampler.jl")
 
@@ -68,6 +69,7 @@ export CESConic, DualCESConic, CESAnalytic
 export Bids # proportional response
 export ApproxLin, ApproxLinConic
 export DualLP, DualLPConic
+export LSEResponse
 export ONR
 # affine-constrained response
 export AFCESConic

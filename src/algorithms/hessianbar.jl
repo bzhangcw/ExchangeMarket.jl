@@ -183,16 +183,49 @@ This always uses `Bids` for the initialization round, temporarily overriding
 `alg.optimizer`. Skipped when `opt!` is called with `bool_init_phase=false`.
 """
 function init!(alg::HessianBar, market::FisherMarket)
-    market.g .= market.x .* (1 ./ alg.p)
-    sumb = sum(market.g, dims=2)[:]
-    market.g ./= sumb
-    market.g .*= market.w'
-    _opt = alg.optimizer
-    alg.optimizer = Bids
-    play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
-    alg.optimizer = _opt
-    alg.p .= sum(market.g, dims=2)[:]
-    grad!(alg, market)
+    if alg.option_step != :logbar
+        market.g .= market.x .* (1 ./ alg.p)
+        sumb = sum(market.g, dims=2)[:]
+        market.g ./= sumb
+        market.g .*= market.w'
+        _opt = alg.optimizer
+        alg.optimizer = Bids
+        play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
+        alg.optimizer = _opt
+        alg.p .= sum(market.g, dims=2)[:]
+        grad!(alg, market)
+        eval!(alg, market)
+        alg.gₙ = norm(alg.∇)
+        alg.α = 1.0
+        alg.gₜ = norm(alg.p .* alg.∇)
+        alg.dₙ = norm(alg.p - alg.pb)
+        _logline = produce_log(
+            __default_logger,
+            [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ 0.0 alg.t alg.tₗ alg.α]
+        )
+        alg.k += 1
+        return false, _logline
+    end
+    # else, it is a primal-dual step,
+    # we assign s = ∇ and find initial μ until 
+    # | p ∘ s - μ | < 1e-1 * μ
+    alg.μ = 1e-1
+    Q = 5e-3
+    n = market.n
+    alg.y .= 0.0
+    comp = 1e6
+    while true
+        alg.p .= ones(n) .* alg.μ
+        play!(alg, market; ϵᵢ=0.1 * alg.μ, verbose=false)
+        grad!(alg, market)
+        alg.s .= alg.∇
+        comp = norm(alg.p .* alg.s .- alg.μ)
+        if comp < Q * alg.μ
+            break
+        end
+        alg.μ *= 2.0
+    end
+    println("found initial μ: $(alg.μ): comp/μ: $(comp/alg.μ)")
     eval!(alg, market)
     alg.gₙ = norm(alg.∇)
     alg.α = 1.0
@@ -200,11 +233,9 @@ function init!(alg::HessianBar, market::FisherMarket)
     alg.dₙ = norm(alg.p - alg.pb)
     _logline = produce_log(
         __default_logger,
-        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
+        [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ 0.0 alg.t alg.tₗ alg.α]
     )
     alg.k += 1
-
-
     return false, _logline
 end
 
@@ -248,11 +279,10 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         alg.α = α
 
     elseif alg.option_step == :logbar
-        @debug "use primal-dual step"
         alg.ps .= alg.s
         alg.py .= alg.y
 
-        linsolve!(alg, market)
+        bool_need_update = linsolve!(alg, market)
         # standard ℓ₂ norm
         alg.gₙ = gₙ = norm(alg.∇)
         # local dual norm
@@ -261,13 +291,15 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         if any(isnan.([gₜ, gₙ, dₙ]))
             return true, ""
         end
-
-        # step size
-        αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.ps ./ alg.Δs)..., 1.0)
-        alg.α = α = αₘ * 0.9995
-        alg.p .= alg.pb .+ α * alg.Δ
-        alg.s .= alg.ps .+ α * alg.Δs
-        alg.y .= alg.py .+ α * alg.Δy
+        bool_need_update && begin
+            # step size
+            αₘ = min(proj.(-alg.pb ./ alg.Δ)..., proj.(-alg.ps ./ alg.Δs)..., 1.0)
+            alg.α = α = αₘ * 0.9995
+            alg.p .= alg.pb .+ α * alg.Δ
+            alg.s .= alg.ps .+ α * alg.Δs
+            alg.y .= alg.py .+ α * alg.Δy
+        end
+        # else implicitly updated.
     end
 
     # -------------------------------------------------------------------
@@ -303,12 +335,17 @@ function iterate!(alg::HessianBar, market::FisherMarket)
         alg.p .= alg.pb .+ α * alg.Δ
     end
 
+    # check pareto gap if optimizer is not CESAnalytic
+    _Δu = 0.0
+    if alg.optimizer.name != "CESAnalytic"
+        _Δu = check_pareto(alg, market, CESAnalytic)
+    end
+
     alg.te = time()
     alg.t = alg.te - alg.ts
     _logline = produce_log(
         __default_logger,
-        # [alg.k log10(alg.μ) alg.φ alg.gₙ alg.dₙ alg.t alg.tₗ alg.α]
-        [alg.k log10(alg.μ) alg.φ alg.gₜ alg.dₙ alg.t alg.tₗ alg.α]
+        [alg.k log10(alg.μ) alg.φ alg.gₜ alg.dₙ _Δu alg.t alg.tₗ alg.α]
     )
     alg.k += 1
     ϵ = [alg.gₙ alg.dₙ]
@@ -320,11 +357,14 @@ function iterate!(alg::HessianBar, market::FisherMarket)
     elseif alg.option_mu == :pred_corr
         alg.μ = max(alg.p' * alg.s / alg.n, alg.μₗ)
     elseif alg.option_mu == :strict
+        # strictly decreasing according 
+        #   to the ℓ₂ neighborhood of the central path
         println("gt: $(alg.gₜ)")
         if alg.gₜ < 1e-1 * alg.μ
             alg.μ *= 1e-1
         end
     elseif alg.option_mu == :linear
+        # linearly decreasing
         println("gt: $(alg.gₜ)")
         alg.μ *= 9.8e-1
     elseif alg.option_mu == :nothing

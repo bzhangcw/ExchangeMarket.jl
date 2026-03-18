@@ -131,6 +131,7 @@ function smw_drq!(Ha::SMWDRq)
     end
     Ha.Hi = Hinv
     @debug "compute SMW inverse iteratively for DRq"
+    return true
 end
 
 @doc raw"""
@@ -146,6 +147,7 @@ function __drq_afsc!(alg, market::FisherMarket)
     alg.Ha.d .+= alg.μ
     smw_drq!(alg.Ha)
     alg.Δ .= -alg.p .* alg.Ha.Hi(alg.p .* alg.∇ .- alg.μ)
+    return true
 end
 
 @doc raw"""
@@ -231,6 +233,7 @@ function __drq_pd!(alg, market::FisherMarket)
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
     alg.kᵢ += 1
+    return true
 end
 
 @doc raw"""
@@ -248,6 +251,7 @@ function __drq_damped!(alg, market::FisherMarket)
 
     # damped Newton step
     alg.Δ .= -alg.p .* alg.Ha.Hi(alg.p .* alg.∇)
+    return true
 end
 
 @doc raw"""
@@ -268,4 +272,5 @@ function __drq_homo!(alg, market::FisherMarket)
     denom = sqrt(abs(alg.∇' * d₀))
     alg.μ = max(alg.μ - γ / denom, 0)
     alg.Δ .= -alg.p .* alg.Ha.Hi(alg.p .* (alg.∇ - alg.μ * alg.∇₀))
+    return true
 end

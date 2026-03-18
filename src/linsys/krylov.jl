@@ -40,6 +40,9 @@ function __update_php_hessop!(alg::Algorithm, market::FisherMarket)
 end
 
 function __krylov_afsc!(alg, market::FisherMarket)
+    if alg.optimizer.style == :lse
+        return __lse_krylov_afsc!(alg, market)
+    end
     __update_php_hessop!(alg, market)
 
     τ₁ = zeros(market.n)
@@ -60,6 +63,7 @@ function __krylov_afsc!(alg, market::FisherMarket)
     if stats.niter >= 10
         alg.linsys_msg = @sprintf("        |-> apply diagonal scaling, niter = %d; dim = %d", stats.niter, market.n)
     end
+    return true
 end
 
 function __krylov_pd!(alg, market::FisherMarket)
@@ -151,6 +155,7 @@ function __krylov_pd!(alg, market::FisherMarket)
     alg.Δ .+= _cΔ
     alg.Δs .+= _cΔs
     alg.kᵢ = alg.Hk.niter
+    return true
 end
 
 function __krylov_homo!(alg, market::FisherMarket)
@@ -180,4 +185,65 @@ function __krylov_homo!(alg, market::FisherMarket)
     alg.Hk.niter_last = stats.niter
     alg.Δ .= -alg.p .* _d
     alg.kᵢ = alg.Hk.niter
+    return true
+end
+
+@doc raw"""
+    __lse_krylov_afsc!(alg, market::FisherMarket)
+
+Krylov (CG) solve for the LSE dual affine-scaled Newton system:
+    H̃ d = P∇φ - μ1,  then Δ = -Pd.
+
+Uses `__lse_hessop_afscale!` for the matrix-free Hessian-vector product
+and a Neumann series preconditioner (order `p`):
+
+```math
+M_p^{-1} v = \hat{H}^{-1} \sum_{k=0}^{p} (R_{\mathrm{off}} \hat{H}^{-1})^k v
+```
+
+where `R_off v = Σᵢ βᵢ ⟨eᵢ,v⟩ eᵢ - Σ⊙v` is applied matrix-free via
+pre-computed `eᵢ`, `βᵢ`, `Σ` from `__lse_precond_data`.
+Setting `p=0` recovers the diagonal preconditioner.
+"""
+function __lse_krylov_afsc!(alg, market::FisherMarket)
+    n = market.n
+    # Hessian-vector product operator (with μ)
+    hessop = LinearOperator(
+        Float64, n, n, true, true,
+        (buf, v) -> __lse_hessop_afscale!(buf, alg, market, v; add_μ=true)
+    )
+    # pre-compute preconditioner data
+    (; diag_H, Σ, matE, β) = __lse_precond_data(alg, market)
+    diag_Hμ_inv = 1.0 ./ (diag_H .+ alg.μ)
+
+    # Neumann preconditioner M_p⁻¹ (p_order=1 by default)
+    p_order = 10
+    println("Neumann preconditioner M_p⁻¹ (p_order=$p_order)")
+    tmp = similar(diag_H)
+    M₁ = LinearOperator(Float64, n, n, true, true,
+        (buf, v) -> begin
+            # u₀ = Ĥ_μ⁻¹ v
+            u = diag_Hμ_inv .* v
+            buf .= u
+            for _ in 1:p_order
+                __lse_offdiag_matvec!(tmp, matE, β, Σ, u)
+                u = diag_Hμ_inv .* tmp
+                buf .+= u
+            end
+        end
+    )
+    d, stats = cg(
+        hessop, alg.p .* alg.∇ .- alg.μ;
+        M=M₁,
+        rtol=max(alg.μ, 1e-10), atol=max(alg.μ, 1e-10),
+        itmax=20
+    )
+    alg.Hk.niter += stats.niter
+    alg.Hk.niter_last = stats.niter
+    alg.Δ .= -alg.p .* d
+    alg.kᵢ = alg.Hk.niter
+    if stats.niter >= 10
+        alg.linsys_msg = @sprintf("        |-> LSE Neumann(%d) precond CG, niter = %d; dim = %d", p_order, stats.niter, n)
+    end
+    return true
 end

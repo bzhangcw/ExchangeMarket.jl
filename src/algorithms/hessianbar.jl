@@ -424,8 +424,8 @@ function opt!(
     l = @sprintf(" lin-system solver alias       := %s", alg.linsys)
     if alg.linsys == :krylov
         l = l * " + optimal diagonal scaling"
-        printto(ios, l)
     end
+    printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
     l = @sprintf(" option for μ                  := %s", alg.option_mu)

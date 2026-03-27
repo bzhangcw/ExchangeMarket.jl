@@ -50,24 +50,12 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     g::Matrix{T} # bids (rename from b to avoid endowment name clash)
 
     # -----------------------------------------------------------------------
-    # utility function
-    # default utility function: linear
+    # utility (computed via AgentView dispatch, not closures)
+    # -----------------------------------------------------------------------
+    # legacy: u closure kept for backward compat with conic.jl / response_ces_af.jl
     uₛ::Union{Function,Nothing} = nothing
-    # override utility function
-    # - utility function and gradient function of utility 
     u::Union{Function,Nothing} = nothing
-    ∇u::Union{Function,Nothing} = nothing
-    # - current value and gradient of utility
     val_u::Vector{T}
-    val_∇u::Union{Matrix{T},SparseMatrixCSC{T}}
-    # - indirect utility function and gradient function of indirect utility
-    f::Union{Function,Nothing} = nothing
-    f∇f::Union{Function,Nothing} = nothing
-
-    # - current value and gradient of indirect utility
-    val_f::Vector{T}
-    val_∇f::Union{Matrix{T},SparseMatrixCSC{T}}
-    val_Hf::Union{Matrix{T},SparseMatrixCSC{T}}
 
     # - the vector c to parameterize the utility function
     c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
@@ -95,6 +83,11 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     constr_x::Union{Vector{LinearConstr},Nothing} = nothing
     # - linear constraints on price
     constr_p::Union{LinearConstr,Nothing} = nothing
+
+    # -----------------------------------------------------------------------
+    # per-agent views (pre-allocated, zero-copy)
+    # -----------------------------------------------------------------------
+    agents::Vector = []
 
     # -----------------------------------------------------------------------
     """
@@ -125,7 +118,7 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         bool_unit=true,
         bool_unit_wealth=true,
         bool_ensure_nz=false,
-        bool_force_dense=true,
+        bool_force_dense=false,
     )
         ts = time()
         println("FisherMarket initialization started...")
@@ -155,71 +148,25 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         this.w = w = (isnothing(w) ? rand(m) : w) * scale
         this.w .= bool_unit_wealth ? w ./ sum(w) : w
         this.p = zeros(n)
-        this.x = similar(c)
+        # allocation/output matrices are always dense
+        # (even with sparse c, allocations are dense due to barrier regularization)
+        this.x = zeros(n, m)
         this.sumx = zeros(n)
-        # sometimes use bids instead of allocation
-        this.g = similar(c)
+        this.g = zeros(n, m)
         this.s = zeros(n, m)
         this.df = DataFrame()
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        # utility and indirect utility definitions supporting per-agent ρ/σ
-        # NOTE: use this.c, this.w, this.ρ, this.σ to support expand_players!
+        # utility computation is now via AgentView dispatch (see agent_view.jl)
+        # legacy closure kept for backward compat with conic.jl / response_ces_af.jl
+        this.uₛ = (x, i) -> c[:, i]' * x
         this.u = (x, i) -> begin
             ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                return this.uₛ(x, i)
-            else
-                return sum(this.c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
-            end
+            ρᵢ == 1.0 ? this.uₛ(x, i) : sum(this.c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
         end
-        this.∇u = (x, i) -> begin
-            ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                return this.c[:, i]
-            else
-                s = sum(this.c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ - 1)
-                return s .* spow.(x, ρᵢ - 1) .* this.c[:, i]
-            end
-        end
-        # f and f∇f with per-agent σ
-        this.f = (p, i) -> begin
-            ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                return this.w[i] * maximum(this.c[:, i] ./ p)
-            else
-                σᵢ = this.σ[i]
-                _cs = spow.(this.c[:, i], (1 + σᵢ))
-                _ps = spow.(p, (-σᵢ))
-                return _cs' * _ps
-            end
-        end
-        this.f∇f = (p, i) -> begin
-            ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                # return dummy smooth pieces for linear (not used in linear branches)
-                f = this.w[i] * maximum(this.c[:, i] ./ p)
-                n = length(p)
-                return f, zeros(n), zeros(n)
-            else
-                σᵢ = this.σ[i]
-                _ci = this.c[:, i]
-                _cs = spow.(_ci, 1 + σᵢ)
-                _ps = spow.(p, -σᵢ)
-                _cp = _cs' * _ps
-                f = _cp
-                ∇f = -σᵢ .* _cs .* spow.(p, (-σᵢ - 1))
-                Hf = σᵢ * (σᵢ + 1) .* _cs .* (spow.(p, -σᵢ - 2))
-                return f, ∇f, Hf
-            end
-        end
-
         this.val_u = zeros(m)
-        this.val_∇u = similar(c)
-        this.val_f = zeros(m)
-        this.val_∇f = similar(c)
-        this.val_Hf = similar(c)
+        this.agents = []  # populated lazily via init_agents!
         @printf("FisherMarket initialized in %.4f seconds\n", time() - ts)
         return this
     end
@@ -228,6 +175,8 @@ end
 Base.copy(z::FisherMarket{T}) where {T} = begin
     this = FisherMarket(z.m, z.n)
     copy_fields(this, z)
+    # re-initialize agent views to point at the new market's arrays
+    this.agents = []
     return this
 end
 
@@ -295,13 +244,8 @@ function expand_players!(this::FisherMarket{T}, m_new::Int;
     this.x = hcat(this.x, zeros(T, n, m_add))
     this.g = hcat(this.g, zeros(T, n, m_add))
     this.s = hcat(this.s, zeros(T, n, m_add))
-    this.val_∇u = hcat(this.val_∇u, zeros(T, n, m_add))
-    this.val_∇f = hcat(this.val_∇f, zeros(T, n, m_add))
-    this.val_Hf = hcat(this.val_Hf, zeros(T, n, m_add))
-
     # Expand per-agent value arrays (m)
     this.val_u = vcat(this.val_u, zeros(T, m_add))
-    this.val_f = vcat(this.val_f, zeros(T, m_add))
 
     return this
 end

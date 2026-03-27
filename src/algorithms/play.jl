@@ -18,8 +18,14 @@ function play!(
     _ts = time()
     sample!(alg.sampler, market)
 
-    Threads.@threads for i in (all ? (1:market.m) : alg.sampler.indices)
-        solve_substep!(alg, market, i; ϵᵢ=ϵᵢ)
+    # lazy init: construct agent views on first use
+    if isempty(market.agents)
+        init_agents!(market)
+    end
+
+    indices = all ? (1:market.m) : alg.sampler.indices
+    Threads.@threads for i in indices
+        solve_substep!(alg, market.agents[i], market; ϵᵢ=ϵᵢ)
     end
     timed && (alg.tₗ += time() - _ts)
     verbose && validate(market, alg.μ)
@@ -27,18 +33,37 @@ function play!(
 end
 
 
+"""
+    solve_substep!(alg, agent::AgentView, market; kwargs...)
+
+Solve agent's best-response subproblem using the algorithm's optimizer.
+The `agent` provides zero-copy access to per-agent data; `market` is
+passed for scalar writes (val_u) and mutable parameters (w, ε).
+"""
 function solve_substep!(
-    alg::Algorithm, market::Market, i::Int;
+    alg::Algorithm, agent::AgentView, market::Market;
     kwargs...
 )
     return solve!(
         alg.optimizer;
+        agent=agent,
         market=market,
-        i=i,
+        i=agent.i,
         p=alg.p,
         μ=alg.μ,
         kwargs...
     )
+end
+
+# backward-compat: old signature creates AgentView on the fly
+function solve_substep!(
+    alg::Algorithm, market::Market, i::Int;
+    kwargs...
+)
+    if isempty(market.agents)
+        init_agents!(market)
+    end
+    return solve_substep!(alg, market.agents[i], market; kwargs...)
 end
 
 

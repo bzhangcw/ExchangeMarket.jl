@@ -21,15 +21,18 @@ abstract type AbstractMarket end
 
 include("models/tools.jl")
 include("models/constrs.jl")
+include("linalg/sparse.jl")
 include("models/fisher.jl")
 include("models/arrow.jl")
 
 const Market = AbstractMarket
+include("models/agent_view.jl")
 include("models/validate.jl")
 
 # algorithms
 include("algorithms/algbase.jl")
 include("algorithms/diff/diff.jl")
+include("algorithms/diff/diff_lse.jl")
 include("algorithms/diff/diff_afcon.jl")
 include("algorithms/diff/diff_arrow.jl")
 include("algorithms/play.jl")
@@ -57,6 +60,14 @@ export LOGDIR, RESULTSDIR
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
+
+# agent interface
+export AgentType, LinearAgent, CESAgent, AgentView, @agent
+export SparseColRef, sparse_col_ref
+export foreach_nz, sparse_reduce, sparse_scatter!, sparse_argmax
+export sparse_dot, sparse_div_max
+export utility
+export init_agents!
 export create_primal_linear, create_dual_linear
 export create_primal_ces, create_dual_ces
 export eval!, grad!, hess!, iterate!, play!, opt!

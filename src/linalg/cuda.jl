@@ -76,21 +76,30 @@ end
 # to_device! / to_host! — keep GPU workspace alive across calls
 # -----------------------------------------------------------------------
 """
-    to_device!(market; device)
+    to_device!(market, device::Symbol)
 
-Move market data to GPU. Reuses existing GPU workspace if available.
-After this, `play!` will use the batched GPU path.
+Set up workspace for the given device.
+
+- `:cpu` — batched CPU workspace (dense matrix broadcasts)
+- `:gpu` — GPU workspace (requires `using CUDA`; reuses cached allocation)
 """
-function to_device!(market::FisherMarket; device)
-    if market.gpu_workspace_cache === nothing
-        market.gpu_workspace_cache = gpu_workspace(market; device=device)
+function to_device!(market::FisherMarket, device::Symbol)
+    if device == :cpu
+        market.workspace = cpu_workspace(market)
+    elseif device == :gpu
+        if market.gpu_workspace_cache === nothing
+            # requires CUDA.jl loaded by caller; `cu` must be in scope
+            market.gpu_workspace_cache = gpu_workspace(market; device=Base.invokelatest(Main.eval, :cu))
+        else
+            ws = market.gpu_workspace_cache
+            copyto!(ws.x, market.x)
+            copyto!(ws.sumx, market.sumx)
+            copyto!(ws.val_u, market.val_u)
+        end
+        market.workspace = market.gpu_workspace_cache
     else
-        ws = market.gpu_workspace_cache
-        copyto!(ws.x, market.x)
-        copyto!(ws.sumx, market.sumx)
-        copyto!(ws.val_u, market.val_u)
+        error("unknown device: $device, expected :cpu or :gpu")
     end
-    market.workspace = market.gpu_workspace_cache
     return market
 end
 
@@ -124,17 +133,17 @@ Assumes all agents share the same σ (uniform ρ).
 function _play_batched!(ws::MarketWorkspace, p::AbstractVector, σ_scalar::Float64)
     σ = σ_scalar
     ρ = σ / (1.0 + σ)
-    # C_pow = c^(1+σ)
-    ws.C_pow .= ws.c .^ (1.0 + σ)
+    # C_pow = c^(1+σ)  — spow handles 0^(1+σ) = 0
+    ws.C_pow .= spow.(ws.c, 1.0 + σ)
     # denom[i] = Σⱼ C_pow[j,i] · p[j]^(-σ)
     p_neg = p .^ (-σ)
     ws.denom .= sum(ws.C_pow .* p_neg, dims=1)
-    # x = (w/denom) · C_pow · p^(-σ-1)
+    # x = (w/denom) · C_pow · p^(-σ-1)  — spow(denom, -1) handles denom=0 → 0
     p_neg1 = p .^ (-σ - 1.0)
-    ws.x .= (ws.w' ./ ws.denom) .* ws.C_pow .* p_neg1
+    ws.x .= ws.w' .* spow.(ws.denom, -1.0) .* ws.C_pow .* p_neg1
     # utility: u[i] = (Σⱼ c[j,i] · x[j,i]^ρ)^(1/ρ)
     ws.val_u .= dropdims(
-        sum(ws.c .* ws.x .^ ρ, dims=1) .^ (1.0 / ρ);
+        spow.(sum(ws.c .* spow.(ws.x, ρ), dims=1), 1.0 / ρ);
         dims=1
     )
     # aggregate demand

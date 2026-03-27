@@ -212,7 +212,9 @@ function init!(alg::HessianBar, market::FisherMarket)
     alg.μ = 1e-1
     Q = 5e-3
     n = market.n
-    alg.y .= 0.0
+    if !isnothing(alg.linconstr)
+        alg.y .= 0.0
+    end
     comp = 1e6
     while true
         alg.p .= ones(n) .* alg.μ

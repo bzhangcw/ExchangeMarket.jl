@@ -32,7 +32,7 @@ function eval!(alg, market::Market)
         # universal: φ = p'q + Σᵢ wᵢ log(uᵢ)
         alg.φ = min(
             alg.p' * market.q +
-            sum(market.w[i] * log(market.val_u[i]) for i in 1:market.m),
+            sum(market.w[i] * slog(market.val_u[i]) for i in 1:market.m),
             1e8
         )
     end

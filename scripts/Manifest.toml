@@ -558,7 +558,7 @@ version = "0.0.20230411+1"
 
 [[deps.ExchangeMarket]]
 deps = ["DataFrames", "Dates", "ForwardDiff", "JuMP", "Krylov", "LaTeXStrings", "LineSearches", "LinearAlgebra", "LinearOperators", "MadNLP", "MathOptInterface", "MosekTools", "Optim", "Printf", "Random", "SparseArrays"]
-path = ".."
+path = "/Users/brent/workspace/ExchangeMarket.jl/scripts/.."
 uuid = "f4303546-4db8-419d-a649-8baed3ff0194"
 version = "0.1.0"
 
@@ -1368,9 +1368,9 @@ version = "0.5.16"
 
 [[deps.MadNLP]]
 deps = ["LDLFactorizations", "LinearAlgebra", "Logging", "NLPModels", "Pkg", "Printf", "SolverCore", "SparseArrays", "SuiteSparse"]
-path = "/Users/brent/workspace/MadNLP.jl/"
+git-tree-sha1 = "6d4d80f692d35e073d6e5796ebb0a8a07963d781"
 uuid = "2621e9c9-9eb4-46b1-8089-e8c72242dfb6"
-version = "0.8.3"
+version = "0.8.12"
 weakdeps = ["MathOptInterface"]
 
     [deps.MadNLP.extensions]
@@ -1460,9 +1460,9 @@ version = "11.0.1"
 
 [[deps.MosekTools]]
 deps = ["MathOptInterface", "Mosek"]
-git-tree-sha1 = "657c17e52a3abeaa98a550232bd6dac459512dcd"
+git-tree-sha1 = "5ea97a807fad13a0a2760dbf9a01809709eba099"
 uuid = "1ec41992-ff65-5c91-ac43-2df89e9693a4"
-version = "0.15.9"
+version = "0.15.10"
 
 [[deps.MozillaCACerts_jll]]
 uuid = "14a3606d-f60d-562e-9121-12d972cd8159"

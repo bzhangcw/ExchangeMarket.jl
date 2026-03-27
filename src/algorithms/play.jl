@@ -20,6 +20,7 @@ function play!(
 
     if ws !== nothing
         # Batched path: GPU or CPU dense — all agents via matrix broadcasts
+        sample!(alg.sampler, market)  # set batchsize for grad!
         σ_scalar = market.σ[1]  # assumes uniform ρ
         _play_batched!(ws, alg.p, σ_scalar)
     else

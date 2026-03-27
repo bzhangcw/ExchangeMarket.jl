@@ -41,6 +41,6 @@ function validate(market::Market, alg)
     println(__default_sep)
     _excess = (sum(market.x; dims=2)[:] - market.q) ./ maximum(market.q)
     @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
-    @printf(" :            social welfare:  %.8e\n", (log.(market.val_u))' * market.w)
+    @printf(" :            social welfare:  %.8e\n", (slog.(market.val_u))' * market.w)
     println(__default_sep)
 end

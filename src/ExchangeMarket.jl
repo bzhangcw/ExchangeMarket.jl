@@ -26,8 +26,9 @@ include("models/fisher.jl")
 include("models/arrow.jl")
 
 const Market = AbstractMarket
-include("models/agent_view.jl")
 include("models/validate.jl")
+include("models/agent_view.jl")
+include("linalg/cuda.jl")
 
 # algorithms
 include("algorithms/algbase.jl")
@@ -66,6 +67,9 @@ export AgentType, LinearAgent, CESAgent, AgentView, @agent
 export SparseColRef, sparse_col_ref
 export foreach_nz, sparse_reduce, sparse_scatter!, sparse_argmax
 export sparse_dot, sparse_div_max
+# workspace (CPU batched / GPU)
+export MarketWorkspace, cpu_workspace, gpu_workspace
+export to_device!, to_host!
 export utility
 export init_agents!
 export create_primal_linear, create_dual_linear

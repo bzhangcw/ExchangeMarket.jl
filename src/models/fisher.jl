@@ -90,6 +90,12 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     agents::Vector = []
 
     # -----------------------------------------------------------------------
+    # workspace: nothing = CPU per-agent, MarketWorkspace = batched (CPU/GPU)
+    # -----------------------------------------------------------------------
+    workspace::Any = nothing
+    gpu_workspace_cache::Any = nothing
+
+    # -----------------------------------------------------------------------
     """
     FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, scale=1.0, sparsity=(2.0/n), bool_unit=true, bool_unit_wealth=true, bool_ensure_nz=true, bool_force_dense=false)
 
@@ -167,6 +173,8 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         end
         this.val_u = zeros(m)
         this.agents = []  # populated lazily via init_agents!
+        this.workspace = nothing
+        this.gpu_workspace_cache = nothing
         @printf("FisherMarket initialized in %.4f seconds\n", time() - ts)
         return this
     end
@@ -175,8 +183,10 @@ end
 Base.copy(z::FisherMarket{T}) where {T} = begin
     this = FisherMarket(z.m, z.n)
     copy_fields(this, z)
-    # re-initialize agent views to point at the new market's arrays
+    # re-initialize: views must point at new market's arrays
     this.agents = []
+    this.workspace = nothing
+    this.gpu_workspace_cache = nothing
     return this
 end
 

@@ -173,6 +173,7 @@ Return index `j` that maximizes `f(j, cj)` over nonzero entries.
     end
 """
 @inline function sparse_argmax(f, c::SparseColRef)
+    isempty(c.nzind) && return 0
     j_best = c.nzind[1]
     v_best = f(j_best, c.nzval[1])
     @inbounds for k in 2:length(c.nzind)
@@ -222,6 +223,7 @@ end
 Compute `maximum(cⱼ / pⱼ)` over nonzero entries of `c`.
 """
 @inline function sparse_div_max(c::SparseColRef, p::AbstractVector)
+    isempty(c.nzind) && return 0.0
     mx = -Inf
     @inbounds for k in eachindex(c.nzind)
         j = c.nzind[k]

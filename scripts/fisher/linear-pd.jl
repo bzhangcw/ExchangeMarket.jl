@@ -1,5 +1,6 @@
 using LinearAlgebra, Printf, SparseArrays
 using SuiteSparse
+using ExchangeMarket: sparse_col_ref, SparseColRef, sparse_dot, sparse_div_max
 
 """
     Primal-dual interior-point method for the linear Fisher market dual:
@@ -31,6 +32,7 @@ mutable struct KKTSystem
     m::Int
     c::Union{Matrix{Float64},SparseMatrixCSC{Float64,Int}}  # cost matrix (dense or sparse)
     w::Vector{Float64}        # budgets (m)
+    c_refs::Vector             # precomputed column refs (SparseColRef or SubArray)
     H_diag::Vector{Float64}   # diagonal of H (n)
     d_diag::Vector{Float64}   # diagonal of D (m)
     Wc::Matrix{Float64}       # n × m, columns Wᵢcᵢ
@@ -45,8 +47,9 @@ end
 
 # Dense constructor (default)
 function KKTSystem(n::Int, m::Int, c, w::Vector{Float64})
+    c_refs = [sparse_col_ref(c, i) for i in 1:m]
     KKTSystem(
-        n, m, c, w,
+        n, m, c, w, c_refs,
         zeros(n), zeros(m),
         zeros(n, m), zeros(n, n),
         nothing, Int[], nothing,
@@ -56,36 +59,23 @@ end
 
 # Sparse constructor: precompute sparsity pattern and symbolic Cholesky
 function KKTSystem(n::Int, m::Int, c::SparseMatrixCSC, w::Vector{Float64}, ::Val{:sparse})
-    # Build sparsity pattern of S = H - Σᵢ vᵢvᵢᵀ
-    # Pattern: diagonal ∪ Σᵢ pattern(cᵢ) × pattern(cᵢ)ᵀ
-    I_idx = Int[]
-    J_idx = Int[]
-    # diagonal entries (from H)
-    for j in 1:n
-        push!(I_idx, j)
-        push!(J_idx, j)
-    end
-    # off-diagonal from rank-1 outer products of each column's support
+    c_refs = [sparse_col_ref(c, i) for i in 1:m]
+    I_idx = Int[]; J_idx = Int[]
+    for j in 1:n; push!(I_idx, j); push!(J_idx, j); end
     for i in 1:m
-        nz = findnz(c[:, i])[1]  # row indices of nonzeros in column i
-        for r in nz, s in nz
-            push!(I_idx, r)
-            push!(J_idx, s)
+        nzi = c_refs[i].nzind
+        for r in nzi, s in nzi
+            push!(I_idx, r); push!(J_idx, s)
         end
     end
-    # Build pattern matrix with unit values, then get symbolic factorization
     S_pattern = sparse(I_idx, J_idx, ones(length(I_idx)), n, n)
-    # Make sure it's structurally symmetric and has nonzero diagonal
     S_pattern = S_pattern + S_pattern'
-    for j in 1:n
-        S_pattern[j, j] = 1.0
-    end
+    for j in 1:n; S_pattern[j, j] = 1.0; end
     S_sparse = copy(S_pattern)
-    # Symbolic analysis only — numeric values don't matter yet
     chol_factor = cholesky(Symmetric(S_pattern); check=false)
 
     KKTSystem(
-        n, m, c, w,
+        n, m, c, w, c_refs,
         zeros(n), zeros(m),
         zeros(n, m), zeros(n, n),
         S_sparse, Int[], chol_factor,
@@ -191,7 +181,7 @@ function pd_residuals(st::PDState, kkt::KKTSystem)
     # r₂ᵢ = -wᵢ/λᵢ + ⟨cᵢ, xᵢ⟩
     r2 = zeros(m)
     for i in 1:m
-        r2[i] = -w[i] / st.λ[i] + dot(c[:, i], st.x[:, i])
+        r2[i] = -w[i] / st.λ[i] + sparse_dot(kkt.c_refs[i], st.x[:, i])
     end
 
     # r₃ᵢ = sᵢ + λᵢcᵢ - p
@@ -238,8 +228,8 @@ function update_kkt!(kkt::KKTSystem, st::PDState, res)
 
         ξᵢ = (μ .- xᵢ .* sᵢ .+ xᵢ .* r3ᵢ) ./ sᵢ
         kkt.r̃1 .+= ξᵢ
-        kkt.r̃2[i] = -r2[i] - dot(cᵢ, ξᵢ)
-        kkt.d_diag[i] = w[i] / st.λ[i]^2 + dot(cᵢ, Wᵢcᵢ)
+        kkt.r̃2[i] = -r2[i] - sparse_dot(kkt.c_refs[i], ξᵢ)
+        kkt.d_diag[i] = w[i] / st.λ[i]^2 + sparse_dot(kkt.c_refs[i], Wᵢcᵢ)
         kkt.Wc[:, i] .= Wᵢcᵢ
     end
     return kkt
@@ -251,21 +241,52 @@ end
 function solve_schur_exact!(Δp::Vector{Float64}, kkt::KKTSystem)
     n, m = kkt.n, kkt.m
     kkt.S_mat .= 0.0
-    for j in 1:n
+    @inbounds for j in 1:n
         kkt.S_mat[j, j] = kkt.H_diag[j]
     end
     kkt.rhs .= kkt.r̃1
     for i in 1:m
         Wᵢcᵢ = @view kkt.Wc[:, i]
         inv_d = 1.0 / kkt.d_diag[i]
-        for l in 1:n, j in 1:n
-            kkt.S_mat[j, l] -= inv_d * Wᵢcᵢ[j] * Wᵢcᵢ[l]
-        end
-        kkt.rhs .+= (kkt.r̃2[i] * inv_d) .* Wᵢcᵢ
+        # rank-1 update: S -= inv_d Wᵢcᵢ (Wᵢcᵢ)ᵀ
+        # Wᵢcᵢ has same sparsity as cᵢ — use c_refs for O(nnz²) instead of O(n²)
+        _schur_rank1_update!(kkt.S_mat, Wᵢcᵢ, kkt.c_refs[i], inv_d)
+        _schur_rhs_update!(kkt.rhs, Wᵢcᵢ, kkt.c_refs[i], kkt.r̃2[i] * inv_d)
     end
     F = cholesky!(Symmetric(kkt.S_mat))
     Δp .= F \ kkt.rhs
     return Δp
+end
+
+# Sparse: O(nnz²) — only iterate nonzero positions
+@inline function _schur_rank1_update!(S, Wc, cref::SparseColRef, α)
+    nzi = cref.nzind
+    @inbounds for kl in eachindex(nzi)
+        l = nzi[kl]
+        wl = Wc[l]
+        for kj in eachindex(nzi)
+            S[nzi[kj], l] -= α * Wc[nzi[kj]] * wl
+        end
+    end
+end
+
+# Dense: O(n²)
+@inline function _schur_rank1_update!(S, Wc, cref::AbstractVector, α)
+    n = length(Wc)
+    @inbounds for l in 1:n, j in 1:n
+        S[j, l] -= α * Wc[j] * Wc[l]
+    end
+end
+
+@inline function _schur_rhs_update!(rhs, Wc, cref::SparseColRef, α)
+    @inbounds for k in eachindex(cref.nzind)
+        j = cref.nzind[k]
+        rhs[j] += α * Wc[j]
+    end
+end
+
+@inline function _schur_rhs_update!(rhs, Wc, cref::AbstractVector, α)
+    rhs .+= α .* Wc
 end
 
 """
@@ -657,7 +678,7 @@ function pd_allocation!(f, st::PDState, alg::PDIPM)
     alg.μ = st.μ
     for i in 1:f.m
         f.x[:, i] .= st.x[:, i]
-        f.val_u[i] = dot(c[:, i], f.x[:, i])
+        f.val_u[i] = sparse_dot(alg.kkt.c_refs[i], f.x[:, i])
     end
     f.sumx .= sum(f.x; dims=2)[:]
     return alg

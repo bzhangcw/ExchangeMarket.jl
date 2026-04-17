@@ -12,7 +12,6 @@ using ExchangeMarket
 
 include("../tools.jl")
 include("../plots.jl")
-include("./util.jl")
 include("./plc.jl")
 include("./setup.jl")
 
@@ -25,7 +24,8 @@ bool_plot = true
 # -----------------------------------------------------------------------
 # market type: :ces or :plc
 # -----------------------------------------------------------------------
-market_type = :plc
+# market_type = :plc
+market_type = :ces
 
 # -----------------------------------------------------------------------
 # problem size

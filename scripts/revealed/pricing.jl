@@ -3,6 +3,85 @@ using Optim
 using LogExpFunctions: logsumexp
 using ExchangeMarket
 
+# -----------------------------------------------------------------------
+# Standalone CES demand via conic programming
+# -----------------------------------------------------------------------
+"""
+    _conic_ces_primal(; p, n, cr, w, ρ, verbose=false)
+
+Solve CES utility maximization via linear-conic programming (Mosek).
+`cr` = c .^ (1/ρ). Returns optimal allocation x.
+"""
+function _conic_ces_primal(;
+    p::Vector{T}=nothing,
+    n,
+    cr,
+    w,
+    ρ,
+    verbose=false
+) where {T}
+    md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
+    @variable(md, u)
+    @variable(md, logu)
+    log_to_expcone!(u, logu, md)
+
+    @variable(md, x[1:n] >= 0)
+    @variable(md, ξ[1:n] >= 0)
+    @constraint(md, budget, p' * x <= w)
+    @constraint(md, sum(ξ) == u)
+    @constraint(
+        md,
+        ξc[j=1:n],
+        [cr[j] * x[j], u, ξ[j]] in MOI.PowerCone(ρ)
+    )
+    @objective(md, Max, logu)
+
+    JuMP.optimize!(md)
+    x = max.(value.(x), 0.0)
+    return x
+end
+
+# -----------------------------------------------------------------------
+# Recover CES parameters (y, δ) from bidding vectors via LP
+# -----------------------------------------------------------------------
+@doc raw"""
+    _linear_prog_ces_gamma_single(; pmat, gmat, δ₁=nothing, verbose=false)
+
+Given a CES bidding vector γ, recover the CES coefficients (y, δ)
+from linear-programming optimization. If there are more than one
+bidding vector, the fit may not be tight.
+"""
+function _linear_prog_ces_gamma_single(;
+    pmat::Union{SparseMatrixCSC{T},Matrix{T}}=nothing,
+    gmat::Union{SparseMatrixCSC{T},Matrix{T}}=nothing,
+    δ₁::Union{Float64,Nothing}=nothing,
+    verbose=false
+) where {T}
+    md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
+
+    n, K = size(pmat)
+    @variable(md, y[1:n])
+    @variable(md, A[1:K])
+    @variable(md, r[1:n, 1:K])
+    @variable(md, rmax >= 0)
+    @variable(md, δ >= -1)
+
+    if !isnothing(δ₁)
+        @constraint(md, δ == δ₁)
+    end
+    @constraint(md,
+        fitc[k=1:K],
+        r[:, k] .+ y .- δ .* log.(pmat[:, k]) .- A[k] .== log.(gmat[:, k])
+    )
+    @constraint(md, rmax .>= r)
+    @constraint(md, rmax .>= -r)
+
+    @objective(md, Min, rmax)
+
+    JuMP.optimize!(md)
+    return value.(y), value.(δ), value.(A), md
+end
+
 """
     produce_gamma(Ξ, y, σ)
 
@@ -391,4 +470,142 @@ function solve_pricing_dual_lp(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     obj_val = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K)
     verbose && println("Dual-LP pricing: δ=$δ_opt, obj=$obj_val")
     return y_opt, δ_opt, γ_new, obj_val
+end
+
+# -----------------------------------------------------------------------
+# Multicut pricing via inversion + 1D line search
+# -----------------------------------------------------------------------
+"""
+    solve_pricing_inversion(Ξ, u; σ_grid=range(-0.9, 30.0, length=50))
+
+Multicut pricing via single-k inversion + 1D line search over σ.
+
+For each observation k = 1,...,K:
+1. Shift u_k to be positive and normalize to the simplex: ũ_k = (u_k - min(u_k) + ε) / ||·||₁.
+2. Invert the softmax log-ratio equations:
+       log(ũ_{k,j}/ũ_{k,1}) = y_j - σ (log p_{k,j} - log p_{k,1}),   j = 2,...,n
+   For any σ, this gives y_j(σ) = L_j + σ ℓ_j in closed form.
+3. Search over σ (grid + Brent refinement) to maximize the full pricing objective.
+
+Returns all K candidate columns as a vector of (y, σ, γ, obj).
+"""
+function solve_pricing_inversion(
+    Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T};
+    σ_grid=range(-0.9, 30.0, length=50)
+) where T
+
+    K = length(Ξ)
+    n = length(Ξ[1][1])
+
+    log_p = [log.(Ξ[k][1]) for k in 1:K]
+    results = Vector{Tuple{Vector{T},T,Matrix{T},T}}()
+
+    for k in 1:K
+        u_k = u[k, :] .- minimum(u[k, :]) .+ 1e-8
+        u_k = u_k ./ sum(u_k)
+
+        L = log.(u_k[2:end] ./ u_k[1])
+        ℓ_k = log_p[k][2:end] .- log_p[k][1]
+
+        function pricing_obj(σ)
+            y = zeros(T, n)
+            for j in 2:n
+                y[j] = L[j-1] + σ * ℓ_k[j-1]
+            end
+            val = zero(T)
+            for k2 in 1:K
+                k2 == k && continue
+                z = y .- σ .* log_p[k2]
+                γ = exp.(z .- logsumexp(z))
+                val += dot(u[k2, :], γ)
+            end
+            return val
+        end
+
+        best_σ = zero(T)
+        best_obj = pricing_obj(best_σ)
+        for σ_try in σ_grid
+            obj = pricing_obj(σ_try)
+            if obj > best_obj
+                best_obj = obj
+                best_σ = σ_try
+            end
+        end
+
+        idx = findfirst(s -> s == best_σ, collect(σ_grid))
+        if !isnothing(idx)
+            lo = idx > 1 ? σ_grid[idx-1] : σ_grid[1]
+            hi = idx < length(σ_grid) ? σ_grid[idx+1] : σ_grid[end]
+            res = optimize(σ -> -pricing_obj(σ), lo, hi, Brent())
+            best_σ = Optim.minimizer(res)
+            best_obj = -Optim.minimum(res)
+        end
+
+        y_opt = zeros(T, n)
+        for j in 2:n
+            y_opt[j] = L[j-1] + best_σ * ℓ_k[j-1]
+        end
+        γ_new = produce_gamma(Ξ, y_opt, best_σ)
+        push!(results, (y_opt, best_σ, γ_new, best_obj))
+    end
+    return results
+end
+
+# -----------------------------------------------------------------------
+# Least-squares pricing
+# -----------------------------------------------------------------------
+"""
+    solve_pricing_leastsq(Ξ, u; verbose=false)
+
+Closed-form least-squares pricing: find (y, σ) that best fits
+γ_k = u_k / ||u_k||_1 for all k simultaneously.
+
+Returns: (y, σ, γ, obj)
+"""
+function solve_pricing_leastsq(
+    Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T};
+    verbose=false
+) where T
+
+    K = length(Ξ)
+    n = length(Ξ[1][1])
+
+    log_p = [log.(Ξ[k][1]) for k in 1:K]
+
+    nrows = K * (n - 1)
+    ncols = n
+    A = zeros(T, nrows, ncols)
+    b = zeros(T, nrows)
+
+    row = 0
+    for k in 1:K
+        u_k = u[k, :]
+        if any(u_k .<= 1e-15)
+            row += n - 1
+            continue
+        end
+        for j in 2:n
+            row += 1
+            A[row, j-1] = 1.0
+            A[row, n] = -(log_p[k][j] - log_p[k][1])
+            b[row] = log(u_k[j] / u_k[1])
+        end
+    end
+
+    x = A \ b
+    y = zeros(T, n)
+    y[2:end] = x[1:n-1]
+    σ = x[n]
+
+    γ = produce_gamma(Ξ, y, σ)
+    obj = sum(dot(u[k, :], γ[k, :]) for k in 1:K)
+
+    if verbose
+        residual = norm(A * x - b)
+        println("Least-squares pricing: σ=$(round(σ, digits=4)), obj=$(round(obj, digits=6)), residual=$(round(residual, digits=6))")
+    end
+
+    return y, σ, γ, obj
 end

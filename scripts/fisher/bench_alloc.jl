@@ -42,7 +42,6 @@ for i in 1:m; @agent f1 i c; end
 for i in 1:m; @agent f1 i x; end
 [AgentView(f1, i) for i in 1:m]
 utility(agent)
-f1.u(f1.x[:, 1], 1)
 sparse_dot(c1, x1)
 dot(c1_dense, x1)
 foreach_nz(c1) do j, cj; cj * x1[j]; end
@@ -84,9 +83,6 @@ print("init_agents!:                   ")
 # 4. utility computation
 print("\nutility(agent) ×1000 [CES]:     ")
 @time for _ in 1:1000; utility(agent); end
-
-print("market.u(x,1) ×1000 [closure]:  ")
-@time for _ in 1:1000; f1.u(f1.x[:, 1], 1); end
 
 # 5. sparse_dot vs dot
 print("\nsparse_dot ×10000 (nnz=$(nnz(c1))):  ")

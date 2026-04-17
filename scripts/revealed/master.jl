@@ -2,7 +2,7 @@ using JuMP
 using LinearAlgebra
 using Random
 using ExchangeMarket
-using Gurobi
+using MosekTools
 
 
 """
@@ -143,7 +143,7 @@ function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     m, K, n = size(γ)
 
     # Create model
-    model = Model(() -> Gurobi.Optimizer())
+    model = Model(Mosek.Optimizer)
     set_silent(model)
     if verbose
         unset_silent(model)
@@ -160,15 +160,15 @@ function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     # Constraints
     # s_k + sum_i γ_{ik} w_i ≥ P_k g_k
+    balance = Matrix{ConstraintRef}(undef, K, n)
     for k in 1:K
         p_k, g_k = Ξ[k]
-        P_k_g_k = p_k .* g_k  # P_k g_k (element-wise)
+        P_k_g_k = p_k .* g_k
         for j in 1:n
             if style == :inf
-                # 
-                @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) == P_k_g_k[j])
+                balance[k, j] = @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) == P_k_g_k[j])
             else
-                @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) >= P_k_g_k[j])
+                balance[k, j] = @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) >= P_k_g_k[j])
             end
         end
     end
@@ -184,14 +184,29 @@ function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     # sum_i w_i = 1
-    @constraint(model, sum(w) == 1)
+    @constraint(model, budget, sum(w) == 1)
 
     # Objective: min sum_k t_k
     @objective(model, Min, sum(t))
 
     optimize!(model)
 
-    return value.(w), value.(s), model
+    return value.(w), value.(s), model, balance, budget
+end
+
+"""
+    extract_duals(model, balance, budget, K, n)
+
+Extract dual variables (u, μ) from a solved primal master model.
+- u[k,j] = dual of balance constraint (k,j)
+- μ     = dual of budget constraint (sum w = 1)
+"""
+function extract_duals(model, balance::Matrix{ConstraintRef}, budget::ConstraintRef, K::Int, n::Int)
+    u = [dual(balance[k, j]) for k in 1:K, j in 1:n]
+    # MOI convention: dual of (Σw == 1) in a Min problem enters as μ_MOI*(1 - Σw),
+    # so μ_MOI = -μ_explicit where the explicit dual uses max ... - μ, Σ<u,γ> ≤ μ.
+    μ = -dual(budget)
+    return u, μ
 end
 
 """
@@ -219,7 +234,7 @@ function solve_dual_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     m, K, n = size(γ)
 
     # Create model
-    model = Model(() -> Gurobi.Optimizer())
+    model = Model(Mosek.Optimizer)
     set_silent(model)
     if verbose
         unset_silent(model)
@@ -277,8 +292,10 @@ Validate that primal and dual objectives match (strong duality).
 function validate_strong_duality(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     γ::Array{T,3};
     verbose=false) where T
-    w, s, Q_primal, _ = solve_master_problem(Ξ, γ; verbose=verbose)
-    u, μ, Q_dual, _ = solve_dual_problem(Ξ, γ; verbose=verbose)
+    w, s, model_p, _, _ = solve_master_problem(Ξ, γ; verbose=verbose)
+    Q_primal = objective_value(model_p)
+    u, μ, model_d = solve_dual_problem(Ξ, γ; verbose=verbose)
+    Q_dual = objective_value(model_d)
 
     println("=== Strong Duality Validation ===")
     println("Primal objective (Q):     ", Q_primal)

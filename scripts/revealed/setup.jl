@@ -5,7 +5,6 @@ using Printf
 
 include("./master.jl")
 include("./pricing.jl")
-include("./main.jl")
 
 # -----------------------------------------------------------------------
 # methods: (name, pricing_kind, kwargs)
@@ -78,7 +77,7 @@ end
 # but records (primal_obj, test_err) after every master solve.
 # -----------------------------------------------------------------------
 function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
-    Ξ_train, Ξ_test; verbose=true, sanity=false)
+    Ξ_train, Ξ_test=nothing; verbose=true, sanity=false)
 
     max_iters = get(kwargs, :max_iters, 50)
     tol_obj = get(kwargs, :tol_obj, 5e-3)
@@ -94,6 +93,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
 
     K_train = length(Ξ_train)
     n_train = length(Ξ_train[1][1])
+    has_test = !isnothing(Ξ_test)
 
     history = Dict(
         :primal_obj => Float64[],
@@ -105,7 +105,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
     if verbose
         println("=== $(name) ($(pricing_kind)) ===")
         @printf("%5s | %10s | %10s | %10s | %10s | %5s | %10s\n",
-            "k", "train", "test", "rc", "Δ(fp)", "T", "t(s)")
+            "k", "train", "test", "red. cost.", "Δ(fp)", "T", "t(s)")
         @printf("%5s-+-%10s-+-%10s-+-%10s-+-%10s-+-%5s-+-%10s\n",
             "-----", "----------", "----------", "----------", "----------", "-----", "----------")
     end
@@ -135,7 +135,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
         end
 
         # record after weights are set on fa
-        te = evaluate_test_error(fa, Ξ_test)
+        te = has_test ? evaluate_test_error(fa, Ξ_test) : NaN
         push!(history[:primal_obj], primal_obj)
         push!(history[:test_err], te)
         push!(history[:num_agents], fa.m)
@@ -144,14 +144,23 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
         improvement = length(history[:primal_obj]) >= 2 ?
                       history[:primal_obj][end-1] - primal_obj : NaN
 
+        # helper: format one log row
+        function _log_row(rc_val=NaN)
+            _elapsed = time() - _t0
+            if !verbose
+                return
+            end
+            rc_str = isnan(rc_val) ? @sprintf("%10s", "-") : @sprintf("%10.3e", rc_val)
+            te_str = isnan(te) ? @sprintf("%10s", "-") : @sprintf("%10.3e", te)
+            Δ_str = @sprintf("%10.3e", isnan(improvement) ? 0.0 : improvement)
+            @printf("%5d | %10.3e | %s | %s | %s | %5d | %10.4f\n",
+                iter, primal_obj, te_str, rc_str, Δ_str, fa.m, _elapsed)
+        end
+
         # convergence: average per-sample error
         if primal_obj < tol_obj
-            _elapsed = time() - _t0
-            if verbose
-                @printf("%5d | %10.3e | %10.3e | %10s | %10.3e | %5d | %10.4f\n",
-                    iter, primal_obj, te, "-", isnan(improvement) ? 0.0 : improvement, fa.m, _elapsed)
-                @printf("converged (obj/K = %.2e < tol_obj=%g)\n", primal_obj, tol_obj)
-            end
+            _log_row()
+            verbose && @printf("converged (obj/K = %.2e < tol_obj=%g)\n", primal_obj, tol_obj)
             break
         end
 
@@ -160,12 +169,8 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
             imp2 = max(history[:primal_obj][end-2] - history[:primal_obj][end-1],
                 history[:primal_obj][end-1] - primal_obj)
             if imp2 < tol_delta
-                _elapsed = time() - _t0
-                if verbose
-                    @printf("%5d | %10.3e | %10.3e | %10s | %10.3e | %5d | %10.4f\n",
-                        iter, primal_obj, te, "-", improvement, fa.m, _elapsed)
-                    @printf("converged (Δ = %.2e < tol_delta=%g)\n", imp2, tol_delta)
-                end
+                _log_row()
+                verbose && @printf("converged (Δ = %.2e < tol_delta=%g)\n", imp2, tol_delta)
                 break
             end
         end
@@ -177,12 +182,8 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
             y_opt, σ_opt, γ_new, _ = solve_pricing(Ξ_train, u; y_init=y_lp, σ_init=σ_lp)
             rc_val = reduced_cost(γ_new, u, μ)
             if rc_val <= tol_rc
-                _elapsed = time() - _t0
-                if verbose
-                    @printf("%5d | %10.3e | %10.3e | %10.3e | %10.3e | %5d | %10.4f\n",
-                        iter, primal_obj, te, rc_val, isnan(improvement) ? 0.0 : improvement, fa.m, _elapsed)
-                    @printf("converged (rc = %.2e ≤ tol_rc=%g)\n", rc_val, tol_rc)
-                end
+                _log_row(rc_val)
+                verbose && @printf("converged (rc = %.2e ≤ tol_rc=%g)\n", rc_val, tol_rc)
                 break
             end
             add_to_gamma!(γ_ref, γ_new)
@@ -208,12 +209,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
         end
 
         # log after pricing
-        _elapsed = time() - _t0
-        if verbose
-            rc_str = isnan(rc_val) ? @sprintf("%10s", "-") : @sprintf("%10.3e", rc_val)
-            @printf("%5d | %10.3e | %10.3e | %s | %10.3e | %5d | %10.4f\n",
-                iter, primal_obj, te, rc_str, isnan(improvement) ? 0.0 : improvement, fa.m, _elapsed)
-        end
+        _log_row(rc_val)
     end
 
     # final master solve with latest columns

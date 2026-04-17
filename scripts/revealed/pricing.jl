@@ -3,6 +3,23 @@ using Optim
 using LogExpFunctions: logsumexp
 using ExchangeMarket
 
+"""
+    produce_gamma(Ξ, y, σ)
+
+Compute the K×n bidding matrix γ from CES parameters (y, σ) at prices in Ξ.
+    γ[k, :] = softmax(y - σ log(p_k))
+"""
+function produce_gamma(Ξ, y::AbstractVector, σ::Real)
+    K = length(Ξ)
+    n = length(y)
+    γ = zeros(eltype(y), K, n)
+    for k in 1:K
+        z_k = y .- σ .* log.(Ξ[k][1])
+        γ[k, :] = exp.(z_k .- logsumexp(z_k))
+    end
+    return γ
+end
+
 #=
 Two formulations for the pricing problem:
 
@@ -80,6 +97,46 @@ function add_to_market!(f1::FisherMarket, c_new::Vector{T}, ρ_new::T, w_new::T)
 end
 
 """
+    drop_zero_columns!(fa::FisherMarket, γ_ref::Ref{Array{T,3}}, w; tol=1e-8)
+
+Remove agents with weight ≤ tol from both the FisherMarket and the γ matrix.
+First synchronizes fa with w (resizing fa.w if needed), then drops zero-weight agents.
+Returns the number of agents dropped.
+"""
+function drop_zero_columns!(fa::FisherMarket{T}, γ_ref::Ref{Array{T,3}}, w::Vector{T}; tol=1e-8) where T
+    m_γ = size(γ_ref[], 1)
+    @assert length(w) == m_γ "w length ($(length(w))) must match γ_ref agent dim ($m_γ)"
+
+    keep = findall(w .> tol)
+    ndrop = m_γ - length(keep)
+    ndrop == 0 && return 0
+
+    # Subset γ
+    γ_ref[] = γ_ref[][keep, :, :]
+
+    # Subset FisherMarket fields (index by keep)
+    fa.m = length(keep)
+    fa.c = fa.c[:, keep]
+    fa.ρ = fa.ρ[keep]
+    fa.σ = fa.σ[keep]
+    fa.w = w[keep]
+    fa.x = fa.x[:, keep]
+    fa.g = fa.g[:, keep]
+    fa.s = fa.s[:, keep]
+    # val_u and ε_br_play may not have been expanded by expand_players!; pad to m_γ
+    while length(fa.val_u) < m_γ
+        push!(fa.val_u, zero(T))
+    end
+    while length(fa.ε_br_play) < m_γ
+        push!(fa.ε_br_play, fa.ε_br_play[1])
+    end
+    fa.val_u = fa.val_u[keep]
+    fa.ε_br_play = fa.ε_br_play[keep]
+
+    return ndrop
+end
+
+"""
     solve_pricing_original(Ξ, u; σ_init=0.5, verbose=false)
 
 Solve the ORIGINAL pricing problem (non-convex):
@@ -136,9 +193,11 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
-    x0 = vcat(isnothing(y_init) ? zeros(T, n) : y_init, σ_init)
-    lower = vcat(fill(-100, n), T(-0.98))  # σ > -1 required for ρ < 1
-    upper = vcat(fill(100, n), T(40.0))
+    lower = vcat(fill(-100, n), T(-0.9))  # σ > -1 required for ρ < 1
+    upper = vcat(fill(100, n), T(30.0))
+    y0 = isnothing(y_init) ? zeros(T, n) : clamp.(y_init, -100, 100)
+    σ0 = clamp(σ_init, T(-0.9), T(30.0))
+    x0 = vcat(y0, σ0)
 
     result = optimize(
         neg_objective, neg_gradient!,
@@ -151,11 +210,7 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     y_opt, σ_opt = x_opt[1:n], x_opt[n+1]
     obj_val = -Optim.minimum(result)
 
-    γ_new = zeros(T, K, n)
-    for k in 1:K
-        z_k = y_opt .- σ_opt .* log.(Ξ[k][1])
-        γ_new[k, :] = exp.(z_k .- logsumexp(z_k))
-    end
+    γ_new = produce_gamma(Ξ, y_opt, σ_opt)
 
     verbose && println("Original pricing: σ=$σ_opt, obj=$obj_val")
     return y_opt, σ_opt, γ_new, obj_val
@@ -236,16 +291,74 @@ function solve_pricing_convex(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     y_opt, σ_opt = x_opt[1:n], x_opt[n+1]
     obj_val = -Optim.minimum(result)
 
-    γ_new = zeros(T, K, n)
-    for k in 1:K
-        z_k = y_opt .- σ_opt .* log.(Ξ[k][1])
-        γ_new[k, :] = exp.(z_k .- logsumexp(z_k))
-    end
+    γ_new = produce_gamma(Ξ, y_opt, σ_opt)
 
     verbose && println("Convex pricing: σ=$σ_opt, obj=$obj_val")
     return y_opt, σ_opt, γ_new, obj_val
 end
 
+
+"""
+    solve_pricing_fix_σ(Ξ, u, σ; y_init=nothing, verbose=false)
+
+Solve the pricing problem with fixed σ:
+    max_{y ∈ ℝ^n} Σ_k u_k^T softmax(y - σ log p_k)
+
+With σ fixed this is concave in y (softmax is log-concave, and u_k ≥ 0),
+so any local maximum is global.
+
+Returns: y, σ, γ_new, obj_val
+"""
+function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T},
+    σ::T;
+    y_init::Union{Vector{T},Nothing}=nothing,
+    verbose=false) where T
+
+    K = length(Ξ)
+    n = length(Ξ[1][1])
+
+    # Precompute log prices
+    log_p = [log.(Ξ[k][1]) for k in 1:K]
+
+    function neg_objective(y)
+        val = zero(T)
+        for k in 1:K
+            z_k = y .- σ .* log_p[k]
+            γ_k = exp.(z_k .- logsumexp(z_k))
+            val += dot(u[k, :], γ_k)
+        end
+        return -val
+    end
+
+    function neg_gradient!(G, y)
+        G .= 0.0
+        for k in 1:K
+            z_k = y .- σ .* log_p[k]
+            γ_k = exp.(z_k .- logsumexp(z_k))
+            u_k = u[k, :]
+            # ∂(u^T γ)/∂y = diag(γ) u - γ(γ^T u) = γ ⊙ (u - (γ^T u)1)
+            G .-= γ_k .* (u_k .- dot(γ_k, u_k))
+        end
+    end
+
+    y0 = isnothing(y_init) ? zeros(T, n) : copy(y_init)
+
+    result = optimize(
+        neg_objective, neg_gradient!,
+        y0,
+        LBFGS(),
+        Optim.Options(show_trace=verbose, iterations=1000, g_tol=1e-8)
+    )
+
+    y_opt = Optim.minimizer(result)
+    obj_val = -Optim.minimum(result)
+
+    γ_new = produce_gamma(Ξ, y_opt, σ)
+
+    verbose && println("Fixed-σ pricing: σ=$σ, obj=$obj_val")
+    return y_opt, σ, γ_new, obj_val
+end
 
 """
     solve_pricing_dual_lp(Ξ, u; δ₁=nothing, verbose=false)
@@ -273,11 +386,7 @@ function solve_pricing_dual_lp(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         pmat=pmat, gmat=gmat, δ₁=δ₁, verbose=verbose
     )
 
-    γ_new = zeros(T, K, n)
-    for k in 1:K
-        z_k = y_opt .- δ_opt .* log.(Ξ[k][1])
-        γ_new[k, :] = exp.(z_k .- logsumexp(z_k))
-    end
+    γ_new = produce_gamma(Ξ, y_opt, δ_opt)
 
     obj_val = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K)
     verbose && println("Dual-LP pricing: δ=$δ_opt, obj=$obj_val")

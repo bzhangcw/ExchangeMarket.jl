@@ -17,14 +17,17 @@ function __lse_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     kwargs...
 ) where {T}
+    av = isnothing(agent) ? market.agents[i] : agent
     t = market.ε_br_play[1]
-    c_i = market.c[:, i]
-    z = c_i ./ p
+    w = market.w[av.i]
+    c = av.c
+    z = c ./ p
     γ = __lse_softmax(z ./ t)
-    market.x[:, i] .= market.w[i] .* γ ./ p
-    market.val_u[i] = dot(c_i, market.x[:, i])
+    av.x .= w .* γ ./ p
+    market.val_u[av.i] = sparse_dot(c, av.x)
     return nothing
 end
 

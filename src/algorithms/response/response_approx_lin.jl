@@ -21,23 +21,23 @@ function __approx_lin_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     ϵᵢ::Float64=1e-3,
     debug::Bool=true,
     kwargs...
 ) where {T}
-    n = market.n
-    w = market.w[i]
-    # ε = max(ϵᵢ, market.ε_br_play[i])
-    ε = market.ε_br_play[i]
+    av = isnothing(agent) ? market.agents[i] : agent
+    n = av.n
+    w = market.w[av.i]
+    ε = market.ε_br_play[av.i]
     σ = ε / n
-    c = market.c[:, i]
+    c = av.c
     λ = (1 + σ * n) / w
 
     # solve φ(u) = σ Σ b_j/(u - b_j) - 1 = 0 by bisection.
     b = c ./ (λ .* p)
     b_max = maximum(b)
     φ(u) = σ * sum(b ./ (u .- b)) - 1
-    # bisection: φ > 0 near b_max, φ → -1 as u → ∞
     lo = b_max + 1e-15
     hi = b_max + sum(b)
     while φ(hi) > 0
@@ -53,12 +53,11 @@ function __approx_lin_response(;
         v > 0 ? (lo = u) : (hi = u)
     end
     u = (lo + hi) / 2
-    debug && (abs(φ(u)) > ε) && @info "ApproxLin bisection" ε i niter u φ(u)
+    debug && (abs(φ(u)) > ε) && @info "ApproxLin bisection" ε av.i niter u φ(u)
 
-    # allocation: x_j = (σ/(λ p_j)) · u/(u - b_j)
     x = (σ ./ (λ .* p)) .* u ./ (u .- b)
-    market.x[:, i] .= x
-    market.val_u[i] = c' * x
+    av.x .= x
+    market.val_u[av.i] = sparse_dot(c, x)
 
     return nothing
 end

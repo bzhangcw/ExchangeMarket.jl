@@ -59,7 +59,6 @@ function __af_conic_log_response_ces(;
     JuMP.optimize!(md)
     market.x[:, i] .= max.(value.(x), 0.0)
     market.val_u[i] = market.u(market.x[:, i], i)
-    market.val_f[i] = market.val_u[i]^(1 / market.ρ[i])
     return nothing
 end
 

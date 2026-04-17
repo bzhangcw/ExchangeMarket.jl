@@ -14,23 +14,27 @@ function __bids_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     kwargs...
 ) where {T}
-    if all(market.ρ .>= 0)
-        market.x[:, i] = market.g[:, i] ./ p
-        market.val_u[i] = market.u(market.x[:, i], i)
-        market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(p, i)
-        cs = market.c[:, i] .* spow.(market.x[:, i], market.ρ[i])
+    av = isnothing(agent) ? market.agents[i] : agent
+    w = market.w[av.i]
+    gᵢ = view(market.g, :, av.i)
+
+    av.x .= gᵢ ./ p
+    market.val_u[av.i] = utility(av)
+
+    at = av.atype
+    if at isa LinearAgent || (at isa CESAgent && at.ρ >= 0)
+        ρᵢ = at isa LinearAgent ? 1.0 : at.ρ
+        cs = av.c .* spow.(av.x, ρᵢ)
         sumcs = sum(cs)
-        # update bids
-        market.g[:, i] .= market.w[i] * cs ./ sumcs
+        gᵢ .= w * cs ./ sumcs
     else
-        market.x[:, i] = market.g[:, i] ./ p
-        market.val_u[i] = market.u(market.x[:, i], i)
-        market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(p, i)
-        cs = spow.(market.c[:, i] ./ spow.(p, market.ρ[i]), 1 / (1 - market.ρ[i]))
+        ρᵢ = at.ρ
+        cs = spow.(av.c ./ spow.(p, ρᵢ), 1 / (1 - ρᵢ))
         sumcs = sum(cs)
-        market.g[:, i] .= market.w[i] * cs ./ sumcs
+        gᵢ .= w * cs ./ sumcs
     end
     return nothing
 end

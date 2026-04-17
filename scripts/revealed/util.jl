@@ -75,7 +75,6 @@ function _linear_prog_ces_gamma_single(;
     @objective(md, Min, rmax)
 
     JuMP.optimize!(md)
-    println(termination_status(md))
     return value.(y), value.(δ), value.(A), md
 end
 

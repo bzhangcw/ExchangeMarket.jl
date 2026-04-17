@@ -212,7 +212,9 @@ function init!(alg::HessianBar, market::FisherMarket)
     alg.μ = 1e-1
     Q = 5e-3
     n = market.n
-    alg.y .= 0.0
+    if !isnothing(alg.linconstr)
+        alg.y .= 0.0
+    end
     comp = 1e6
     while true
         alg.p .= ones(n) .* alg.μ
@@ -424,8 +426,8 @@ function opt!(
     l = @sprintf(" lin-system solver alias       := %s", alg.linsys)
     if alg.linsys == :krylov
         l = l * " + optimal diagonal scaling"
-        printto(ios, l)
     end
+    printto(ios, l)
     l = @sprintf(" option for step               := %s", alg.option_step)
     printto(ios, l)
     l = @sprintf(" option for μ                  := %s", alg.option_mu)

@@ -20,12 +20,16 @@ function __conic_log_response_ces(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     μ=1e-4,
     verbose=false,
     kwargs...
 ) where {T}
-    ρ = market.ρ[i]
-    ρ = market.ρ[i]
+    av = isnothing(agent) ? market.agents[i] : agent
+    n = av.n
+    w = market.w[av.i]
+    ρ = av.atype isa CESAgent ? av.atype.ρ : 1.0
+    c = Vector(av.c)  # JuMP needs dense Vector
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
 
@@ -33,28 +37,21 @@ function __conic_log_response_ces(;
     @variable(md, logu)
     log_to_expcone!(u, logu, md)
 
-    @variable(md, x[1:market.n] >= 0)
-    @variable(md, ξ[1:market.n] >= 0)
-    # budget constraint
-    @constraint(md, budget, p' * x <= market.w[i])
-    # utility constraint
-    # Δ^{ρ} ξ^{1-ρ}≥ r 
-    # ⇒ [Δ,ξ,r] ∈ P₃(ρ) [power cone]
-    _c = market.c[:, i] .^ (1 / ρ)
+    @variable(md, x[1:n] >= 0)
+    @variable(md, ξ[1:n] >= 0)
+    @constraint(md, budget, p' * x <= w)
+    _c = c .^ (1 / ρ)
     @constraint(md, sum(ξ) == u)
     @constraint(
         md,
-        ξc[j=1:market.n],
+        ξc[j=1:n],
         [_c[j] * x[j], u, ξ[j]] in MOI.PowerCone(ρ)
     )
     @objective(md, Max, logu)
 
     JuMP.optimize!(md)
-    # ensure non-negativity
-    market.x[:, i] .= max.(value.(x), 0.0)
-    market.val_u[i] = market.u(market.x[:, i], i)
-    market.val_f[i] = market.val_u[i]^(1 / market.ρ[i])
-    market.val_∇u[:, i] = market.∇u(market.x[:, i], i)
+    av.x .= max.(value.(x), 0.0)
+    market.val_u[av.i] = utility(av)
     return nothing
 end
 
@@ -75,22 +72,27 @@ function __conic_log_response_ces_dual(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     μ=1e-4,
     verbose=false,
     kwargs...
 ) where {T}
+    av = isnothing(agent) ? market.agents[i] : agent
+    n = av.n
+    w = market.w[av.i]
+    c = Vector(av.c)  # JuMP needs dense Vector
     ϵᵢ = μ * 1e-5
     md = __generate_empty_jump_model(; verbose=verbose, tol=ϵᵢ)
-    @variable(md, s[1:market.n] .>= 0)
-    @variable(md, logs[1:market.n])
+    @variable(md, s[1:n] .>= 0)
+    @variable(md, logs[1:n])
     @variable(md, v .>= 0)
     @variable(md, logv)
     log_to_expcone!.(s, logs, md)
     log_to_expcone!(v, logv, md)
-    @objective(md, Min, -market.w[i] * logv - μ * sum(logs))
-    @constraint(md, xc, s + v .* market.c[:, i] - p .== 0)
+    @objective(md, Min, -w * logv - μ * sum(logs))
+    @constraint(md, xc, s + v .* c - p .== 0)
     JuMP.optimize!(md)
-    market.x[:, i] .= abs.(dual.(xc))
+    av.x .= abs.(dual.(xc))
     return nothing
 end
 DualCESConic = DualCESConicResponse = ResponseOptimizer(
@@ -98,6 +100,26 @@ DualCESConic = DualCESConicResponse = ResponseOptimizer(
     :linconic,
     "DualCESConicResponse"
 )
+
+# --------------------------------------------------------------------------
+# CES closed-form demand: x_j = w c_j^(1+σ) p_j^(-σ-1) / Σ_k c_k^(1+σ) p_k^(-σ)
+# --------------------------------------------------------------------------
+@inline function _ces_demand!(x, c::SparseColRef, p, w, σ)
+    denom = sparse_reduce(c) do j, cj
+        cj^(1.0 + σ) * p[j]^(-σ)
+    end
+    coeff = w / denom
+    x .= 0.0
+    sparse_scatter!(x, c) do j, cj
+        coeff * cj^(1.0 + σ) * p[j]^(-σ - 1.0)
+    end
+end
+
+@inline function _ces_demand!(x, c::AbstractVector, p, w, σ)
+    cs = c .^ (1.0 + σ)
+    denom = dot(cs, p .^ (-σ))
+    x .= (w / denom) .* cs .* p .^ (-σ - 1.0)
+end
 
 # --------------------------------------------------------------------------
 # solve the CES utility maximization problem analytically
@@ -115,21 +137,24 @@ function __analytic_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     kwargs...
 ) where {T}
-    if is_linear_market(market)
-        ratio = market.c[:, i] ./ p
-        # argmax returns the index of the maximum value,
-        # it is always the smallest one among the ties.
-        j₊ = argmax(ratio)
-        market.x[:, i] .= 0
-        market.x[j₊, i] = market.w[i] / p[j₊]
-        market.val_u[i] = market.u(market.x[:, i], i)
+    av = isnothing(agent) ? market.agents[i] : agent
+    w = market.w[av.i]
+    if av.atype isa LinearAgent
+        # linear: bang-per-buck — concentrate on best c_j/p_j
+        j₊ = sparse_argmax(av.c) do j, cj
+            cj / p[j]
+        end
+        av.x .= 0
+        av.x[j₊] = w / p[j₊]
     else
-        market.val_f[i], market.val_∇f[:, i], market.val_Hf[:, i] = market.f∇f(p, i)
-        market.x[:, i] = -market.w[i] ./ market.val_f[i] ./ market.σ[i] .* market.val_∇f[:, i]
-        market.val_u[i] = market.u(market.x[:, i], i)
+        # CES closed-form demand:
+        #   x_j = w · c_j^(1+σ) · p_j^(-σ-1) / Σ_k c_k^(1+σ) · p_k^(-σ)
+        _ces_demand!(av.x, av.c, p, w, av.atype.σ)
     end
+    market.val_u[av.i] = utility(av)
     return nothing
 end
 
@@ -138,36 +163,3 @@ CESAnalytic = ResponseOptimizer(
     :analytic,
     "CESAnalytic"
 )
-
-
-# compute Jacobian: -dx/dp
-function __linear_jacxp_fromx(X₂, u, c, w, μ)
-    invμ = 1 / μ
-    Xc = X₂ * c
-    r = w / u^2
-    return invμ * X₂ - (invμ^2 * r * Xc * Xc') ./ (1 + invμ * r * c' * Xc)
-end
-
-# compute Jacobian -dp/dx
-function __linear_jacpx_fromx(Xi₂, u, c, w, μ)
-    r = w / u^2
-    return μ * Xi₂ + r * c * c'
-end
-
-function __linear_hess_fromx!(alg, market::FisherMarket; bool_dbg=false)
-    X2 = market.x[alg.sampler.indices, :] .^ 2
-    Di(i) = begin
-        X₂ = spdiagm(X2[:, i])
-        u = market.val_u[i]
-        c = market.val_∇u[:, i]
-        w = market.w[i]
-        jxp = __linear_jacxp_fromx(X₂, u, c, w, alg.μ)
-        if bool_dbg
-            Xi₂ = spdiagm(1 ./ X2[:, i])
-            jpx = __linear_jacpx_fromx(Xi₂, u, c, w, alg.μ)
-            @info "jacpx * jacxp - I" maximum(abs.(jpx * jxp - I))
-        end
-        return jxp
-    end
-    alg.H = mapreduce(Di, +, alg.sampler.indices, init=spzeros(market.n, market.n))
-end

@@ -2,7 +2,13 @@
 
 julia_version = "1.10.3"
 manifest_format = "2.0"
-project_hash = "26d853292ebf8c1515a3d219789fc85acce04297"
+project_hash = "a7a90f79a26381d2648a29e1983af1ef9c9cf50b"
+
+[[deps.ADNLPModels]]
+deps = ["ADTypes", "ForwardDiff", "LinearAlgebra", "NLPModels", "Requires", "ReverseDiff", "SparseArrays", "SparseConnectivityTracer", "SparseMatrixColorings"]
+git-tree-sha1 = "397c37668a74a47a16e0cdd47d1204e564549ace"
+uuid = "54578032-b7ea-4c30-94aa-7cbd1cce6c9a"
+version = "0.8.12"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "e2478490447631aedba0823d4d7a80b2cc8cdb32"
@@ -92,6 +98,16 @@ deps = ["PtrArrays", "Random"]
 git-tree-sha1 = "9876e1e164b144ca45e9e3198d0b689cadfed9ff"
 uuid = "66dad0bd-aa9a-41b7-9441-69ab47430ed8"
 version = "1.1.3"
+
+[[deps.AppleAccelerate]]
+deps = ["Libdl", "LinearAlgebra", "SparseArrays"]
+git-tree-sha1 = "d3fe615e394f765b7ef7e0a1ca10b007305d7e6f"
+uuid = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
+version = "0.6.0"
+weakdeps = ["AbstractFFTs"]
+
+    [deps.AppleAccelerate.extensions]
+    AppleAccelerateAbstractFFTsExt = "AbstractFFTs"
 
 [[deps.ArgCheck]]
 git-tree-sha1 = "f9e9a66c9b7be1ad7372bbd9b062d9230c30c5ce"
@@ -558,7 +574,7 @@ version = "0.0.20230411+1"
 
 [[deps.ExchangeMarket]]
 deps = ["DataFrames", "Dates", "ForwardDiff", "JuMP", "Krylov", "LaTeXStrings", "LineSearches", "LinearAlgebra", "LinearOperators", "MadNLP", "MathOptInterface", "MosekTools", "Optim", "Printf", "Random", "SparseArrays"]
-path = ".."
+path = "/Users/brent/workspace/ExchangeMarket.jl/scripts/.."
 uuid = "f4303546-4db8-419d-a649-8baed3ff0194"
 version = "0.1.0"
 
@@ -1368,9 +1384,9 @@ version = "0.5.16"
 
 [[deps.MadNLP]]
 deps = ["LDLFactorizations", "LinearAlgebra", "Logging", "NLPModels", "Pkg", "Printf", "SolverCore", "SparseArrays", "SuiteSparse"]
-path = "/Users/brent/workspace/MadNLP.jl/"
+git-tree-sha1 = "6d4d80f692d35e073d6e5796ebb0a8a07963d781"
 uuid = "2621e9c9-9eb4-46b1-8089-e8c72242dfb6"
-version = "0.8.3"
+version = "0.8.12"
 weakdeps = ["MathOptInterface"]
 
     [deps.MadNLP.extensions]
@@ -1460,9 +1476,9 @@ version = "11.0.1"
 
 [[deps.MosekTools]]
 deps = ["MathOptInterface", "Mosek"]
-git-tree-sha1 = "657c17e52a3abeaa98a550232bd6dac459512dcd"
+git-tree-sha1 = "5ea97a807fad13a0a2760dbf9a01809709eba099"
 uuid = "1ec41992-ff65-5c91-ac43-2df89e9693a4"
-version = "0.15.9"
+version = "0.15.10"
 
 [[deps.MozillaCACerts_jll]]
 uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
@@ -2074,6 +2090,42 @@ version = "1.2.1"
 deps = ["Libdl", "LinearAlgebra", "Random", "Serialization", "SuiteSparse_jll"]
 uuid = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 version = "1.10.0"
+
+[[deps.SparseConnectivityTracer]]
+deps = ["ADTypes", "DocStringExtensions", "FillArrays", "LinearAlgebra", "Random", "SparseArrays"]
+git-tree-sha1 = "182990067a09adf950274f97f38f68c76f81d2d0"
+uuid = "9f842d2f-2579-4b1d-911e-f412cf18a3f5"
+version = "0.6.21"
+
+    [deps.SparseConnectivityTracer.extensions]
+    SparseConnectivityTracerDataInterpolationsExt = "DataInterpolations"
+    SparseConnectivityTracerLogExpFunctionsExt = "LogExpFunctions"
+    SparseConnectivityTracerNNlibExt = "NNlib"
+    SparseConnectivityTracerNaNMathExt = "NaNMath"
+    SparseConnectivityTracerSpecialFunctionsExt = "SpecialFunctions"
+
+    [deps.SparseConnectivityTracer.weakdeps]
+    DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
+    LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
+    NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+    NaNMath = "77ba4419-2d1f-58cd-9bb1-8ffee604a2e3"
+    SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+
+[[deps.SparseMatrixColorings]]
+deps = ["ADTypes", "DocStringExtensions", "LinearAlgebra", "PrecompileTools", "Random", "SparseArrays"]
+git-tree-sha1 = "d3f3b7bb8a561b5ff20ee7cf9574841ee4e4e137"
+uuid = "0a514795-09f3-496d-8182-132a7b665d35"
+version = "0.4.22"
+
+    [deps.SparseMatrixColorings.extensions]
+    SparseMatrixColoringsCUDAExt = "CUDA"
+    SparseMatrixColoringsCliqueTreesExt = "CliqueTrees"
+    SparseMatrixColoringsColorsExt = "Colors"
+
+    [deps.SparseMatrixColorings.weakdeps]
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    CliqueTrees = "60701a23-6482-424a-84db-faee86b9b1f8"
+    Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
 
 [[deps.SpecialFunctions]]
 deps = ["IrrationalConstants", "LogExpFunctions", "OpenLibm_jll", "OpenSpecFun_jll"]

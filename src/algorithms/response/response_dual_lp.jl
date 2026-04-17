@@ -80,37 +80,33 @@ function __dual_lp_response(;
     i::Int=1,
     p::Vector{T}=nothing,
     market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
     μ::Float64=1e-3,
     debug::Bool=false,
     kwargs...
 ) where {T}
-    n = market.n
-    w = market.w[i]
-    c = market.c[:, i]
+    av = isnothing(agent) ? market.agents[i] : agent
+    n = av.n
+    w = market.w[av.i]
+    c = av.c
 
     # λ must satisfy 0 < λ < min_j(p_j/c_j) for c_j > 0
     λ_max = Inf
-    for j in 1:n
-        if c[j] > 0
-            λ_max = min(λ_max, p[j] / c[j])
-        end
+    foreach_nz(c) do j, cj
+        λ_max = min(λ_max, p[j] / cj)
     end
 
     # ψ(λ) = λ Σ_j c_j/(p_j - λ c_j) - w
-    # ψ(0) = -w < 0,  ψ → +∞ as λ → λ_max
     function ψ(λ)
         val = -w
-        for j in 1:n
-            if c[j] > 0
-                val += λ * c[j] / (p[j] - λ * c[j])
-            end
+        foreach_nz(c) do j, cj
+            val += λ * cj / (p[j] - λ * cj)
         end
         return val
     end
 
     lo = 0.0
     hi = λ_max - 1e-15
-    # ensure ψ(hi) > 0
     while ψ(hi) < 0
         hi = (hi + λ_max) / 2
         (λ_max - hi) < 1e-20 * λ_max && break
@@ -128,12 +124,14 @@ function __dual_lp_response(;
     λ_opt = (lo + hi) / 2
     debug && @info "DualLP bisection" i niter λ_opt ψ(λ_opt)
 
-    # recover s and x
-    for j in 1:n
-        market.s[j, i] = max(p[j] - λ_opt * c[j], 1e-30)
-        market.x[j, i] = μ / market.s[j, i]
+    # recover s and x: for zero c_j, s_j = p_j, x_j = μ/p_j
+    av.s .= p
+    av.x .= μ ./ p
+    foreach_nz(c) do j, cj
+        av.s[j] = max(p[j] - λ_opt * cj, 1e-30)
+        av.x[j] = μ / av.s[j]
     end
-    market.val_u[i] = c' * market.x[:, i]
+    market.val_u[av.i] = sparse_dot(c, av.x)
 
     return nothing
 end

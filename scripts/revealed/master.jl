@@ -79,10 +79,15 @@ end
 
 Compute the CES bidding vector γ for given price p, coefficients c, and elasticity parameter σ.
     γ_j = (c_j^{1+σ} * p_j^{-σ}) / sum_ℓ(c_ℓ^{1+σ} * p_ℓ^{-σ})
+
+Uses log-space computation (softmax) to avoid overflow for large |σ|.
 """
 function compute_gamma(p::AbstractVector, c::AbstractVector, σ::Real)
-    numerator = (c .^ (1 + σ)) .* (p .^ (-σ))
-    γ = numerator ./ sum(numerator)
+    # log(numerator_j) = (1+σ) log(c_j) - σ log(p_j)
+    z = (1 + σ) .* log.(c) .- σ .* log.(p)
+    z_max = maximum(z)
+    ez = exp.(z .- z_max)
+    γ = ez ./ sum(ez)
     return γ
 end
 
@@ -132,7 +137,9 @@ Returns:
 """
 function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     γ::Array{T,3};
-    verbose=false) where T
+    verbose=false,
+    style=:inf
+) where T
     m, K, n = size(γ)
 
     # Create model
@@ -144,7 +151,11 @@ function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     # Variables
     @variable(model, w[1:m] >= 0)
-    @variable(model, s[1:K, 1:n] >= 0)
+    if style == :inf
+        @variable(model, s[1:K, 1:n])
+    else
+        @variable(model, s[1:K, 1:n] >= 0)
+    end
     @variable(model, t[1:K] >= 0)  # t_k = ||s_k||_∞
 
     # Constraints
@@ -153,14 +164,22 @@ function solve_master_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         p_k, g_k = Ξ[k]
         P_k_g_k = p_k .* g_k  # P_k g_k (element-wise)
         for j in 1:n
-            @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) >= P_k_g_k[j])
+            if style == :inf
+                # 
+                @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) == P_k_g_k[j])
+            else
+                @constraint(model, s[k, j] + sum(γ[i, k, j] * w[i] for i in 1:m) >= P_k_g_k[j])
+            end
         end
     end
 
-    # t_k >= s_k (infinity norm)
+    # t_k >= |s_{k,j}| (infinity norm)
     for k in 1:K
         for j in 1:n
             @constraint(model, t[k] >= s[k, j])
+            if style == :inf
+                @constraint(model, t[k] >= -s[k, j])
+            end
         end
     end
 
@@ -194,7 +213,9 @@ Returns:
 """
 function solve_dual_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     γ::Array{T,3};
-    verbose=false) where T
+    verbose=false,
+    style=:inf
+) where T
     m, K, n = size(γ)
 
     # Create model
@@ -205,7 +226,11 @@ function solve_dual_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     # Variables
-    @variable(model, u[1:K, 1:n] >= 0)
+    if style == :inf
+        @variable(model, u[1:K, 1:n])
+    else
+        @variable(model, u[1:K, 1:n] >= 0)
+    end
     @variable(model, μ)
 
     # Constraints
@@ -215,8 +240,20 @@ function solve_dual_problem(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     # ||u_k||_1 ≤ 1, ∀k∈[K]
-    for k in 1:K
-        @constraint(model, sum(u[k, :]) <= 1)
+    if style == :inf
+        # |u_{kj}| ≤ a_{kj}, Σ_j a_{kj} ≤ 1
+        @variable(model, a[1:K, 1:n] >= 0)
+        for k in 1:K
+            for j in 1:n
+                @constraint(model, a[k, j] >= u[k, j])
+                @constraint(model, a[k, j] >= -u[k, j])
+            end
+            @constraint(model, sum(a[k, :]) <= 1)
+        end
+    else
+        for k in 1:K
+            @constraint(model, sum(u[k, :]) <= 1)
+        end
     end
 
     # Objective: max sum_k <u_k, P_k g_k> - μ

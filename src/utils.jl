@@ -42,6 +42,8 @@ end
 proj(x) = x < 0 ? Inf : x
 # safe power function
 spow(x, y) = x == 0.0 ? 0.0 : x^y
+# safe log: log(0) → 0
+slog(x) = x > 0 ? log(x) : 0.0
 
 # -----------------------------------------------------------------------
 # self-concordant barrier functions

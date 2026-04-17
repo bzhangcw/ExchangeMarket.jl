@@ -1,56 +1,7 @@
 # -----------------------------------------------------------------------
-# Agent type system and AgentView
-#   Each agent has a type (LinearAgent, CESAgent) that determines
-#   how to compute allocation x from prices p.
-# -----------------------------------------------------------------------
-
-# -----------------------------------------------------------------------
-# Agent type hierarchy
-# -----------------------------------------------------------------------
-abstract type AgentType end
-
-"""
-    LinearAgent <: AgentType
-
-Linear utility: u(x) = ⟨c, x⟩.
-"""
-struct LinearAgent <: AgentType end
-
-"""
-    CESAgent <: AgentType
-
-CES utility: u(x) = (Σⱼ cⱼ xⱼ^ρ)^(1/ρ), with ρ < 1, σ = ρ/(1-ρ).
-"""
-struct CESAgent <: AgentType
-    ρ::Float64
-    σ::Float64
-end
-
-"""
-    agent_type(ρ, σ) -> AgentType
-
-Derive the agent type from CES parameter ρ.
-"""
-@inline function agent_type(ρ::Float64, σ::Float64)
-    ρ == 1.0 ? LinearAgent() : CESAgent(ρ, σ)
-end
-
-# -----------------------------------------------------------------------
-# Utility: the only function agents need to report
-#   Given x (already computed by the response function), return u(x).
-# -----------------------------------------------------------------------
-@inline utility(::LinearAgent, c, x) = sparse_dot(c, x)
-
-@inline function utility(at::CESAgent, c, x)
-    s = 0.0
-    foreach_nz(c) do j, cj
-        s += cj * spow(x[j], at.ρ)
-    end
-    return spow(s, 1.0 / at.ρ)
-end
-
-# -----------------------------------------------------------------------
 # AgentView: zero-copy per-agent data slice with type dispatch
+#   Agent type definitions live in models/agent_types.jl.
+#   Utility evaluation methods live in the corresponding response files.
 # -----------------------------------------------------------------------
 """
     AgentView{T, Vc, AT}

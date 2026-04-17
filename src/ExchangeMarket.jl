@@ -27,6 +27,7 @@ include("models/arrow.jl")
 
 const Market = AbstractMarket
 include("models/validate.jl")
+include("models/agent_types.jl")
 include("models/agent_view.jl")
 include("linalg/cuda.jl")
 
@@ -45,6 +46,7 @@ include("algorithms/response/response_bids.jl")
 include("algorithms/response/response_approx_lin.jl")
 include("algorithms/response/response_dual_lp.jl")
 include("algorithms/response/response_lse.jl")
+include("algorithms/response/response_plc.jl")
 include("algorithms/primals.jl")
 include("algorithms/sampler.jl")
 
@@ -63,7 +65,7 @@ export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 
 # agent interface
-export AgentType, LinearAgent, CESAgent, AgentView, @agent
+export AgentType, LinearAgent, CESAgent, PLCAgent, AgentView, @agent
 export SparseColRef, sparse_col_ref
 export foreach_nz, sparse_reduce, sparse_scatter!, sparse_argmax
 export sparse_dot, sparse_div_max
@@ -88,6 +90,8 @@ export LSEResponse
 export ONR
 # affine-constrained response
 export AFCESConic
+# PLC (Afriat) utility
+export PLCResponse
 
 # DRq: Diagonal + Rank-q
 export SMWDRq, smw_drq!, update_cluster_map!

@@ -9,6 +9,19 @@ using JuMP
 import MathOptInterface as MOI
 
 # --------------------------------------------------------------------------
+# Utility evaluation for Linear and CES agents
+# --------------------------------------------------------------------------
+@inline utility(::LinearAgent, c, x) = sparse_dot(c, x)
+
+@inline function utility(at::CESAgent, c, x)
+    s = 0.0
+    foreach_nz(c) do j, cj
+        s += cj * spow(x[j], at.ρ)
+    end
+    return spow(s, 1.0 / at.ρ)
+end
+
+# --------------------------------------------------------------------------
 # primal form of CES economy in linear-conic form
 # --------------------------------------------------------------------------
 @doc raw"""

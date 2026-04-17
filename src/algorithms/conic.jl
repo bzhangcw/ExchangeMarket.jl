@@ -38,7 +38,6 @@ function __create_primal(alg::Conic, market::FisherMarket)
     model = alg.model
     m = market.m
     n = market.n
-    u = market.u
     q = market.q
     w = market.w
     @variable(model, x[1:m, 1:n] >= 0)
@@ -46,7 +45,8 @@ function __create_primal(alg::Conic, market::FisherMarket)
     @variable(model, ℓ[1:m])
     @constraint(model, limit, x' * ones(m) .<= q)
     for i in 1:m
-        @constraint(model, ℓ[i] == u(x[:, i], i))
+        # linear utility: u(x) = c' * x
+        @constraint(model, ℓ[i] == market.c[:, i]' * x[:, i])
         log_to_expcone!(ℓ[i], v[i], model)
     end
     @objective(model, Min, -sum([w[i] * v[i] for i in 1:m]))
@@ -73,7 +73,7 @@ function __create_dual(alg::Conic, market::FisherMarket)
     JuMP.optimize!(model)
     alg.p = value.(p)
     market.x = hcat([abs.(dual.(xc[i])) for i in 1:market.m]...)
-    market.val_u = map(i -> market.u(market.x[:, i], i), 1:market.m)
+    market.val_u = map(i -> market.c[:, i]' * market.x[:, i], 1:market.m)
     return
 end
 

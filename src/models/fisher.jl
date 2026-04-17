@@ -50,11 +50,8 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     g::Matrix{T} # bids (rename from b to avoid endowment name clash)
 
     # -----------------------------------------------------------------------
-    # utility (computed via AgentView dispatch, not closures)
+    # utility (computed via AgentView dispatch in response files)
     # -----------------------------------------------------------------------
-    # legacy: u closure kept for backward compat with conic.jl / response_ces_af.jl
-    uₛ::Union{Function,Nothing} = nothing
-    u::Union{Function,Nothing} = nothing
     val_u::Vector{T}
 
     # - the vector c to parameterize the utility function
@@ -148,7 +145,6 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         end
         this.c = copy(c)
         @printf("FisherMarket cost matrix initialized in %.4f seconds\n", time() - ts)
-        this.uₛ = (x, i) -> c[:, i]' * x
 
         this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
         this.w = w = (isnothing(w) ? rand(m) : w) * scale
@@ -164,13 +160,6 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        # utility computation is now via AgentView dispatch (see agent_view.jl)
-        # legacy closure kept for backward compat with conic.jl / response_ces_af.jl
-        this.uₛ = (x, i) -> c[:, i]' * x
-        this.u = (x, i) -> begin
-            ρᵢ = this.ρ[i]
-            ρᵢ == 1.0 ? this.uₛ(x, i) : sum(this.c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
-        end
         this.val_u = zeros(m)
         this.agents = []  # populated lazily via init_agents!
         this.workspace = nothing

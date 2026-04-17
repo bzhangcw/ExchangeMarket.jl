@@ -25,10 +25,6 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     # -------------------------------------------------------------------
     # utility and indirect utility
     # -------------------------------------------------------------------
-    uₛ::Union{Function,Nothing} = nothing
-    u::Union{Function,Nothing} = nothing
-    ∇u::Union{Function,Nothing} = nothing
-
     f::Union{Function,Nothing} = nothing
     f∇f::Union{Function,Nothing} = nothing
 
@@ -90,7 +86,6 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
             c = Matrix(c)
         end
         this.c = copy(c)
-        this.uₛ = (x, i) -> c[:, i]' * x
 
         # endowments b (n × m), total supply q = sum(b, dims=2)
         _b = isnothing(b) ? sprand(Float64, n, m, sparsity) : b
@@ -109,24 +104,7 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         this.constr_x = constr_x
         this.constr_p = constr_p
 
-        # utility and indirect utility with per-agent ρ/σ
-        this.u = (x, i) -> begin
-            ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                return this.uₛ(x, i)
-            else
-                return sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ)
-            end
-        end
-        this.∇u = (x, i) -> begin
-            ρᵢ = this.ρ[i]
-            if ρᵢ == 1.0
-                return c[:, i]
-            else
-                s = sum(c[:, i] .* spow.(x, ρᵢ))^(1 / ρᵢ - 1)
-                return s .* spow.(x, ρᵢ - 1) .* c[:, i]
-            end
-        end
+        # indirect utility (price-space) closures
         this.f = (p, i) -> begin
             ρᵢ = this.ρ[i]
             if ρᵢ == 1.0

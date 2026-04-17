@@ -13,7 +13,6 @@ end
 function validate(market::Market, alg)
     m = market.m
     n = market.n
-    u = market.u
     x = market.x
     p = isnothing(alg) ? market.p : alg.p
     μ = isnothing(alg) ? 0.0 : alg.μ

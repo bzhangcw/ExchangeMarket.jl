@@ -1,56 +1,154 @@
 # Methods and tracking utilities for revealed-preference CES surrogate fitting.
-# Mirrors the structure of scripts/fisher/setup.jl.
+# File map (in include order):
+#   - redistribute.jl : master / dual LPs (eq.cg.master, eq.cg.dual)
+#   - pricing.jl      : multiclass dispatcher, drop_zero_columns!,
+#                       add_column_to_market!, per-sample inversion merge
+#   - frankwolfe.jl   : Frank-Wolfe runner (run_method_tracked_fw)
+#   - cpm.jl          : column-generation runner (run_method_tracked)
+#
+# Helpers used by the FW/CG runners (produce_revealed_preferences,
+# compute_gamma_from_market, compute_gamma, compute_gamma_matrix,
+# evaluate_test_error) live in this file so they're available to all
+# downstream includes.
 
 using Printf
-
-include("./master.jl")
-include("./pricing.jl")
+using Random
+using LinearAlgebra
+using ExchangeMarket
 
 # -----------------------------------------------------------------------
-# methods: (name, pricing_kind, kwargs)
-# pricing_kind ∈ {:cg_single, :cg_multicut, :cg_lsq}
+# Master / dual LP solvers (define before runners include them).
 # -----------------------------------------------------------------------
-method_kwargs = [
-    [:CG, :cg_single,
-        Dict(
-            :max_iters => 300,
-            :tol_obj => 1e-3,
-            :tol_rc => 1e-5,
-            :tol_delta => 1e-5,
-            :drop => false,
-        )
-    ],
-    [:Multicut, :cg_multicut,
-        Dict(
-            :max_iters => 50,
-            :tol_obj => 1e-3,
-            :tol_rc => 1e-3,
-            :tol_delta => 1e-5,
-            :drop => true,
-        )
-    ],
-    [:LSQ, :cg_lsq,
-        Dict(
-            :max_iters => 50,
-            :tol_obj => 1e-3,
-            :tol_rc => 1e-3,
-            :tol_delta => 1e-3,
-            :drop => true,
-        )
-    ],
-]
+include("./redistribute.jl")
 
-colors = Dict(
-    :CG => 1,
-    :Multicut => 2,
-    :LSQ => 3,
-)
+# -----------------------------------------------------------------------
+# Revealed-preference data preparation
+# -----------------------------------------------------------------------
+"""
+    produce_revealed_preferences(alg, f1::FisherMarket, K; price_range=(0.5, 2.0), seed=nothing)
 
-marker_style = Dict(
-    :CG => :circle,
-    :Multicut => :rect,
-    :LSQ => :dtriangle,
-)
+Generate K random price vectors and compute aggregate demands from a FisherMarket.
+Returns Ξ = [(p_1, g_1), ..., (p_K, g_K)] where g_k is the aggregate demand at price p_k.
+
+Arguments:
+- alg: Algorithm object (e.g., HessianBar)
+- f1: FisherMarket object containing the market structure
+- K: Number of price observations to generate
+- price_range: (min, max) range for random prices
+- seed: Random seed (optional)
+
+After calling play!(alg, f1), the demand is computed and stored in f1.x.
+"""
+function produce_revealed_preferences(alg, f1::FisherMarket, K::Int;
+    price_range=(0.5, 2.0), seed=nothing)
+    if !isnothing(seed)
+        Random.seed!(seed)
+    end
+
+    n = f1.n
+    Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
+
+    for k in 1:K
+        # Random price vector (normalized to sum to 1)
+        p_k = price_range[1] .+ (price_range[2] - price_range[1]) .* rand(n)
+        p_k = p_k ./ sum(p_k)  # normalize prices
+
+        # Set price in the algorithm
+        alg.p .= p_k
+
+        # Compute demand via play!
+        play!(alg, f1)
+
+        # Aggregate demand: sum over all agents
+        g_k = sum(f1.x, dims=2)[:]
+
+        Ξ[k] = (copy(p_k), copy(g_k))
+    end
+
+    return Ξ
+end
+
+"""
+    compute_gamma(p, c, σ)
+
+Compute the CES bidding vector γ for given price p, coefficients c, and elasticity parameter σ.
+    γ_j = (c_j^{1+σ} * p_j^{-σ}) / sum_ℓ(c_ℓ^{1+σ} * p_ℓ^{-σ})
+
+Uses log-space computation (softmax) to avoid overflow for large |σ|.
+
+Special case: when `σ` is `+Inf` (the linear regime, ρ = 1), γ is the
+bang-per-buck vertex indicator `e_{argmax_j c_j / p_j}` as in
+`fact.demand.linear`. This matches the storage convention used by
+`add_column_to_market!` for the `:linear` class.
+"""
+function compute_gamma(p::AbstractVector, c::AbstractVector, σ::Real)
+    # Linear regime: ρ = 1, σ = +∞; γ is the bang-per-buck vertex.
+    if isinf(σ) && σ > 0
+        γ = zeros(eltype(p), length(c))
+        j_star = argmax(c ./ p)
+        γ[j_star] = one(eltype(p))
+        return γ
+    end
+    # log(numerator_j) = (1+σ) log(c_j) - σ log(p_j)
+    z = (1 + σ) .* log.(c) .- σ .* log.(p)
+    z_max = maximum(z)
+    ez = exp.(z .- z_max)
+    γ = ez ./ sum(ez)
+    return γ
+end
+
+"""
+    compute_gamma_from_market(f1::FisherMarket, Ξ)
+
+Compute the bidding matrix γ[i,k,:] for a FisherMarket given revealed preferences Ξ.
+Uses the market's CES parameters (c, σ) to compute bidding vectors.
+
+Returns γ as a 3D array of size (m, K, n).
+"""
+function compute_gamma_from_market(f1::FisherMarket, Ξ::Vector{Tuple{Vector{T},Vector{T}}}) where T
+    m, n = f1.m, f1.n
+    K = length(Ξ)
+
+    γ = zeros(T, m, K, n)
+    for i in 1:m
+        c_i = Vector(f1.c[:, i])  # ensure it's a dense vector
+        σ_i = f1.σ[i]
+        for k in 1:K
+            p_k, _ = Ξ[k]
+            γ[i, k, :] = compute_gamma(p_k, c_i, σ_i)
+        end
+    end
+
+    return γ
+end
+
+"""
+    compute_gamma_matrix(Ξ, C, σ_vec)
+
+Compute the bidding matrix γ[i,k,:] for all agents i and observations k.
+- Ξ: Vector of (p_k, g_k) tuples
+- C: Matrix of coefficients, C[i,:] = c_i
+- σ_vec: Vector of elasticity parameters σ_i
+
+Returns γ as a 3D array of size (m, K, n).
+"""
+function compute_gamma_matrix(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    C::Matrix{T},
+    σ_vec::Vector{T}) where T
+    m, n = size(C)
+    K = length(Ξ)
+
+    γ = zeros(T, m, K, n)
+    for i in 1:m
+        for k in 1:K
+            p_k, _ = Ξ[k]
+            γ[i, k, :] = compute_gamma(p_k, C[i, :], σ_vec[i])
+        end
+    end
+
+    return γ
+end
+
 
 # -----------------------------------------------------------------------
 # evaluation on test set: mean L∞ error of Σ w_i γ_i(p) vs target P g
@@ -73,157 +171,97 @@ function evaluate_test_error(fa, Ξ_test)
 end
 
 # -----------------------------------------------------------------------
-# iteration-level tracked runner. Reimplements the CG loops from main.jl
-# but records (primal_obj, test_err) after every master solve.
+# Pricing dispatcher + FW / CG runners.
+# Order matters: pricing.jl defines `drop_zero_columns!`,
+# `add_column_to_market!`, etc., which both runners use.
 # -----------------------------------------------------------------------
-function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
-    Ξ_train, Ξ_test=nothing; verbose=true, sanity=false)
+include("./pricing.jl")
+include("./frankwolfe.jl")
+include("./cpm.jl")
 
-    max_iters = get(kwargs, :max_iters, 50)
-    tol_obj = get(kwargs, :tol_obj, 5e-3)
-    tol_rc = get(kwargs, :tol_rc, 1e-3)
-    tol_delta = get(kwargs, :tol_delta, 1e-3)
-    drop = get(kwargs, :drop, true)
 
-    n = length(Ξ_train[1][1])
 
-    # initialize surrogate market with one random CES agent
-    fa = FisherMarket(1, n; ρ=rand(1), scale=30.0, sparsity=0.99)
-    γ_ref = Ref(compute_gamma_from_market(fa, Ξ_train))
+# -----------------------------------------------------------------------
+# methods: (name, pricing_kind, kwargs)
+# pricing_kind ∈ {:cg_single, :cg_multicut} for CG, :fw for Frank-Wolfe.
+# The kwargs key :classes selects which function classes the pricing
+# dispatcher tries each iteration (defaults to [:ces] when omitted).
+# Supported classes: :ces, :linear, :leontief, :ql (pricing only — storage TBD).
+# -----------------------------------------------------------------------
+method_kwargs = [
+    [:CG, :cg_single,
+        Dict(
+            :max_iters => 200,
+            :tol_obj => 1e-3,
+            :tol_rc => 1e-5,
+            :tol_delta => 1e-5,
+            :drop => true,
+            :classes => [:ces, :linear],
+        )
+    ],
+    [:MultiCut, :cg_multicut,
+        Dict(
+            :max_iters => 200,
+            :tol_obj => 1e-3,
+            :tol_rc => 1e-3,
+            :tol_delta => 1e-5,
+            :drop => true,
+            :classes => [:ces],
+        )
+    ],
+    [:FW, :fw,
+        Dict(
+            :max_iters => 200,
+            :batch_size => 0,           # 0 → full batch; set e.g. 32 for stochastic
+            :tol_obj => 1e-3,
+            :tol_delta => 1e-5,
+            :step_rule => :diminishing,
+            :seed => 0,
+        )
+    ],
+    [:SFW, :fw,
+        Dict(
+            :max_iters => 200,
+            :batch_size => 32,          # mini-batch stochastic FW
+            :tol_obj => 1e-3,
+            :tol_delta => 1e-5,
+            :step_rule => :diminishing,
+            :seed => 0,
+        )
+    ],
+    [:FWjl, :fwjl,
+        Dict(
+            :max_iters => 200,
+            :tol_obj => 1e-3,
+            :seed => 0,
+        )
+    ],
+]
 
-    K_train = length(Ξ_train)
-    n_train = length(Ξ_train[1][1])
-    has_test = !isnothing(Ξ_test)
+colors = Dict(
+    :CG => 1,
+    :MultiCut => 2,
+    :FW => 4,
+    :SFW => 5,
+    :FWjl => 6,
+)
 
-    history = Dict(
-        :primal_obj => Float64[],
-        :test_err => Float64[],
-        :num_agents => Int[],
-    )
+marker_style = Dict(
+    :CG => :circle,
+    :MultiCut => :rect,
+    :FW => :diamond,
+    :SFW => :star5,
+    :FWjl => :utriangle,
+)
 
-    _t0 = time()
-    if verbose
-        println("=== $(name) ($(pricing_kind)) ===")
-        @printf("%5s | %10s | %10s | %10s | %10s | %5s | %10s\n",
-            "k", "train", "test", "red. cost.", "Δ(fp)", "T", "t(s)")
-        @printf("%5s-+-%10s-+-%10s-+-%10s-+-%10s-+-%5s-+-%10s\n",
-            "-----", "----------", "----------", "----------", "----------", "-----", "----------")
-    end
-
-    for iter in 1:max_iters
-        w, _, model_primal, balance, budget = solve_master_problem(Ξ_train, γ_ref[]; verbose=false)
-        primal_obj = objective_value(model_primal) / K_train
-        u, μ = extract_duals(model_primal, balance, budget, K_train, n_train)
-
-        if sanity || (iter == 1)
-            u_dual, μ_dual, model_dual = solve_dual_problem(Ξ_train, γ_ref[]; verbose=false)
-            dual_obj = objective_value(model_dual) / K_train
-            gap = abs(primal_obj - dual_obj)
-            @assert gap < 1e-6 "Strong duality violated: primal=$primal_obj, dual=$dual_obj, gap=$gap"
-            # check dual variable sign convention
-            u_err = norm(u .- u_dual, Inf)
-            μ_err = abs(μ - μ_dual)
-            if verbose && (u_err > 1e-4 || μ_err > 1e-4)
-                @printf("  ⚠ dual mismatch: ‖u - u_dual‖∞=%.2e, |μ - μ_dual|=%.2e\n", u_err, μ_err)
-            end
-        end
-
-        if drop
-            drop_zero_columns!(fa, γ_ref, w)
-        else
-            fa.w .= w
-        end
-
-        # record after weights are set on fa
-        te = has_test ? evaluate_test_error(fa, Ξ_test) : NaN
-        push!(history[:primal_obj], primal_obj)
-        push!(history[:test_err], te)
-        push!(history[:num_agents], fa.m)
-
-        # fixed-point improvement
-        improvement = length(history[:primal_obj]) >= 2 ?
-                      history[:primal_obj][end-1] - primal_obj : NaN
-
-        # helper: format one log row
-        function _log_row(rc_val=NaN)
-            _elapsed = time() - _t0
-            if !verbose
-                return
-            end
-            rc_str = isnan(rc_val) ? @sprintf("%10s", "-") : @sprintf("%10.3e", rc_val)
-            te_str = isnan(te) ? @sprintf("%10s", "-") : @sprintf("%10.3e", te)
-            Δ_str = @sprintf("%10.3e", isnan(improvement) ? 0.0 : improvement)
-            @printf("%5d | %10.3e | %s | %s | %s | %5d | %10.4f\n",
-                iter, primal_obj, te_str, rc_str, Δ_str, fa.m, _elapsed)
-        end
-
-        # convergence: average per-sample error
-        if primal_obj < tol_obj
-            _log_row()
-            verbose && @printf("converged (obj/K = %.2e < tol_obj=%g)\n", primal_obj, tol_obj)
-            break
-        end
-
-        # convergence: fixed-point stall
-        if length(history[:primal_obj]) >= 3
-            imp2 = max(history[:primal_obj][end-2] - history[:primal_obj][end-1],
-                history[:primal_obj][end-1] - primal_obj)
-            if imp2 < tol_delta
-                _log_row()
-                verbose && @printf("converged (Δ = %.2e < tol_delta=%g)\n", imp2, tol_delta)
-                break
-            end
-        end
-
-        # pricing / column(s) addition
-        rc_val = NaN
-        if pricing_kind === :cg_single
-            y_lp, σ_lp, _, _ = solve_pricing_dual_lp(Ξ_train, u)
-            y_opt, σ_opt, γ_new, _ = solve_pricing(Ξ_train, u; y_init=y_lp, σ_init=σ_lp)
-            rc_val = reduced_cost(γ_new, u, μ)
-            if rc_val <= tol_rc
-                _log_row(rc_val)
-                verbose && @printf("converged (rc = %.2e ≤ tol_rc=%g)\n", rc_val, tol_rc)
-                break
-            end
-            add_to_gamma!(γ_ref, γ_new)
-            c_new, ρ_new = recover_ces_params(y_opt, σ_opt)
-            add_to_market!(fa, c_new, ρ_new, 0.0)
-
-        elseif pricing_kind === :cg_multicut
-            candidates = solve_pricing_inversion(Ξ_train, u)
-            for (y_opt, σ_opt, γ_new, _) in candidates
-                add_to_gamma!(γ_ref, γ_new)
-                c_new, ρ_new = recover_ces_params(y_opt, σ_opt)
-                add_to_market!(fa, c_new, ρ_new, 0.0)
-            end
-
-        elseif pricing_kind === :cg_lsq
-            y_opt, σ_opt, γ_new, _ = solve_pricing_leastsq(Ξ_train, u; verbose=false)
-            add_to_gamma!(γ_ref, γ_new)
-            c_new, ρ_new = recover_ces_params(y_opt, σ_opt)
-            add_to_market!(fa, c_new, ρ_new, 0.0)
-
-        else
-            error("Unknown pricing_kind: $pricing_kind")
-        end
-
-        # log after pricing
-        _log_row(rc_val)
-    end
-
-    # final master solve with latest columns
-    w_final, _, _, _, _ = solve_master_problem(Ξ_train, γ_ref[]; verbose=false)
-    if drop
-        drop_zero_columns!(fa, γ_ref, w_final)
-    else
-        fa.w .= w_final
-    end
-
-    _elapsed = time() - _t0
-    if verbose
-        @printf("--- done: %d agents, obj/K=%.3e, t=%.4fs ---\n", fa.m, history[:primal_obj][end], _elapsed)
-    end
-
-    return fa, γ_ref, history
-end
+# Pretty display names for legends and summary output. The CLI / symbol
+# table key remains the Julia-friendly identifier; this dict lets us
+# render dots or whitespace in labels (e.g., `FWjl` → "FW.jl"). Falls
+# back to `String(name)` for unlisted methods.
+display_name = Dict(
+    :CG => "CG",
+    :MultiCut => "MultiCut",
+    :FW => "FW",
+    :SFW => "SFW",
+    :FWjl => "FW.jl",
+)

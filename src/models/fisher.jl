@@ -42,8 +42,8 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     n::Int # number of goods
     x::Union{Matrix{T},SparseMatrixCSC{T}} # allocation
     p::Vector{T} # price
-    w::Vector{T} # wealth
-    q::Vector{T} # goods
+    w::Vector{T} # wealth (per agent)
+    q::Vector{T} # total supply (per good)
     # -------------------------------------------------------------------
     # for propotional dynamics and IPMs
     # -------------------------------------------------------------------
@@ -61,7 +61,7 @@ Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
     # CES parameters (per-agent)
     ρ::Vector{T}
     σ::Vector{T}
-    # log-barrier regularization parameter (per-agent, for linear markets)
+    # tolerance for best-response play (per-agent)
     ε_br_play::Vector{T}
     # dual LP slack variables s_j = p_j - λ_i c_j (n × m)
     s::Union{Matrix{T},SparseMatrixCSC{T}}

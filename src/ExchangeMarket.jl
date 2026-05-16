@@ -47,6 +47,7 @@ include("algorithms/response/response_approx_lin.jl")
 include("algorithms/response/response_dual_lp.jl")
 include("algorithms/response/response_lse.jl")
 include("algorithms/response/response_plc.jl")
+include("algorithms/response/response_ql.jl")
 include("algorithms/primals.jl")
 include("algorithms/sampler.jl")
 
@@ -65,7 +66,7 @@ export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 
 # agent interface
-export AgentType, LinearAgent, CESAgent, PLCAgent, AgentView, @agent
+export AgentType, LinearAgent, CESAgent, PLCAgent, LeontiefAgent, AgentView, @agent
 export SparseColRef, sparse_col_ref
 export foreach_nz, sparse_reduce, sparse_scatter!, sparse_argmax
 export sparse_dot, sparse_div_max

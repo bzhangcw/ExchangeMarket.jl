@@ -40,6 +40,36 @@ struct PLCAgent <: AgentType
 end
 
 """
+    LeontiefAgent <: AgentType
+
+Leontief (perfect-complements) utility: u(x) = min_{j∈[n]} aⱼ xⱼ.
+Equivalent to PLCAgent with L = n, a = diag(weights), b = 0.
+
+Field:
+- `a`: weight vector (n,), strictly positive.
+"""
+struct LeontiefAgent <: AgentType
+    a::Vector{Float64}
+end
+
+"""
+    QuasiLinearLogAgent <: AgentType
+
+Quasi-linear-log utility:
+  u(x) = Σ_{j<n} c_j log(x_j) + x_n,
+with c ∈ R^{n-1}_{++} the log weights on the first n-1 goods, and good n
+entering linearly.
+
+Fields:
+- `n`: total number of goods
+- `c`: log-weight vector of length n-1, strictly positive.
+"""
+struct QuasiLinearLogAgent <: AgentType
+    n::Int
+    c::Vector{Float64}   # length n-1
+end
+
+"""
     agent_type(ρ, σ) -> AgentType
 
 Derive the agent type from CES parameter ρ.

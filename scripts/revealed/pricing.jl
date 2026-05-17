@@ -158,7 +158,7 @@ function solve_pricing_multiclass(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 end
 
 """
-    solve_pricing_inversion_multiclass(Ξ, u, classes; σ_grid=range(-0.9, 30.0, length=50))
+    solve_pricing_inversion_multiclass(Ξ, u, classes; σ_grid=range(-1.0, 30.0, length=50))
 
 Per-sample multicut inversion across the inversion-capable classes
 (currently `:ces` and `:linear`). For each sample `k`, compute the
@@ -182,7 +182,7 @@ function solve_pricing_inversion_multiclass(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T},
     classes::Vector{Symbol};
-    σ_grid=range(-0.9, 30.0, length=50)
+    σ_grid=range(LOWER_SIGMA_BOUND, UPPER_SIGMA_BOUND, length=50)
 ) where T
     K = length(Ξ)
     n = length(Ξ[1][1])

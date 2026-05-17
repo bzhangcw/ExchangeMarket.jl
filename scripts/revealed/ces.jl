@@ -14,6 +14,17 @@ using Optim
 using LogExpFunctions: logsumexp
 using ExchangeMarket
 
+# Conceptual CES parameter ranges, used as the source of truth for the
+# Fminbox / LBFGS bounds in `solve_pricing` and the σ grid in
+# `solve_pricing_inversion`. CES is only defined for σ > -1, but `1/(1+σ)`
+# explodes as σ ↘ -1, so the LBFGS step uses a strict-interior floor
+# `STRICT_SIGMA_LOWER` (= σ_leontief default in leontief.jl).
+const LOWER_SIGMA_BOUND  = -1.0
+const UPPER_SIGMA_BOUND  = 30.0
+const LOWER_Y_BOUND      = -100.0
+const UPPER_Y_BOUND      = 100.0
+const STRICT_SIGMA_LOWER = -0.9
+
 # -----------------------------------------------------------------------
 # Standalone CES demand via conic programming
 # -----------------------------------------------------------------------
@@ -171,6 +182,7 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     y_init::Union{Vector{T},Nothing}=nothing,
     σ_init::T=0.5,
+    timelimit::Union{Real,Nothing}=nothing,
     verbose=false) where T
 
     K = length(Ξ)
@@ -206,17 +218,22 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
-    lower = vcat(fill(-100, n), T(-0.9))
-    upper = vcat(fill(100, n), T(30.0))
-    y0 = isnothing(y_init) ? zeros(T, n) : clamp.(y_init, -100, 100)
-    σ0 = clamp(σ_init, T(-0.9), T(30.0))
+    lower = vcat(fill(T(LOWER_Y_BOUND), n), T(STRICT_SIGMA_LOWER))
+    upper = vcat(fill(T(UPPER_Y_BOUND), n), T(UPPER_SIGMA_BOUND))
+    # Strict-interior clamps (Fminbox warns and nudges if x0 sits on a bound).
+    ϵ = T(1e-6)
+    y0 = isnothing(y_init) ? zeros(T, n) :
+         clamp.(y_init, T(LOWER_Y_BOUND) + ϵ, T(UPPER_Y_BOUND) - ϵ)
+    σ0 = clamp(σ_init, T(STRICT_SIGMA_LOWER) + ϵ, T(UPPER_SIGMA_BOUND) - ϵ)
     x0 = vcat(y0, σ0)
 
+    _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
+                 (time_limit=Float64(timelimit),)
     result = optimize(
         neg_objective, neg_gradient!,
         lower, upper, x0,
         Fminbox(LBFGS(; m=15)),
-        Optim.Options(show_trace=verbose, iterations=1000, g_tol=1e-8)
+        Optim.Options(; show_trace=verbose, iterations=1000, g_tol=1e-8, _tlim_opts...)
     )
 
     x_opt = Optim.minimizer(result)
@@ -277,10 +294,13 @@ function solve_pricing_convex(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
+    lower = vcat(fill(T(-Inf), n), T(-0.95))
+    upper = vcat(fill(T(Inf),  n), T(100.0))
+    # Strict-interior clamp on σ so Fminbox doesn't warn / nudge it.
+    ϵ = T(1e-6)
     y_init = zeros(T, n)
-    x0 = vcat(y_init, σ_init)
-    lower = vcat(fill(-Inf, n), T(-0.95))
-    upper = vcat(fill(Inf, n), T(100.0))
+    σ0 = clamp(σ_init, T(-0.95) + ϵ, T(100.0) - ϵ)
+    x0 = vcat(y_init, σ0)
 
     result = optimize(
         neg_objective, neg_gradient!,
@@ -314,6 +334,7 @@ function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T},
     σ::T;
     y_init::Union{Vector{T},Nothing}=nothing,
+    timelimit::Union{Real,Nothing}=nothing,
     verbose=false) where T
 
     K = length(Ξ)
@@ -347,11 +368,13 @@ function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     # the softmax shift, so the optimum is a level set rather than a point.
     # LBFGS starting at y0 converges in objective value; the gauge is fixed
     # downstream by add_column_to_market!.
+    _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
+                 (time_limit=Float64(timelimit),)
     result = optimize(
         neg_objective, neg_gradient!,
         y0,
         LBFGS(),
-        Optim.Options(show_trace=verbose, show_every=50, iterations=1000, g_tol=1e-8)
+        Optim.Options(; show_trace=verbose, show_every=50, iterations=1000, g_tol=1e-8, _tlim_opts...)
     )
 
     y_opt = Optim.minimizer(result)
@@ -399,7 +422,7 @@ end
 # Multicut pricing via inversion + 1D line search
 # -----------------------------------------------------------------------
 """
-    solve_pricing_inversion(Ξ, u; σ_grid=range(-0.9, 30.0, length=50))
+    solve_pricing_inversion(Ξ, u; σ_grid=range(-1.0, 30.0, length=50))
 
 Multicut pricing via single-k inversion + 1D line search over σ.
 
@@ -413,7 +436,7 @@ Returns all K candidate columns as a vector of (y, σ, γ, obj).
 function solve_pricing_inversion(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
-    σ_grid=range(-0.9, 30.0, length=50)
+    σ_grid=range(LOWER_SIGMA_BOUND, UPPER_SIGMA_BOUND, length=50)
 ) where T
 
     K = length(Ξ)
@@ -490,9 +513,10 @@ Same procedure as the previous cg_single path in run_method_tracked:
 function solve_pricing_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     verbose::Bool=false,
+    timelimit::Union{Real,Nothing}=nothing,
     kwargs...) where T
     y_lp, σ_lp, _, _ = solve_pricing_dual_lp(Ξ, u; verbose=verbose)
     y_opt, σ_opt, γ_new, obj = solve_pricing(Ξ, u;
-        y_init=y_lp, σ_init=σ_lp, verbose=verbose)
+        y_init=y_lp, σ_init=σ_lp, timelimit=timelimit, verbose=verbose)
     return (γ_new=γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces)
 end

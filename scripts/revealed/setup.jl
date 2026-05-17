@@ -1,10 +1,17 @@
 # Methods and tracking utilities for revealed-preference CES surrogate fitting.
 # File map (in include order):
-#   - redistribute.jl : master / dual LPs (eq.cg.master, eq.cg.dual)
-#   - pricing.jl      : multiclass dispatcher, drop_zero_columns!,
-#                       add_column_to_market!, per-sample inversion merge
-#   - frankwolfe.jl   : Frank-Wolfe runner (run_method_tracked_fw)
-#   - cpm.jl          : column-generation runner (run_method_tracked)
+#   - redistribute.jl              : wealth-redistribution primal / dual LPs
+#                                    (solve_wealth_redistribution_{primal,dual},
+#                                     eq.cg.master / eq.cg.dual)
+#   - pricing.jl                   : multiclass dispatcher, drop_zero_columns!,
+#                                    add_column_to_market!, per-sample inversion merge
+#   - logging.jl                   : IterTable + banner/config helpers (both runners)
+#   - frankwolfe.jl                : manual Frank-Wolfe runner (run_method_tracked_fw)
+#   - cpm.jl                       : column-generation runner (run_method_tracked)
+#   - validate.jl                  : surrogate / real-market validation
+#   - third-party/wrapper_frankwolfe.jl
+#       : FrankWolfe.jl-package wrapper (run_method_tracked_fwjl); loaded
+#         last because it depends on validate_surrogate.
 #
 # Helpers used by the FW/CG runners (produce_revealed_preferences,
 # compute_gamma_from_market, compute_gamma, compute_gamma_matrix,
@@ -173,11 +180,15 @@ end
 # -----------------------------------------------------------------------
 # Pricing dispatcher + FW / CG runners.
 # Order matters: pricing.jl defines `drop_zero_columns!`,
-# `add_column_to_market!`, etc., which both runners use.
+# `add_column_to_market!`, etc., which both runners use. logging.jl
+# defines the shared IterTable / print_banner used by both runners.
 # -----------------------------------------------------------------------
 include("./pricing.jl")
+include("./logging.jl")
 include("./frankwolfe.jl")
 include("./cpm.jl")
+include("./validate.jl")
+include("./third-party/wrapper_frankwolfe.jl")
 
 
 
@@ -191,7 +202,7 @@ include("./cpm.jl")
 method_kwargs = [
     [:CG, :cg_single,
         Dict(
-            :max_iters => 200,
+            :max_iters => 500,
             :tol_obj => 1e-3,
             :tol_rc => 1e-5,
             :tol_delta => 1e-5,
@@ -201,17 +212,19 @@ method_kwargs = [
     ],
     [:MultiCut, :cg_multicut,
         Dict(
-            :max_iters => 200,
+            :max_iters => 500,
             :tol_obj => 1e-3,
             :tol_rc => 1e-3,
             :tol_delta => 1e-5,
+            :tol_stage_2 => 5e-4,   # demote stage 2 → 1 on this looser stall
+            :stage1_ces_rho => 0.97, # post-demotion: near-linear CES (σ ≈ 32)
             :drop => true,
             :classes => [:ces],
         )
     ],
     [:FW, :fw,
         Dict(
-            :max_iters => 200,
+            :max_iters => 10000,
             :batch_size => 0,           # 0 → full batch; set e.g. 32 for stochastic
             :tol_obj => 1e-3,
             :tol_delta => 1e-5,
@@ -221,7 +234,7 @@ method_kwargs = [
     ],
     [:SFW, :fw,
         Dict(
-            :max_iters => 200,
+            :max_iters => 10000,
             :batch_size => 32,          # mini-batch stochastic FW
             :tol_obj => 1e-3,
             :tol_delta => 1e-5,
@@ -231,7 +244,7 @@ method_kwargs = [
     ],
     [:FWjl, :fwjl,
         Dict(
-            :max_iters => 200,
+            :max_iters => 50000,
             :tol_obj => 1e-3,
             :seed => 0,
         )
@@ -243,7 +256,7 @@ colors = Dict(
     :MultiCut => 2,
     :FW => 4,
     :SFW => 5,
-    :FWjl => 6,
+    :FWjl => 3,
 )
 
 marker_style = Dict(
@@ -251,7 +264,7 @@ marker_style = Dict(
     :MultiCut => :rect,
     :FW => :diamond,
     :SFW => :star5,
-    :FWjl => :utriangle,
+    :FWjl => :rect,
 )
 
 # Pretty display names for legends and summary output. The CLI / symbol

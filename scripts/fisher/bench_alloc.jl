@@ -13,7 +13,10 @@ Random.seed!(1)
 n = 500
 m = 1000
 
-f0 = FisherMarket(m, n; ρ=0.5, bool_unit=true, scale=30.0, sparsity=0.05)
+ws = cpu_workspace(n)
+add_ces!(ws, m; ρ=0.5, scale=30.0, sparsity=0.05)
+ws.ces.w ./= sum(ws.ces.w)
+f0 = FisherMarket(ws)
 println("c: $(typeof(f0.c)), x: $(typeof(f0.x))")
 println("sparsity=$(f0.sparsity), nnz per col ≈ $(nnz(f0.c) / m)")
 

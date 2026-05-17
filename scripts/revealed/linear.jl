@@ -185,8 +185,32 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     mip_timelimit::Real=60.0,
     mip_relgap::Real=1e-4,
     mip_logfile::String=joinpath(tempdir(), "gurobi_linear_mip.log"),
+    timelimit::Union{Real,Nothing}=nothing,   # overrides mip_timelimit when set
+    # ---- solver-side speed-ups -------------------------------------------
+    # `y_warm`, `γ_warm`: warm-start values from a previous CG iteration.
+    #   Threaded through `solve_pricing_class` / `solve_pricing_multiclass`
+    #   as `linear_y_warm` / `linear_γ_warm` (renamed in the splat below).
+    # `use_indicators`: replace big-M with JuMP indicator constraints
+    #   (`γ_{k,j} ⇒ {y_j - log p_{k,j} ≥ y_{j'} - log p_{k,j'}}`). Native
+    #   support in Gurobi; tighter LP relaxation but more overhead per node.
+    # `linear_model_cache`: a `Ref{Any}` from the caller. When non-`nothing`
+    #   and shape/log-prices match the previous call, the persistent
+    #   Gurobi model is reused: constraints are kept, only the objective
+    #   coefficients are rewritten. Saves the constraint-build / presolve
+    #   cost on every CG iteration. Caller wipes the Ref to force a rebuild.
+    linear_y_warm::Union{Vector{T},Nothing}=nothing,
+    linear_γ_warm::Union{Matrix{T},Nothing}=nothing,
+    # Indicator constraints look tighter on paper but Gurobi pays per-node
+    # callback overhead; on dense u they usually lose to a tight big-M, so
+    # we default to OFF. `--no-indicators` removed (default already off).
+    use_indicators::Bool=false,
+    linear_model_cache::Union{Ref,Nothing}=nothing,
     verbose::Bool=false,
     kwargs...) where T
+    # When the caller provides a remaining-budget hint, clip the MIP cap to it.
+    if !isnothing(timelimit) && timelimit > 0
+        mip_timelimit = min(mip_timelimit, Float64(timelimit))
+    end
     K = length(Ξ)
     n = length(Ξ[1][1])
     @assert size(u) == (K, n) "u must have shape (K, n)"
@@ -196,42 +220,92 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     for k in 1:K
         log_p[k, :] = log.(Ξ[k][1])
     end
-    bigM = isnothing(M) ? T(2 * maximum(abs.(log_p))) : M
+    # Big-M from data. Default is the global scalar `2·max|log p|` used
+    # historically — empirically tighter than the per-row alternative
+    # `row_range[k] + 2·max_k row_range[k]` on dense u, despite the latter
+    # being "per-row." Caller can pass M explicitly to override.
+    bigM = isnothing(M) ? T(2 * maximum(abs.(log_p))) : T(M)
+    bigM_row = fill(bigM, K)
 
-    # Gurobi handles the big-M MIP much faster than Mosek; this pricing
-    # subproblem is NP-hard in K (fact.nphard.sep.linear), so it dominates
-    # CG wall-clock for moderate K and benefits from Gurobi's MIP engine.
-    # Reuse the shared env so the license banner doesn't reprint per call.
-    md = Model(() -> Gurobi.Optimizer(_gurobi_env()))
-    if verbose
-        # Default Gurobi behavior: log goes to console.
-    else
-        # Silence the console, but keep the per-solve log for later
-        # inspection by writing it to mip_logfile (appended across calls).
-        set_attribute(md, "LogToConsole", 0)
-        isempty(mip_logfile) || set_attribute(md, "LogFile", mip_logfile)
+    # ----------------------------------------------------------------
+    # Cache hit: shape and log-prices match the previous build, so the
+    # only thing that changed is the dual `u`. Rewrite the objective in
+    # place and skip the constraint setup entirely.
+    # ----------------------------------------------------------------
+    md = nothing
+    y = nothing
+    γ = nothing
+    cache_hit = false
+    if !isnothing(linear_model_cache) && !isnothing(linear_model_cache[])
+        c = linear_model_cache[]
+        if c.K == K && c.n == n && c.use_indicators == use_indicators &&
+           size(c.log_p) == size(log_p) && c.log_p == log_p
+            md, y, γ = c.md, c.y, c.γ
+            cache_hit = true
+            # Update solver limits in case the caller tightened them
+            # between iterations (e.g., shrinking remaining time budget).
+            set_attribute(md, "TimeLimit", float(mip_timelimit))
+            set_attribute(md, "MIPGap",   float(mip_relgap))
+            # The subsequent set_start_value.(y, linear_y_warm) overwrites
+            # the previous start; if no warm-start is supplied we let
+            # Gurobi keep the previous incumbent's values, which often
+            # remain feasible for a new objective.
+        end
     end
-    set_attribute(md, "TimeLimit", float(mip_timelimit))
-    set_attribute(md, "MIPGap", float(mip_relgap))
-    set_attribute(md, "LogFile", "/tmp/gurobi.log")
-    @variable(md, y[1:n])
-    @variable(md, γ[1:K, 1:n], Bin)
 
-    # Simplex constraint per sample.
-    @constraint(md, [k = 1:K], sum(γ[k, :]) == 1)
+    if !cache_hit
+        # Gurobi handles the big-M MIP much faster than Mosek; this pricing
+        # subproblem is NP-hard in K (fact.nphard.sep.linear), so it dominates
+        # CG wall-clock for moderate K and benefits from Gurobi's MIP engine.
+        # Reuse the shared env so the license banner doesn't reprint per call.
+        md = Model(() -> Gurobi.Optimizer(_gurobi_env()))
+        if verbose
+            # Default Gurobi behavior: log goes to console.
+        else
+            # Silence the console, but keep the per-solve log for later
+            # inspection by writing it to mip_logfile (appended across calls).
+            set_attribute(md, "LogToConsole", 0)
+            isempty(mip_logfile) || set_attribute(md, "LogFile", mip_logfile)
+        end
+        set_attribute(md, "TimeLimit", float(mip_timelimit))
+        set_attribute(md, "MIPGap", float(mip_relgap))
+        y = @variable(md, [1:n])
+        γ = @variable(md, [1:K, 1:n], Bin)
 
-    # Bang-per-buck big-M inequalities: when γ[k,j] = 1, force
-    # y_j - log p_{k,j} ≥ y_{j'} - log p_{k,j'} for all j'; otherwise the
-    # -M(1 - γ_{k,j}) slack renders the constraint redundant.
-    @constraint(md, [k = 1:K, j = 1:n, jp = 1:n],
-        y[j] - log_p[k, j] >=
-        y[jp] - log_p[k, jp] - bigM * (1 - γ[k, j]))
+        # Simplex constraint per sample.
+        @constraint(md, [k = 1:K], sum(γ[k, :]) == 1)
 
-    # Gauge: pin one coordinate (matches fit_linear_lp's default).
-    @constraint(md, y[n] == 0)
+        # Bang-per-buck constraint: when γ[k,j] = 1, force
+        #   y_j - log p_{k,j} ≥ y_{j'} - log p_{k,j'}  for all j'.
+        if use_indicators
+            # Native indicator form — no big-M; Gurobi handles the implication
+            # directly. Tighter LP relaxation but more callback overhead.
+            @constraint(md, [k = 1:K, j = 1:n, jp = 1:n],
+                γ[k, j] => {y[j] - log_p[k, j] >= y[jp] - log_p[k, jp]})
+        else
+            # Per-row big-M: the slack -M_k (1 - γ_{k,j}) is redundant when
+            # γ_{k,j} = 0; M_k = row_range[k] + 2·y_range_bound suffices given
+            # the gauge y[n] = 0.
+            @constraint(md, [k = 1:K, j = 1:n, jp = 1:n],
+                y[j] - log_p[k, j] >=
+                y[jp] - log_p[k, jp] - bigM_row[k] * (1 - γ[k, j]))
+        end
 
-    # Objective: max Σ_k ⟨u_k, γ_k⟩.
+        # Gauge: pin one coordinate (matches fit_linear_lp's default).
+        @constraint(md, y[n] == 0)
+    end
+
+    # Objective: max Σ_k ⟨u_k, γ_k⟩.  Always rewritten — that's what changes.
     @objective(md, Max, sum(u[k, j] * γ[k, j] for k in 1:K, j in 1:n))
+
+    # Warm-start from the previous CG iteration's incumbent, when supplied
+    # and shape-compatible. Gurobi uses these as a MIPstart.
+    if !isnothing(linear_y_warm) && length(linear_y_warm) == n
+        set_start_value.(y, linear_y_warm)
+    end
+    if !isnothing(linear_γ_warm) && size(linear_γ_warm) == (K, n)
+        set_start_value.(γ, linear_γ_warm)
+    end
 
     JuMP.optimize!(md)
     status = termination_status(md)
@@ -245,7 +319,14 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     γ_new = has_incumbent ? Matrix{T}(value.(γ)) : fill(T(NaN), K, n)
     obj_val = has_incumbent ? T(JuMP.objective_value(md)) : T(NaN)
 
-    verbose && println("Linear pricing MIP: obj=$obj_val (M=$bigM, status=$status, primal=$primal)")
+    # Persist (or refresh) the cache entry so the next call hits the warm path.
+    if !isnothing(linear_model_cache)
+        linear_model_cache[] = (md=md, y=y, γ=γ, K=K, n=n,
+                                log_p=copy(log_p),
+                                use_indicators=use_indicators)
+    end
+
+    verbose && println("Linear pricing MIP: obj=$obj_val (cache_hit=$cache_hit, status=$status, primal=$primal)")
     return (γ_new=γ_new, params=(y=y_opt, σ=T(Inf)), obj=obj_val, class=:linear)
 end
 

@@ -22,6 +22,7 @@ abstract type AbstractMarket end
 include("models/tools.jl")
 include("models/constrs.jl")
 include("linalg/sparse.jl")
+include("models/workspace.jl")
 include("models/fisher.jl")
 include("models/arrow.jl")
 
@@ -66,12 +67,14 @@ export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
 
 # agent interface
-export AgentType, LinearAgent, CESAgent, PLCAgent, LeontiefAgent, AgentView, @agent
+export AgentType, LinearAgent, CESAgent, PLCAgent, LeontiefAgent, QuasiLinearLogAgent, AgentView, @agent
+export solve_ql_demand
 export SparseColRef, sparse_col_ref
 export foreach_nz, sparse_reduce, sparse_scatter!, sparse_argmax
 export sparse_dot, sparse_div_max
-# workspace (CPU batched / GPU)
-export MarketWorkspace, cpu_workspace, gpu_workspace
+# workspace (canonical storage + CPU batched / GPU)
+export HeterogeneousWorkspace, CESStore, MarketWorkspace
+export cpu_workspace, gpu_workspace, expand_ces!, add_ces!
 export to_device!, to_host!
 export utility
 export init_agents!

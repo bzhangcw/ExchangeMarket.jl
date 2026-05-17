@@ -151,11 +151,12 @@ function solve_pricing_leontief(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     σ_leontief::Real=-0.9,
     y_init::Union{Vector{T},Nothing}=nothing,
     verbose::Bool=false,
+    timelimit::Union{Real,Nothing}=nothing,
     kwargs...) where T
     σ = T(σ_leontief)
     @assert σ > -1 "σ_leontief must lie in (-1, 0); got $σ"
     y_opt, _, γ_new, obj = solve_pricing_fix_σ(Ξ, u, σ;
-        y_init=y_init, verbose=verbose)
+        y_init=y_init, timelimit=timelimit, verbose=verbose)
     verbose && println("Leontief pricing (σ=$σ, ρ=$(σ/(1+σ))): obj=$obj")
     return (γ_new=γ_new, params=(y=y_opt, σ=σ), obj=obj, class=:leontief)
 end

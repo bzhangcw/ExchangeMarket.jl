@@ -1,7 +1,19 @@
 # -----------------------------------------------------------------------
-# structs for Fisher Market
-# @author:Chuwen Zhang <chuwzhang@gmail.com>
-# @date: 2024/11/22
+# FisherMarket: thin coordinator over a HeterogeneousWorkspace.
+#
+# Per-agent data (c, ρ, σ, w, x, g, s, sumx, val_u, ε_br_play) lives in
+# the workspace's CES substore (`fa.storage.ces`). Market-wide supply
+# `q` lives in `fa.storage.q`. The struct exposes per-agent fields via
+# `Base.getproperty` / `Base.setproperty!` shims so out-of-tree callers
+# that read `fa.c[:, i]` or `fa.σ[i]` keep working.
+#
+# Initialization is workspace-first: callers build the workspace via
+# `cpu_workspace(n, m; ...)` (or `gpu_workspace`) and then construct the
+# market with `FisherMarket(ws)`. There is no convenience `(m, n; ...)`
+# constructor — see the migration note in toy_fisher below.
+#
+# @author: Chuwen Zhang <chuwzhang@gmail.com>
+# @date:   2024/11/22  (workspace refactor: 2026/05)
 # -----------------------------------------------------------------------
 __precompile__(true)
 
@@ -10,21 +22,7 @@ using JuMP, Random
 import MathOptInterface as MOI
 using Printf, DataFrames
 
-function add_nonzero_entries!(c, m, n, scale)
-    # Ensure each row has at least one nonzero
-    for i in 1:m
-        j = rand(1:n)
-        c[i, j] += scale
-    end
-    # Ensure each column has at least one nonzero
-    for j in 1:n
-        i = rand(1:m)
-        c[i, j] += scale
-    end
-    return c
-end
-
-
+# `toy_fisher` is a tiny fixed test instance kept for the test suite.
 function toy_fisher(ρ)
     m = 2
     n = 3
@@ -33,218 +31,163 @@ function toy_fisher(ρ)
         3.4924 6.2826 1.9281
     ]
     w = [0.1677; 0.5711]
-    fisher = FisherMarket(m, n; ρ=ρ, c=c, w=w)
-    return fisher
+    ws = cpu_workspace(n)
+    add_ces!(ws, m; ρ=ρ, c=c, w=w)
+    return FisherMarket(ws)
 end
 
-Base.@kwdef mutable struct FisherMarket{T} <: AbstractMarket
-    m::Int # number of agents
-    n::Int # number of goods
-    x::Union{Matrix{T},SparseMatrixCSC{T}} # allocation
-    p::Vector{T} # price
-    w::Vector{T} # wealth (per agent)
-    q::Vector{T} # total supply (per good)
-    # -------------------------------------------------------------------
-    # for propotional dynamics and IPMs
-    # -------------------------------------------------------------------
-    g::Matrix{T} # bids (rename from b to avoid endowment name clash)
+# -----------------------------------------------------------------------
+# Struct
+# -----------------------------------------------------------------------
+mutable struct FisherMarket{T} <: AbstractMarket
+    m::Int
+    n::Int
+    p::Vector{T}                                              # price (market-wide)
+    storage::HeterogeneousWorkspace                           # owns per-agent data + q
+    sparsity::Float64
+    df::Union{DataFrame, Nothing}
+    constr_x::Union{Vector{LinearConstr}, Nothing}            # allocation constraints
+    constr_p::Union{LinearConstr, Nothing}                    # price constraints
+    agents::Vector                                            # AgentView registry (lazy)
+    workspace::Any                                            # batched compute handle (nothing = per-agent path)
+    gpu_workspace_cache::Any                                  # cached GPU MarketWorkspace
+end
 
-    # -----------------------------------------------------------------------
-    # utility (computed via AgentView dispatch in response files)
-    # -----------------------------------------------------------------------
-    val_u::Vector{T}
+# -----------------------------------------------------------------------
+# Constructors
+# -----------------------------------------------------------------------
+"""
+    FisherMarket(storage::HeterogeneousWorkspace; kwargs...) -> FisherMarket
 
-    # - the vector c to parameterize the utility function
-    c::Union{Matrix{T},SparseMatrixCSC{T}} = nothing
-    # sum of x (for a limited samples)
-    sumx::Vector{T}
-    # CES parameters (per-agent)
-    ρ::Vector{T}
-    σ::Vector{T}
-    # tolerance for best-response play (per-agent)
-    ε_br_play::Vector{T}
-    # dual LP slack variables s_j = p_j - λ_i c_j (n × m)
-    s::Union{Matrix{T},SparseMatrixCSC{T}}
+Explicit constructor: caller has built the workspace via
+`cpu_workspace(n, m; ...)` or `gpu_workspace(...)`.
 
-    # sparsity of cost matrix c (fraction of nonzeros)
-    sparsity::Float64 = 1.0
-
-    # -----------------------------------------------------------------------
-    # dataframe for logging and display
-    df::Union{DataFrame,Nothing} = nothing
-
-    # -----------------------------------------------------------------------
-    # constraints
-    # -----------------------------------------------------------------------
-    # - linear constraints on allocation
-    constr_x::Union{Vector{LinearConstr},Nothing} = nothing
-    # - linear constraints on price
-    constr_p::Union{LinearConstr,Nothing} = nothing
-
-    # -----------------------------------------------------------------------
-    # per-agent views (pre-allocated, zero-copy)
-    # -----------------------------------------------------------------------
-    agents::Vector = []
-
-    # -----------------------------------------------------------------------
-    # workspace: nothing = CPU per-agent, MarketWorkspace = batched (CPU/GPU)
-    # -----------------------------------------------------------------------
-    workspace::Any = nothing
-    gpu_workspace_cache::Any = nothing
-
-    # -----------------------------------------------------------------------
-    """
-    FisherMarket(m, n; ρ=1.0, c=nothing, w=nothing, seed=1, scale=1.0, sparsity=(2.0/n), bool_unit=true, bool_unit_wealth=true, bool_ensure_nz=true, bool_force_dense=false)
-
-    Create a Fisher market model with m agents and n goods.
-
-    # Arguments
-    - `m::Int`: Number of agents
-    - `n::Int`: Number of goods
-    - `ρ::Float64`: CES parameter (default: 1.0 for linear utility)
-    - `c`: Utility function parameterization matrix (default: random sparse matrix)
-    - `w`: Wealth vector (default: random vector)
-    - `seed::Int`: Random seed (default: 1)
-    - `scale::Float64`: Scale factor for costs and wealth (default: 1.0)
-    - `sparsity::Float64`: Sparsity of cost matrix (default: 2.0/n)
-    - `bool_unit::Bool`: Whether to use unit goods (default: true)
-    - `bool_unit_wealth::Bool`: Whether to normalize wealth (default: true)
-    - `bool_ensure_nz::Bool`: Whether to ensure non-zero entries (default: true)
-    - `bool_force_dense::Bool`: Whether to force dense matrix (default: true)
-    """
-    function FisherMarket(m, n; ρ=1.0,
-        ε_br_play=1e-8,
-        constr_x=nothing,
-        constr_p=nothing,
-        c=nothing, w=nothing, seed=1,
-        scale=1.0, sparsity=(2.0 / n),
-        bool_unit=true,
-        bool_unit_wealth=true,
-        bool_ensure_nz=false,
-        bool_force_dense=false,
+Kwargs:
+- `ε_br_play`  override per-agent tolerance (scalar or m-vector); when
+                provided, copied into `storage.ces.ε_br_play`.
+- `constr_x`, `constr_p`  optional allocation / price constraints.
+- `sparsity`    informational; default 1.0.
+- `df`          dataframe for logging; default `DataFrame()`.
+"""
+function FisherMarket(storage::HeterogeneousWorkspace;
+    ε_br_play=nothing,
+    constr_x::Union{Vector{LinearConstr}, Nothing}=nothing,
+    constr_p::Union{LinearConstr, Nothing}=nothing,
+    sparsity::Float64=1.0,
+    df::Union{DataFrame, Nothing}=DataFrame(),
+)
+    T = Float64
+    m = storage.m
+    n = storage.n
+    if !isnothing(ε_br_play)
+        ε_vec = isa(ε_br_play, Number) ? fill(T(ε_br_play), m) : Vector{T}(ε_br_play)
+        @assert length(ε_vec) == m "ε_br_play length must equal m=$m"
+        storage.ces.ε_br_play .= ε_vec
+    end
+    return FisherMarket{T}(
+        m, n,
+        zeros(T, n),
+        storage,
+        sparsity, df, constr_x, constr_p,
+        Vector{Any}(),
+        nothing, nothing,
     )
-        ts = time()
-        println("FisherMarket initialization started...")
-        Random.seed!(seed)
-        this = new{Float64}()
-        this.sparsity = sparsity
-        this.m = m
-        this.n = n
-        # handle scalar or vector ρ with helper
-        _ρ, _σ = normalize_rho_sigma(ρ, m)
-        this.ρ = copy(_ρ)
-        this.σ = copy(_σ)
-        this.ε_br_play = isa(ε_br_play, Number) ? fill(Float64(ε_br_play), m) : copy(ε_br_play)
-        c = isnothing(c) ? scale * sprand(Float64, n, m, sparsity) : c
-        if bool_ensure_nz
-            # ensure each row and column has at least one non-zero entry
-            c = add_nonzero_entries!(c, n, m, scale)
-        end
-        if bool_force_dense
-            c = Matrix(c)
-        end
-        this.c = copy(c)
-        @printf("FisherMarket cost matrix initialized in %.4f seconds\n", time() - ts)
+end
 
-        this.q = bool_unit ? ones(n) : m * rand(n) # in O(m)
-        this.w = w = (isnothing(w) ? rand(m) : w) * scale
-        this.w .= bool_unit_wealth ? w ./ sum(w) : w
-        this.p = zeros(n)
-        # allocation/output matrices are always dense
-        # (even with sparse c, allocations are dense due to barrier regularization)
-        this.x = zeros(n, m)
-        this.sumx = zeros(n)
-        this.g = zeros(n, m)
-        this.s = zeros(n, m)
-        this.df = DataFrame()
-        this.constr_x = constr_x
-        this.constr_p = constr_p
+# -----------------------------------------------------------------------
+# Backward-compat property shims: route per-agent reads/writes into the
+# CES substore (or `q` into the workspace top level).
+# -----------------------------------------------------------------------
+@inline _is_ces_field(name::Symbol) =
+    name === :c || name === :ρ || name === :σ || name === :w ||
+    name === :x || name === :g || name === :s || name === :sumx ||
+    name === :val_u || name === :ε_br_play
 
-        this.val_u = zeros(m)
-        this.agents = []  # populated lazily via init_agents!
-        this.workspace = nothing
-        this.gpu_workspace_cache = nothing
-        @printf("FisherMarket initialized in %.4f seconds\n", time() - ts)
-        return this
+function Base.getproperty(fa::FisherMarket, name::Symbol)
+    if _is_ces_field(name)
+        return getproperty(getfield(fa, :storage).ces, name)
+    elseif name === :q
+        return getfield(fa, :storage).q
+    else
+        return getfield(fa, name)
     end
 end
 
-Base.copy(z::FisherMarket{T}) where {T} = begin
-    this = FisherMarket(z.m, z.n)
-    copy_fields(this, z)
-    # re-initialize: views must point at new market's arrays
-    this.agents = []
-    this.workspace = nothing
-    this.gpu_workspace_cache = nothing
+function Base.setproperty!(fa::FisherMarket, name::Symbol, val)
+    if _is_ces_field(name)
+        setproperty!(getfield(fa, :storage).ces, name, val)
+    elseif name === :q
+        setproperty!(getfield(fa, :storage), :q, val)
+    elseif name === :m
+        setfield!(fa, :m, val)
+        setproperty!(getfield(fa, :storage), :m, val)
+        setproperty!(getfield(fa, :storage).ces, :m, val)
+    elseif name === :n
+        setfield!(fa, :n, val)
+        setproperty!(getfield(fa, :storage), :n, val)
+        setproperty!(getfield(fa, :storage).ces, :n, val)
+    else
+        setfield!(fa, name, val)
+    end
+    return val
+end
+
+# `propertynames` advertises both the struct fields and the shimmed
+# per-agent fields, so `dump(fa)` and tab-completion still surface the
+# familiar names.
+function Base.propertynames(fa::FisherMarket, private::Bool=false)
+    base = fieldnames(typeof(fa))
+    return (base..., :c, :ρ, :σ, :w, :x, :g, :s, :sumx, :val_u, :ε_br_play, :q)
+end
+
+# -----------------------------------------------------------------------
+# Copy
+# -----------------------------------------------------------------------
+"""
+    Base.copy(fa::FisherMarket) -> FisherMarket
+
+Deep-copy the storage workspace and clone the FisherMarket coordinator.
+`agents` is reset (views must be rebuilt against the new workspace); the
+GPU cache is dropped.
+"""
+function Base.copy(z::FisherMarket{T}) where {T}
+    new_ws = deepcopy(z.storage)
+    new_constr_x = isnothing(z.constr_x) ? nothing : deepcopy(z.constr_x)
+    new_constr_p = isnothing(z.constr_p) ? nothing : deepcopy(z.constr_p)
+    this = FisherMarket(new_ws;
+        constr_x=new_constr_x, constr_p=new_constr_p,
+        sparsity=z.sparsity, df=isnothing(z.df) ? nothing : copy(z.df),
+    )
+    this.p .= z.p
     return this
 end
 
+# -----------------------------------------------------------------------
+# expand_players! — grow the market by appending CES agents.
+# Delegates to expand_ces! on the substore.
+# -----------------------------------------------------------------------
 """
     expand_players!(this::FisherMarket, m_new; c_new=nothing, ρ_new=nothing, w_new=nothing)
 
-Expand a FisherMarket from m to m_new players in-place.
-Reallocates arrays to accommodate new players.
-
-Arguments:
-- this: FisherMarket to expand (modified in-place)
-- m_new: New number of players (must be >= this.m)
-- c_new: Coefficients for new players (n × (m_new - m)), default random
-- ρ_new: CES parameters for new players ((m_new - m)-vector), default same as this.ρ[1]
-- w_new: Budgets for new players ((m_new - m)-vector), default equal share
-
-Returns this (modified).
+Append `m_new - this.m` CES agents in-place. Per-agent arrays are grown
+inside `this.storage.ces` via `expand_ces!`; `this.m` is updated.
 """
 function expand_players!(this::FisherMarket{T}, m_new::Int;
     c_new::Union{Matrix{T},Nothing}=nothing,
     ρ_new::Union{Vector{T},Nothing}=nothing,
-    w_new::Union{Vector{T},Nothing}=nothing
-) where T
+    w_new::Union{Vector{T},Nothing}=nothing,
+) where {T}
     m_old = this.m
-    n = this.n
-    m_add = m_new - m_old
-
     @assert m_new >= m_old "m_new ($m_new) must be >= m ($m_old)"
-
-    if m_add == 0
-        return this
-    end
-
-    # Default new coefficients: zero
-    if isnothing(c_new)
-        c_new = zeros(T, n, m_add)
-    end
-    @assert size(c_new) == (n, m_add) "c_new must be (n, m_add) = ($n, $m_add)"
-
-    # Default new ρ: same as first player
-    if isnothing(ρ_new)
-        ρ_new = fill(this.ρ[1], m_add)
-    end
-    @assert length(ρ_new) == m_add "ρ_new must have length $m_add"
-
-    # Default new budgets: zero
-    if isnothing(w_new)
-        w_new = zeros(T, m_add)
-    end
-    @assert length(w_new) == m_add "w_new must have length $m_add"
-
-    # Compute σ_new from ρ_new
-    σ_new = ρ_new ./ (1 .- ρ_new)
-
-    # Update m
-    this.m = m_new
-
-    # Expand per-agent parameter arrays
-    this.c = hcat(this.c, c_new)
-    this.ρ = vcat(this.ρ, ρ_new)
-    this.σ = vcat(this.σ, σ_new)
-    this.w = vcat(this.w, w_new)
-
-    # Expand allocation arrays (n × m)
-    this.x = hcat(this.x, zeros(T, n, m_add))
-    this.g = hcat(this.g, zeros(T, n, m_add))
-    this.s = hcat(this.s, zeros(T, n, m_add))
-    # Expand per-agent value arrays (m)
-    this.val_u = vcat(this.val_u, zeros(T, m_add))
-
+    m_add = m_new - m_old
+    m_add == 0 && return this
+    expand_ces!(this.storage.ces, m_new;
+        c_new=c_new, ρ_new=ρ_new, w_new=w_new,
+    )
+    setproperty!(this.storage, :m, m_new)
+    setfield!(this, :m, m_new)
+    # Clear AgentView registry: views may have stale array pointers if
+    # arrays were reallocated by hcat/vcat above.
+    setfield!(this, :agents, Vector{Any}())
     return this
 end

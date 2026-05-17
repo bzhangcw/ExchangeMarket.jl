@@ -11,17 +11,18 @@ import MathOptInterface as MOI
 using ExchangeMarket
 
 """
-    random_plc_agent(n, L; intercept=true, seed=nothing)
+    random_plc_agent(n, L; intercept=true, density=0.1, seed=nothing)
 
 Generate a random PLCAgent with `L` hyperplanes in `n` goods.
   u(x) = min_{ℓ∈[L]} { aℓ'x + bℓ },  aℓ ≥ 0, bℓ ≥ 0.
 
-Each gradient aℓ is drawn from Uniform(0,1)^n.
-If `intercept=true`, each bℓ is drawn from Uniform(0,1); otherwise bℓ = 0.
+Each entry of aℓ is kept with probability `density` (default 0.1) and
+drawn from Uniform(0,1) when kept; the rest are zero. If `intercept=true`,
+each bℓ is drawn from Uniform(0,1); otherwise bℓ = 0.
 """
-function random_plc_agent(n::Int, L::Int; intercept=true, seed=nothing)
+function random_plc_agent(n::Int, L::Int; intercept=true, density::Real=0.2, seed=nothing)
     !isnothing(seed) && Random.seed!(seed)
-    a = rand(L, n)
+    a = rand(L, n) .* (rand(L, n) .< density)
     b = intercept ? rand(L) : zeros(L)
     return PLCAgent(L, a, b)
 end

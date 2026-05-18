@@ -167,6 +167,7 @@ function run_one_method(rep_idx::Int, rep_seed::Int,
     apply_cli_separation!(local_extra, cli)
     apply_cli_ces!(local_extra, cli)
     apply_cli_linear!(local_extra, cli)
+    apply_cli_nn!(local_extra, cli)
     apply_cli_cpm!(local_extra, cli)
     apply_cli_accpm!(local_extra, cli)
     if haskey(kwargs, :seed)

@@ -622,7 +622,8 @@ function run_method_tracked_accpm(name::Symbol, separation_kind::Symbol,
             class_str = format_cuts_tag(cands_multi)
         else
             cand = find_cut_single(Ξ_train, u, μ, classes;
-                sample_size=0, verbose=verbose_separation, timelimit=_separation_remaining)
+                sample_size=0, verbose=verbose_separation,
+                timelimit=_separation_remaining, kwargs...)
             rc_val    = cand.rc
             class_str = format_class(cand.class, cand.params)
         end

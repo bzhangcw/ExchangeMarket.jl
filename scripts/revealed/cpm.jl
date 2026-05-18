@@ -340,7 +340,8 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
                 linear_γ_warm=_warm_γ,
                 linear_model_cache=linear_model_cache,
                 verbose=verbose_separation,
-                timelimit=_separation_remaining)
+                timelimit=_separation_remaining,
+                kwargs...)   # forward class-specific knobs (:nn_hidden, :nn_iters, ...)
             # Stash the winning linear column for next round's MIPstart.
             if cand.class === :linear && all(isfinite, cand.params.y)
                 linear_warm[] = (y=Vector{Float64}(cand.params.y),

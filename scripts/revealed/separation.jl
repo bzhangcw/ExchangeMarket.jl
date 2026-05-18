@@ -31,6 +31,7 @@ using ExchangeMarket
 include("./androids/ces.jl")
 include("./androids/linear.jl")
 include("./androids/leontief.jl")
+include("./androids/nn.jl")
 
 # ---- CLI surface (shared across separation classes) ------------------------
 """
@@ -159,8 +160,16 @@ function solve_separation_class(class::Symbol,
         return solve_separation_leontief(Ξ, u; kwargs...)
     elseif class === :ql
         return solve_separation_ql(Ξ, u; kwargs...)
+    elseif class === :nn
+        # Forward NN-specific knobs from the caller's kwargs (the
+        # signatures don't overlap with the others, so other classes
+        # ignore them silently).
+        hidden = get(kwargs, :nn_hidden, NN_HIDDEN_DEFAULT)
+        max_iters = get(kwargs, :nn_iters, NN_ITERS_DEFAULT)
+        return solve_separation_nn(Ξ, u; hidden=hidden, max_iters=max_iters,
+                                    kwargs...)
     else
-        error("Unknown separation class: $class. Supported: :ces, :linear, :leontief, :ql.")
+        error("Unknown separation class: $class. Supported: :ces, :linear, :leontief, :ql, :nn.")
     end
 end
 
@@ -267,6 +276,19 @@ shifting so `max(y) = 0`, which gives the canonical representative `c ∈
 to 0; `compute_gamma` handles that correctly via log-space softmax.
 """
 function add_column_to_market!(fa::FisherMarket{T}, params::NamedTuple, class::Symbol, w_new::T=zero(T)) where T
+    if class === :nn
+        # MVP v1: NN androids register a uniform-CES PLACEHOLDER so fa.m
+        # stays in sync with γ_ref[]'s first dim. The LP master pulls γ
+        # from γ_ref (which holds the actual γ_θ(p_k) row added by
+        # add_to_gamma!), so primal_obj is NN-correct. But
+        # evaluate_test_error walks fa.c, fa.σ and will evaluate the
+        # placeholder (uniform CES, ρ=0) at test prices, NOT the NN.
+        # Test error is therefore incorrect for NN atoms — fix in v2 via
+        # a side-table keyed by atom index that holds θ.
+        n = size(fa.c, 1)
+        add_to_market!(fa, ones(T, n), T(0), w_new)
+        return fa
+    end
     y, σ = params.y, params.σ
     y_shifted = y .- maximum(y)                              # max(y) = 0  ⇒  max(c) = 1
     if class === :linear
@@ -307,6 +329,8 @@ function format_class(class::Symbol, params::NamedTuple)
     elseif class === :ces
         ρ = params.σ / (1 + params.σ)
         return "ces($(round(ρ; digits=2)))"
+    elseif class === :nn
+        return "nn(H=$(get(params, :hidden, NN_HIDDEN_DEFAULT)))"
     else
         return String(class)
     end
@@ -399,7 +423,9 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
     linear_γ_warm=nothing,
     linear_model_cache=nothing,
     verbose::Bool=false,
-    timelimit::Union{Real,Nothing}=nothing)
+    timelimit::Union{Real,Nothing}=nothing,
+    kwargs...)   # forwards class-specific knobs (e.g. :nn_hidden, :nn_iters)
+                 # through to solve_separation_class
 
     Ξ_pr, u_pr, do_sample = _maybe_subsample(Ξ_train, u, sample_size)
     # When subsampling, the cached linear MILP from the previous (larger
@@ -423,7 +449,7 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
             sub = solve_separation(Ξ_pr, u_pr, μ, other_classes;
                 verbose=verbose, timelimit=timelimit,
                 linear_y_warm=linear_y_warm, linear_γ_warm=_γ_warm,
-                linear_model_cache=_cache)
+                linear_model_cache=_cache, kwargs...)
             γ_other_full = do_sample ?
                            _gamma_over_full(Ξ_train, sub.params.y, sub.params.σ, sub.class) :
                            sub.γ_new
@@ -437,7 +463,7 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
     sub = solve_separation(Ξ_pr, u_pr, μ, classes;
         verbose=verbose, timelimit=timelimit,
         linear_y_warm=linear_y_warm, linear_γ_warm=_γ_warm,
-        linear_model_cache=_cache)
+        linear_model_cache=_cache, kwargs...)
     if do_sample
         γ_full = _gamma_over_full(Ξ_train, sub.params.y, sub.params.σ, sub.class)
         return (γ_new=γ_full, params=sub.params, obj=sub.obj,

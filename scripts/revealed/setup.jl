@@ -336,6 +336,7 @@ function parse_args_for_test_real(argv=ARGS)
     register_cli_separation!(s)
     register_cli_ces!(s)
     register_cli_linear!(s)
+    register_cli_nn!(s)    # NN-android separation (`--classes nn`)
     register_cli_plc!(s)   # ground-truth PLC market flags (--plc-L, --plc-no-intercept)
 
     return parse_args(argv, s)

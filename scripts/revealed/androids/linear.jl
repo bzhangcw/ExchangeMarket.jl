@@ -7,30 +7,41 @@
 
 using LinearAlgebra, Random
 using JuMP, MosekTools, Gurobi
+using ArgParse
 import MathOptInterface as MOI
 using ExchangeMarket
 
-# Single shared Gurobi env: the license banner ("Set parameter LicenseID
-# …, Academic license …") is printed at env creation, so reusing one env
-# across all MIP solves emits the banner exactly once (at script load)
-# instead of once per CG iteration. We also disable env-level OutputFlag
-# so the "Set parameter X to value Y" echo for `set_attribute(md, …)`
-# doesn't print at the console for every CG iteration; per-model logging
-# is reactivated via `LogFile` on the JuMP model.
-const _GRB_ENV = Ref{Gurobi.Env}()
-function _gurobi_env()
-    if !isassigned(_GRB_ENV)
-        _GRB_ENV[] = Gurobi.Env()
-        Gurobi.GRBsetintparam(_GRB_ENV[], "OutputFlag", 0)
+# ---- CLI surface --------------------------------------------------------
+"""
+    register_cli_linear!(s::ArgParseSettings)
+
+Add the "Separation: Linear" arg group (`--linear-separation-indicator`).
+"""
+function register_cli_linear!(s::ArgParseSettings)
+    add_arg_group!(s, "Separation: Linear")
+    @add_arg_table! s begin
+        "--linear-separation-indicator"
+        help = "Linear separation MILP: use Gurobi indicator constraints instead of the default big-M formulation. Slower on dense u (more per-node overhead), but tighter LP relaxation on sparse data."
+        action = :store_true
     end
-    return _GRB_ENV[]
+    return s
 end
 
-# Force the env (and thus the license banner) to fire at script load,
-# not mid-CG-run. Without this, the banner appears the first time linear
-# pricing is actually invoked — which under the multicut→single-cut
-# transition is several iterations in, interrupting the iteration table.
-_gurobi_env()
+"""
+    apply_cli_linear!(local_extra::Dict, cli)
+
+Forward linear-separation CLI values into the runner kwargs.
+"""
+function apply_cli_linear!(local_extra::Dict, cli)
+    if cli["linear_separation_indicator"]
+        local_extra[:use_indicators] = true
+    end
+    return local_extra
+end
+
+# `_gurobi_env()` (shared Gurobi env singleton) lives in gurobi_env.jl,
+# loaded before this file from setup.jl. Reused here for the linear
+# separation MILP and by redistribute.jl for the master LP.
 
 """
     random_linear_agent(n; normalize=true, seed=nothing)
@@ -138,15 +149,15 @@ function fit_linear_lp(
 end
 
 # -----------------------------------------------------------------------
-# Linear pricing as a big-M mixed-integer program (eq.cg.sep.linear)
+# Linear separation as a big-M mixed-integer program (eq.cg.sep.linear)
 # -----------------------------------------------------------------------
 """
-    solve_pricing_linear(Ξ, u; M=nothing, mip_timelimit=60.0,
+    solve_separation_linear(Ξ, u; M=nothing, mip_timelimit=60.0,
                           mip_relgap=1e-4,
                           mip_logfile=joinpath(tempdir(), "gurobi_linear_mip.log"),
                           verbose=false, kwargs...)
 
-Pricing subproblem for the linear function class, solved exactly as the
+Separation subproblem for the linear function class, solved exactly as the
 big-M MIP in eq.cg.sep.linear of the paper:
 
     max_{y, γ_1,...,γ_K}  Σ_k ⟨u_k, γ_k⟩
@@ -163,11 +174,11 @@ for the *same* y across all K samples. The big-M is taken as
 Solved with **Gurobi**. The MIP is NP-hard in K (fact.nphard.sep.linear)
 and dominates CG wall-clock at moderate K, so `mip_timelimit` (Gurobi
 `TimeLimit`, seconds) and `mip_relgap` (Gurobi `MIPGap`) bound the
-per-pricing call; on time-limit termination the best incumbent is
+per-separation call; on time-limit termination the best incumbent is
 returned (and is still a valid improving column when its reduced cost
 is positive). Gurobi's solver log goes to `mip_logfile` by default (set
 to `""` to disable file logging), so the console stays quiet across the
-many pricing calls in a CG run; pass `verbose=true` to send the log to
+many separation calls in a CG run; pass `verbose=true` to send the log to
 the console instead. The license banner from `Gurobi.Env()` prints once
 at first call (a shared env is cached) and not per call.
 
@@ -176,10 +187,10 @@ the gauge `y[n] = 0`); `params.σ = Inf` signals the linear regime so
 downstream `add_column_to_market!` stores a true `LinearAgent` (ρ = 1.0)
 rather than a large-σ CES stand-in.
 
-Returns a NamedTuple compatible with the multi-class dispatcher:
+Returns a NamedTuple compatible with the per-class separation oracle:
     (γ_new::Matrix{T} of shape (K, n), params=(y=log c, σ=Inf), obj, class=:linear).
 """
-function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     M::Union{T,Nothing}=nothing,
     mip_timelimit::Real=60.0,
@@ -188,7 +199,7 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     timelimit::Union{Real,Nothing}=nothing,   # overrides mip_timelimit when set
     # ---- solver-side speed-ups -------------------------------------------
     # `y_warm`, `γ_warm`: warm-start values from a previous CG iteration.
-    #   Threaded through `solve_pricing_class` / `solve_pricing_multiclass`
+    #   Threaded through `solve_separation_class` / `solve_separation`
     #   as `linear_y_warm` / `linear_γ_warm` (renamed in the splat below).
     # `use_indicators`: replace big-M with JuMP indicator constraints
     #   (`γ_{k,j} ⇒ {y_j - log p_{k,j} ≥ y_{j'} - log p_{k,j'}}`). Native
@@ -254,7 +265,7 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     if !cache_hit
-        # Gurobi handles the big-M MIP much faster than Mosek; this pricing
+        # Gurobi handles the big-M MIP much faster than Mosek; this separation
         # subproblem is NP-hard in K (fact.nphard.sep.linear), so it dominates
         # CG wall-clock for moderate K and benefits from Gurobi's MIP engine.
         # Reuse the shared env so the license banner doesn't reprint per call.
@@ -326,15 +337,15 @@ function solve_pricing_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
                                 use_indicators=use_indicators)
     end
 
-    verbose && println("Linear pricing MIP: obj=$obj_val (cache_hit=$cache_hit, status=$status, primal=$primal)")
+    verbose && println("Linear separation MIP: obj=$obj_val (cache_hit=$cache_hit, status=$status, primal=$primal)")
     return (γ_new=γ_new, params=(y=y_opt, σ=T(Inf)), obj=obj_val, class=:linear)
 end
 
 # -----------------------------------------------------------------------
-# Per-sample linear inversion (the linear analogue of solve_pricing_inversion)
+# Per-sample linear inversion (the linear analogue of solve_separation_inversion_ces)
 # -----------------------------------------------------------------------
 """
-    solve_pricing_inversion_linear(Ξ, u)
+    solve_separation_inversion_linear(Ξ, u)
 
 Produce K linear-class candidates by inverting the bang-per-buck winner
 at each sample. Linear has no σ to search over — the structure is fully
@@ -351,14 +362,14 @@ bang-per-buck winner at price `p_k`. Following the proof of
 
 realizes the desired vertex with unit slack. We then evaluate the
 spending share at every sample k' under this y (a one-hot vertex per
-row of `γ_new`) and report the pricing objective.
+row of `γ_new`) and report the separation objective.
 
 Returns a `Vector{Tuple{Vector{T}, Matrix{T}, T}}` with entries
 `(y_opt, γ_new::Matrix of shape (K, n), obj_val)`. The σ slot is fixed
 at `Inf` for the linear class and supplied by the caller when forming
 `add_column_to_market!(fa, (y=y_opt, σ=T(Inf)), :linear, …)`.
 """
-function solve_pricing_inversion_linear(
+function solve_separation_inversion_linear(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T}
 ) where T

@@ -5,16 +5,16 @@
 # Each FW step:
 #   1. Sample mini-batch S ⊂ [K] (full batch if batch_size == 0 or ≥ K).
 #   2. Subgradient r_k = sign(target_k - h(p_k))[j*] · e_{j*} for k ∈ S.
-#   3. LMO ≡ existing pricing solver:  γ_ℓ = argmax_γ Σ_k ⟨r_k, γ(p_k)⟩.
+#   3. LMO ≡ existing separation solver:  γ_ℓ = argmax_γ Σ_k ⟨r_k, γ(p_k)⟩.
 #   4. Update  h_{ℓ+1} = (1 - η_ℓ) h_ℓ + η_ℓ γ_ℓ,  η_ℓ = 2/(ℓ+2).
 #
-# Reuses pricing.jl: `solve_pricing`, `solve_pricing_dual_lp`,
+# Reuses separation.jl: `solve_separation_lbfgs_ces`, `solve_separation_dual_lp_ces`,
 # `recover_ces_params`, `add_to_gamma!`, `add_to_market!`.
 
 using LinearAlgebra
 using Random
 
-# pricing.jl is included by setup.jl; this file is included after setup.jl.
+# separation.jl is included by setup.jl; this file is included after setup.jl.
 # The third-party FrankWolfe.jl wrapper lives in third-party/wrapper_frankwolfe.jl
 # (included from setup.jl after validate.jl).
 
@@ -143,7 +143,7 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
              third-party/wrapper_frankwolfe.jl, which delegates to the \
              FrankWolfe.jl package.""" maxlog=1
 
-    # 0 = silent; ≥1 = per-iteration table. FW's inner pricing call is
+    # 0 = silent; ≥1 = per-iteration table. FW's inner separation call is
     # already silent so the level-2 step adds no extra detail here.
     verbose = verbosity >= 1
 
@@ -280,9 +280,9 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
                 sort!(randperm(rng, K_train)[1:bs])
         u = compute_residual_subgrad(Ξ_train, γ_ref, w_vec, batch)
 
-        # ---- LMO ≡ pricing oracle ------------------------------------------------------
-        y_lp, σ_lp, _, _ = solve_pricing_dual_lp(Ξ_train, u)
-        y_opt, σ_opt, γ_new, _ = solve_pricing(Ξ_train, u; y_init=y_lp, σ_init=σ_lp)
+        # ---- LMO ≡ separation oracle ------------------------------------------------------
+        y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(Ξ_train, u)
+        y_opt, σ_opt, γ_new, _ = solve_separation_lbfgs_ces(Ξ_train, u; y_init=y_lp, σ_init=σ_lp)
         c_new, ρ_new = recover_ces_params(y_opt, σ_opt)
 
         # ---- FW update -----------------------------------------------------------------

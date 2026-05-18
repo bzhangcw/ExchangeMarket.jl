@@ -52,7 +52,7 @@ using ExchangeMarket
 const _HERE = @__DIR__
 include(joinpath(_HERE, "..", "tools.jl"))
 include(joinpath(_HERE, "..", "plots.jl"))
-include(joinpath(_HERE, "plc.jl"))
+include(joinpath(_HERE, "androids", "plc.jl"))
 include(joinpath(_HERE, "setup.jl"))
 
 switch_to_pdf(; bool_use_html=false)
@@ -100,10 +100,10 @@ end
 function fit_and_sweep(agents, w_vec, allowed_classes::Vector{Symbol})
     Ξ_train = make_grid(agents, w_vec, p1_train)
     Ξ_test  = make_grid(agents, w_vec, p1_test)
-    name, pricing_kind, raw_kwargs = method_kwargs[1]   # :CG, :cg_single
+    name, separation_kind, raw_kwargs = method_kwargs[1]   # :CG, :cg_single
     kwargs = merge(Dict(raw_kwargs), Dict(:classes => allowed_classes))
     Random.seed!(seed)
-    fa, _, _ = run_method_tracked(name, pricing_kind, kwargs, Ξ_train, Ξ_test; verbosity=1)
+    fa, _, _ = run_method_tracked(name, separation_kind, kwargs, Ξ_train, Ξ_test; verbosity=1)
 
     g_truth = zeros(n, length(p1_sweep))
     g_ces   = zeros(n, length(p1_sweep))

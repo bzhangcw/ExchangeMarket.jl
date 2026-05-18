@@ -11,7 +11,7 @@ Solve the nonlinear least squares problem for t CES agents jointly:
     min_{y_i, σ_i, w} Σ_k ||Σ_i w_i γ_i(p_k) - P_k g_k||²
 where γ_i(p_k) = softmax(y_i - σ_i log(p_k)) and w ∈ Δ^t.
 
-Unlike column generation (which alternates LP master + nonconvex pricing),
+Unlike column generation (which alternates LP master + nonconvex separation),
 this determines all parameters (y_i, σ_i, w_i) simultaneously via a single
 nonconvex optimization.
 

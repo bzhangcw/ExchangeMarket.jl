@@ -2,7 +2,7 @@
 # CES surrogate validation via price-scaled excess demand.
 #
 # Given a fitted surrogate FisherMarket `fa_surrogate` (output of CG /
-# MultiCut / FW.jl on revealed-preference data) and the underlying real
+# cgma / FW.jl on revealed-preference data) and the underlying real
 # CES FisherMarket `f_real`:
 #
 #   1. solve the surrogate market for its Walrasian price p_s via
@@ -28,7 +28,7 @@ using ExchangeMarket
 # (exponentiated-gradient step, Cole-Cheung '13 step size). Returns a
 # simplex-normalized price vector. We use MirrorDec rather than the
 # Newton-based HessianBar because the surrogate market can have very
-# few atoms with extreme σ values, where the Hessian becomes singular;
+# few androids with extreme σ values, where the Hessian becomes singular;
 # MirrorDec is slower but globally robust.
 # -----------------------------------------------------------------------
 function solve_ces_equilibrium(
@@ -127,7 +127,7 @@ function solve_plc_excess(p::AbstractVector, agents::Vector{<:PLCAgent},
     # NaN/Inf in the surrogate equilibrium price would make the LP coefficients
     # invalid; fail soft so the run produces a row instead of crashing.
     if any(!isfinite, p) || any(p .<= 0)
-        @warn "solve_plc_excess: non-finite or non-positive price; skipping LP" p_minmax=extrema(p)
+        @warn "solve_plc_excess: non-finite or non-positive price; skipping LP" p_minmax = extrema(p)
         return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=:bad_price, time=0.0)
     end
 
@@ -178,10 +178,10 @@ function solve_plc_excess(p::AbstractVector, agents::Vector{<:PLCAgent},
         return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=status, time=elapsed)
     end
     return (
-        tau = value(τ),
-        x   = [value.(x[i]) for i in 1:m],
-        status = status,
-        time = elapsed,
+        tau=value(τ),
+        x=[value.(x[i]) for i in 1:m],
+        status=status,
+        time=elapsed,
     )
 end
 
@@ -199,11 +199,11 @@ function validate_surrogate(
     p_s = res_s.p
     plc_res = solve_plc_excess(p_s, real_plc.agents, real_plc.w; verbose=verbose)
     return (
-        p_surrogate           = p_s,
-        excess_surrogate_linf = plc_res.tau,        # τ* from the joint LP
-        excess_surrogate_l1   = sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
-        iters_surrogate       = res_s.iters,
-        lp_status             = plc_res.status,
-        lp_time               = plc_res.time,
+        p_surrogate=p_s,
+        excess_surrogate_linf=plc_res.tau,        # τ* from the joint LP
+        excess_surrogate_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
+        iters_surrogate=res_s.iters,
+        lp_status=plc_res.status,
+        lp_time=plc_res.time,
     )
 end

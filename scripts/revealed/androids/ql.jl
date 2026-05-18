@@ -64,7 +64,7 @@ function produce_revealed_preferences_ql(
 end
 
 # -----------------------------------------------------------------------
-# QL pricing oracle (CG separation for the QL atom subfamily)
+# QL separation oracle (CG separation for the QL android subfamily)
 # -----------------------------------------------------------------------
 """
     ql_share(c, p, w) -> γ (length n)
@@ -95,28 +95,28 @@ function ql_share(c::AbstractVector{T}, p::AbstractVector{T}, w::Real) where T
 end
 
 """
-    solve_pricing_ql(Ξ, u; w=1.0, verbose=false, kwargs...)
+    solve_separation_ql(Ξ, u; w=1.0, verbose=false, kwargs...)
 
-CG pricing oracle for the QL function class. Solves
+CG separation oracle for the QL function class. Solves
     max_{c ∈ R^{n-1}_{++}}  Σ_k ⟨U e_k, γ_k(c, w)⟩
 by the regime-enumeration scheme: for each m ∈ {0,...,K}, the constrained
 subproblem reduces (after Charnes-Cooper β := ⟨1,c⟩, y := c/β) to a 1D max
 of a convex piecewise-linear function on a closed interval, hence attained
 at an endpoint. The overall optimum is the max over m and the two endpoints.
 
-Returns a NamedTuple compatible with the multi-class dispatcher:
+Returns a NamedTuple compatible with the per-class separation oracle:
     (γ_new::Matrix{T}, params=(c, w), obj::T, class=:ql).
 
 `γ_new[k, :]` holds γ_k(c*, w) evaluated at each sample's price.
 """
-function solve_pricing_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     w::Real=1.0,
     verbose::Bool=false,
     kwargs...) where T
     K = length(Ξ)
     n = length(Ξ[1][1])
-    @assert n >= 2 "QL pricing requires n ≥ 2 goods"
+    @assert n >= 2 "QL separation requires n ≥ 2 goods"
     nm1 = n - 1
     w = T(w)
 
@@ -167,7 +167,7 @@ function solve_pricing_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     # m = 0: interval is [1/p_(1),n, +∞]; no upper endpoint to evaluate, only β = 1/p_(1),n.
-    # m = K: interval is [0, 1/p_(K),n]; only β = 1/p_(K),n (lower endpoint = 0 gives degenerate atom).
+    # m = K: interval is [0, 1/p_(K),n]; only β = 1/p_(K),n (lower endpoint = 0 gives degenerate android).
     # For 0 < m < K: both endpoints.
     for m in 0:K
         # Update A, B, C, D from m-1 → m by moving the m-th sorted sample from corner to interior.
@@ -210,7 +210,7 @@ function solve_pricing_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         γ_new[k, :] .= ql_share(c_star, p_k, w)
     end
 
-    verbose && println("QL pricing: obj=$best_obj, β*=$best_β, j*=$best_jstar")
+    verbose && println("QL separation: obj=$best_obj, β*=$best_β, j*=$best_jstar")
     return (γ_new=γ_new, params=(c=c_star, w=w), obj=best_obj, class=:ql)
 end
 

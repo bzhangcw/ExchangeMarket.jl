@@ -40,7 +40,7 @@ Two notes about paths:
 | `--k`, `-k`               | `100`                  | Training (and test) observation count |
 | `--seed`, `-s`            | `42`                   | Master random seed |
 | `--timelimit`, `-T`       | `60.0`                 | Wall-clock cap per method (seconds) |
-| `--methods`               | `CG,MultiCut,FW,SFW`   | Comma list of methods to run |
+| `--methods`               | `CG,cgma,FW,SFW`   | Comma list of methods to run |
 | `--classes`               | `ces,linear,leontief`  | Comma list of CG dispatch classes |
 | `--csv`                   | (empty)                | If set, append per-method rows to this CSV |
 | `--no-plot`               | off                    | Skip plotting |

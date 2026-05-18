@@ -1,22 +1,61 @@
 # Cutting-plane / column-generation iteration runner (`run_method_tracked`).
 #
 # Stage semantics:
-#   stage = 2 ⇒ multicut (K per-sample inversion candidates, dispatched by
-#               solve_pricing_inversion_multiclass across :ces and :linear)
-#   stage = 1 ⇒ single-cut (one improving column from solve_pricing_multiclass)
+#   stage = 2 ⇒ multicut (K per-sample inversion candidates, handled by
+#               solve_separation_multicut across :ces and :linear)
+#   stage = 1 ⇒ single-cut (one improving column from solve_separation)
 # A run that starts in multicut auto-demotes to single-cut on stall to
 # clean up; single-cut treats a stall as terminal convergence.
 #
-# Verbosity: 0 silent, 1 per-iteration table, 2 + per-class pricing detail
-# (forwarded to the pricing functions, e.g., Gurobi MIP log to console).
+# Verbosity: 0 silent, 1 per-iteration table, 2 + per-class separation detail
+# (forwarded to the separation oracles, e.g., Gurobi MIP log to console).
 #
 # Depends on:
 #   - solve_wealth_redistribution_primal, solve_wealth_redistribution_dual, extract_duals      (redistribute.jl)
 #   - compute_gamma_from_market                                    (setup.jl)
 #   - evaluate_test_error                                          (setup.jl)
 #   - drop_zero_columns!, add_to_gamma!, add_column_to_market!,
-#     format_class, solve_pricing_multiclass,
-#     solve_pricing_inversion_multiclass                           (pricing.jl)
+#     format_class, solve_separation,
+#     solve_separation_multicut                           (separation.jl)
+
+using ArgParse
+
+# ---- CLI surface --------------------------------------------------------
+"""
+    register_cli_cpm!(s::ArgParseSettings)
+
+Add CG/cgma's CLI flags (`--stage-2-tol`, `--android-dropping-interval`)
+to the given ArgParseSettings as a "Method: CG/cgma" arg group.
+"""
+function register_cli_cpm!(s::ArgParseSettings)
+    add_arg_group!(s, "Method: CG/cgma")
+    @add_arg_table! s begin
+        "--stage-2-tol"
+        help = "cgma only: improvement threshold below which stage 2 auto-demotes to stage 1 (single-cut cleanup). > 0 overrides the per-method :tol_stage_2; ≤ 0 (default) keeps the in-code default (typically equals :tol_delta)."
+        arg_type = Float64
+        default = -1.0
+        "--android-dropping-interval"
+        help = "Drop zero-weight androids (columns) from the surrogate market every N iterations (working like regularization). 5 (default) is every iter; larger keeps dormant androids longer (cheaper LP, but more clutter in the surrogate)."
+        arg_type = Int
+        default = 5
+    end
+    return s
+end
+
+"""
+    apply_cli_cpm!(local_extra::Dict, cli)
+
+Forward CG/cgma-specific CLI values into the runner kwargs.
+"""
+function apply_cli_cpm!(local_extra::Dict, cli)
+    if cli["android_dropping_interval"] > 0
+        local_extra[:interval_dropping] = cli["android_dropping_interval"]
+    end
+    if cli["stage_2_tol"] > 0
+        local_extra[:tol_stage_2] = cli["stage_2_tol"]
+    end
+    return local_extra
+end
 
 # Iteration-table layout for run_method_tracked. Widths are computed by
 # IterTable from the dummy row; the "class" column's dummy is a realistic
@@ -27,46 +66,25 @@ const CPM_TABLE = IterTable(
     Any[1, 1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3, 1, "ces+lin×10", 1.234],
 )
 
-# Re-expand a pricing-oracle candidate (class, y, σ) to its full K × n
-# bidding matrix over Ξ_full. Used when the pricing call ran on a
-# random subset of prices but the master needs the full-shape γ.
-# CES / Leontief reuse the softmax recipe in `produce_gamma`; :linear
-# (σ → +∞) requires the bang-per-buck argmax form from `compute_gamma`.
-function _gamma_over_full(Ξ_full, y::AbstractVector, σ::Real, class::Symbol)
-    K = length(Ξ_full)
-    n = length(y)
-    γ = zeros(eltype(y), K, n)
-    if class === :linear
-        c = exp.(y)
-        for k in 1:K
-            γ[k, :] = compute_gamma(Ξ_full[k][1], c, σ)
-        end
-    else
-        for k in 1:K
-            z_k = y .- σ .* log.(Ξ_full[k][1])
-            ez = exp.(z_k .- maximum(z_k))
-            γ[k, :] = ez ./ sum(ez)
-        end
-    end
-    return γ
-end
+# Separation wrappers (find_cut_single / find_cuts_multi / _gamma_over_full)
+# live in separation.jl so accpm.jl can share them.
 
 """
-    run_method_tracked(name, pricing_kind, kwargs, Ξ_train, Ξ_test=nothing;
+    run_method_tracked(name, separation_kind, kwargs, Ξ_train, Ξ_test=nothing;
                        verbosity=1, sanity=false)
 
 Reimplements the CG loops with per-iteration tracking of primal objective
 and test error. Returns `(fa, γ_ref, history)`.
 """
-function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
+function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     Ξ_train, Ξ_test=nothing; verbosity::Int=1, sanity=false)
 
     # verbosity levels:
-    #   0 = silent (no per-iter table, no pricing detail)
+    #   0 = silent (no per-iter table, no separation detail)
     #   1 = per-iteration table only
-    #   2 = + per-class pricing detail (Gurobi MIP log, CES/Leontief lines)
+    #   2 = + per-class separation detail (Gurobi MIP log, CES/Leontief lines)
     verbose = verbosity >= 1
-    verbose_pricing = verbosity >= 2
+    verbose_separation = verbosity >= 2
 
     max_iters = get(kwargs, :max_iters, 50)
     tol_obj = get(kwargs, :tol_obj, 5e-3)
@@ -78,24 +96,24 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
     use_indicators_kw = get(kwargs, :use_indicators, false)
     # Drop zero-weight columns from the surrogate market on a fixed stride.
     # `interval_dropping = 1` (default) is every iteration as before;
-    # set >1 to keep zero-weight atoms longer (cheaper LPs lose this protection,
-    # but the master LP can still re-activate dropped atoms via positive weights).
+    # set >1 to keep zero-weight androids longer (cheaper LPs lose this protection,
+    # but the master LP can still re-activate dropped androids via positive weights).
     interval_dropping = get(kwargs, :interval_dropping, 1)
     classes = get(kwargs, :classes, Symbol[:ces])
-    # MultiCut-only: after stage-2 demotion, restrict the CES pricer to a
+    # cgma-only: after stage-2 demotion, restrict the CES pricer to a
     # fixed ρ (corresponding σ = ρ/(1-ρ)) instead of the free-σ search.
     # ρ near 1 (e.g. 0.97) yields a near-linear CES boundary cleanup.
-    # `nothing` ⇒ no restriction; CES pricing keeps the free-σ behavior.
+    # `nothing` ⇒ no restriction; CES separation keeps the free-σ behavior.
     stage1_ces_rho = get(kwargs, :stage1_ces_rho, nothing)
     timelimit = get(kwargs, :timelimit, Inf)        # wall-clock cap, seconds
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
-    # Mini-batch / subsampling for the pricing oracle. When 0 < sample_size < K,
+    # Mini-batch / subsampling for the separation oracle. When 0 < sample_size < K,
     # each iteration draws a fresh random subset S ⊂ [K] of size sample_size
-    # and runs the pricing call on (Ξ_train[S], u[S, :]). For stage-1 single-cut
+    # and runs the separation call on (Ξ_train[S], u[S, :]). For stage-1 single-cut
     # the candidate (y, σ) is then re-expanded to the full K-shape γ via
     # `_gamma_over_full` before being added to the master. For stage-2 multicut
-    # only the |S| per-sample inversions are computed (one atom per sampled k),
-    # cutting per-iteration cost roughly K / sample_size on the pricing side.
+    # only the |S| per-sample inversions are computed (one android per sampled k),
+    # cutting per-iteration cost roughly K / sample_size on the separation side.
     # See Higle-Sen '91 / Joachims '09 for the cutting-plane subsampling literature.
     sample_size = get(kwargs, :sample_size, 0)
     # Per-iteration market-excess tracking: solves the surrogate equilibrium
@@ -115,19 +133,19 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
     fa = FisherMarket(ws)
     γ_ref = Ref(compute_gamma_from_market(fa, Ξ_train))
     # Persistent warm-start for the :linear MILP: stashes the (y, γ) of the
-    # last winning linear column so the next pricing call hands it to Gurobi
+    # last winning linear column so the next separation call hands it to Gurobi
     # as a MIPstart. Often 3–10× faster on subsequent CG rounds.
     linear_warm = Ref{Union{Nothing,NamedTuple{(:y, :γ),Tuple{Vector{Float64},Matrix{Float64}}}}}(nothing)
-    # Persistent MILP model: the linear pricing call keeps its Gurobi model
+    # Persistent MILP model: the linear separation call keeps its Gurobi model
     # alive across iterations and only rewrites the objective when log-prices
     # are unchanged. Wiped automatically when `--sample-size` is active (the
     # cache misses on every call because Ξ_pr changes shape).
     linear_model_cache = Ref{Any}(nothing)
     # Persistent master LP: solve_wealth_redistribution_primal keeps its Gurobi model
     # alive across iterations and appends new w variables (with their
-    # balance/budget coefficients) for each freshly added atom. We invalidate
+    # balance/budget coefficients) for each freshly added android. We invalidate
     # the cache whenever `drop_zero_columns!` runs, because dropping
-    # reshuffles γ rows and breaks the cached w-variable ↔ atom-index mapping.
+    # reshuffles γ rows and breaks the cached w-variable ↔ android-index mapping.
     master_cache = Ref{Any}(nothing)
 
     K_train = length(Ξ_train)
@@ -145,24 +163,24 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
     has_excess = !isnothing(f_real) && interval_eval_excess > 0
 
     _t0 = time()
-    # `stage` is a small ordinal that selects the pricing strategy:
+    # `stage` is a small ordinal that selects the separation strategy:
     #   stage = 2 ⇒ multicut (K per-sample inversion candidates)
-    #   stage = 1 ⇒ single-cut (one improving column from the multiclass dispatcher)
+    #   stage = 1 ⇒ single-cut (one improving column from the per-class separation oracle)
     # A run that starts in multicut auto-demotes to single-cut on stall
     # to clean up; single-cut treats a stall as terminal convergence.
-    stage = pricing_kind === :cg_multicut ? 2 : 1
+    stage = separation_kind === :cg_multicut ? 2 : 1
     if verbose
         print_banner(CPM_TABLE, BANNER_TITLE)
         print_config("method", String(name))
-        print_config("alias", String(pricing_kind))
+        print_config("alias", String(separation_kind))
         print_config("classes", join(String.(classes), ", "))
         # Per-class parameter sub-block. Only print for classes that are
         # actually selected, so a CES-only run isn't cluttered with linear
         # / leontief defaults.
         if :ces in classes
-            ces_extras = if pricing_kind === :cg_multicut && !isnothing(stage1_ces_rho)
+            ces_extras = if separation_kind === :cg_multicut && !isnothing(stage1_ces_rho)
                 @sprintf("free σ via LBFGS (stage 1) + fixed ρ=%g (stage 2)", stage1_ces_rho)
-            elseif pricing_kind === :cg_multicut
+            elseif separation_kind === :cg_multicut
                 "per-sample inversion (σ-grid [-1.0, 30] × LBFGS refine)"
             else
                 "free σ via LBFGS, warm-started by dual-LP"
@@ -215,14 +233,14 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
             if verbose && (u_err > 1e-4 || μ_err > 1e-4)
                 print_continuation(CPM_TABLE,
                     @sprintf("⚠ dual mismatch: ‖u - u_dual‖∞=%.2e, |μ - μ_dual|=%.2e",
-                             u_err, μ_err))
+                        u_err, μ_err))
             end
         end
 
         if drop && interval_dropping > 0 && (iter % interval_dropping == 0)
             drop_zero_columns!(fa, γ_ref, w)
             # Dropping reshuffles γ rows; the cached master would point at
-            # the wrong w-variable for each atom, so wipe and rebuild next iter.
+            # the wrong w-variable for each android, so wipe and rebuild next iter.
             master_cache[] = nothing
         else
             fa.w .= w
@@ -277,7 +295,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
         # signal: hand off to single-cut for cleanup. Single-cut treats
         # the stall as terminal convergence as before.
         # `nothing` on either threshold disables the corresponding action:
-        #   tol_stage_2 === nothing ⇒ MultiCut never auto-demotes
+        #   tol_stage_2 === nothing ⇒ cgma never auto-demotes
         #   tol_delta   === nothing ⇒ single-cut never stall-stops
         if length(history[:primal_obj]) >= 3
             imp2 = max(history[:primal_obj][end-2] - history[:primal_obj][end-1],
@@ -287,9 +305,9 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
                 if stage > 1
                     verbose && print_continuation(CPM_TABLE,
                         @sprintf("stage %d stalled (Δ = %.2e < tol_stage_2=%g); demoting to stage %d",
-                                 stage, imp2, tol_stage_2, stage - 1))
+                            stage, imp2, tol_stage_2, stage - 1))
                     stage -= 1
-                    # fall through: this iteration's pricing runs at the
+                    # fall through: this iteration's separation runs at the
                     # lower stage and logs a single row.
                 else
                     _log_row()
@@ -300,84 +318,29 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
             end
         end
 
-        # pricing / column(s) addition — dispatched by `stage`.
+        # Separation / column(s) addition — selected by `stage`. Both
+        # branches delegate to the shared find_cut_* wrappers in separation.jl.
         rc_val = NaN
         class_str = "-"
+        _separation_remaining = isfinite(timelimit) ?
+                             max(1.0, timelimit - (time() - _t0)) : nothing
         if stage == 1
-            # Single-cut: one improving column per pass from the multiclass
-            # dispatcher. Terminates on small reduced cost.
-            #
-            # MultiCut post-demotion override: if stage1_ces_rho is set
-            # AND we got here by demoting from stage 2 (pricing_kind ===
-            # :cg_multicut), run CES at a fixed σ = ρ/(1-ρ) instead of
-            # the free-σ search; non-CES classes still go through the
-            # regular dispatcher. The best candidate by reduced cost wins.
-            apply_fixed_rho = (pricing_kind === :cg_multicut) &&
-                              !isnothing(stage1_ces_rho) && (:ces in classes)
-            _pricing_remaining = isfinite(timelimit) ?
-                                 max(1.0, timelimit - (time() - _t0)) : nothing
-
-            # Subsample for the pricing oracle (Higle-Sen / Joachims style).
-            # Master always uses the full K samples; only the separation oracle
-            # sees a random subset, then we re-expand γ to K-shape via the
-            # candidate's (y, σ) before adding it to the master.
-            do_sample = sample_size > 0 && sample_size < K_train
-            Ξ_pr, u_pr = if do_sample
-                S = randperm(K_train)[1:sample_size]
-                Ξ_train[S], u[S, :]
-            else
-                Ξ_train, u
-            end
-
-            # Warm-start payload for the :linear MILP (only used by
-            # solve_pricing_linear; other classes ignore the extra kwargs).
-            # When --sample-size is on we can't reuse the previous γ as a
-            # MIPstart because it was sized for a different Ξ_pr; we still
-            # pass y as a heuristic seed.
+            # Single-cut: one improving column per pass. Post-demotion
+            # cgma override: if `stage1_ces_rho` is set AND we came
+            # from stage 2 (separation_kind === :cg_multicut), the separation oracle
+            # runs CES at a fixed σ = ρ/(1-ρ) and picks the best of that
+            # vs. the other classes by reduced cost.
+            fixed_rho = (separation_kind === :cg_multicut) ? stage1_ces_rho : nothing
             _warm_y = isnothing(linear_warm[]) ? nothing : linear_warm[].y
-            _warm_γ = (isnothing(linear_warm[]) || do_sample) ? nothing : linear_warm[].γ
-
-            if apply_fixed_rho
-                σ_fixed = stage1_ces_rho / (1 - stage1_ces_rho)
-                y_opt, σ_out, γ_new, obj_val = solve_pricing_fix_σ(Ξ_pr, u_pr, σ_fixed;
-                    timelimit=_pricing_remaining)
-                # rc / γ-expansion use the FULL K-shape γ so the master sees
-                # the candidate's full bidding profile.
-                γ_full = do_sample ? _gamma_over_full(Ξ_train, y_opt, σ_out, :ces) : γ_new
-                rc_ces = reduced_cost(γ_full, u, μ)
-                cand = (γ_new=γ_full, params=(y=y_opt, σ=σ_out), obj=obj_val,
-                    class=:ces, rc=rc_ces)
-                other_classes = filter(c -> c !== :ces, classes)
-                if !isempty(other_classes)
-                    cand_other_sub = solve_pricing_multiclass(Ξ_pr, u_pr, μ, other_classes;
-                        verbose=verbose_pricing, timelimit=_pricing_remaining,
-                        linear_y_warm=_warm_y, linear_γ_warm=_warm_γ,
-                        linear_model_cache=(do_sample ? nothing : linear_model_cache))
-                    γ_other_full = do_sample ?
-                                   _gamma_over_full(Ξ_train, cand_other_sub.params.y,
-                        cand_other_sub.params.σ, cand_other_sub.class) :
-                                   cand_other_sub.γ_new
-                    cand_other = (γ_new=γ_other_full, params=cand_other_sub.params,
-                        obj=cand_other_sub.obj, class=cand_other_sub.class,
-                        rc=reduced_cost(γ_other_full, u, μ))
-                    if cand_other.rc > cand.rc
-                        cand = cand_other
-                    end
-                end
-            else
-                cand_sub = solve_pricing_multiclass(Ξ_pr, u_pr, μ, classes;
-                    verbose=verbose_pricing, timelimit=_pricing_remaining,
-                    linear_y_warm=_warm_y, linear_γ_warm=_warm_γ,
-                    linear_model_cache=(do_sample ? nothing : linear_model_cache))
-                if do_sample
-                    γ_full = _gamma_over_full(Ξ_train, cand_sub.params.y,
-                        cand_sub.params.σ, cand_sub.class)
-                    cand = (γ_new=γ_full, params=cand_sub.params, obj=cand_sub.obj,
-                        class=cand_sub.class, rc=reduced_cost(γ_full, u, μ))
-                else
-                    cand = cand_sub
-                end
-            end
+            _warm_γ = isnothing(linear_warm[]) ? nothing : linear_warm[].γ
+            cand = find_cut_single(Ξ_train, u, μ, classes;
+                sample_size=sample_size,
+                fixed_rho_ces=fixed_rho,
+                linear_y_warm=_warm_y,
+                linear_γ_warm=_warm_γ,
+                linear_model_cache=linear_model_cache,
+                verbose=verbose_separation,
+                timelimit=_separation_remaining)
             # Stash the winning linear column for next round's MIPstart.
             if cand.class === :linear && all(isfinite, cand.params.y)
                 linear_warm[] = (y=Vector{Float64}(cand.params.y),
@@ -390,7 +353,7 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
                 _log_row(rc_val, class_str)
                 verbose && print_continuation(CPM_TABLE,
                     @sprintf("converged (rc = %.2e ≤ tol_rc=%g, %s)",
-                             rc_val, tol_rc, class_str))
+                        rc_val, tol_rc, class_str))
                 break
             end
             add_to_gamma!(γ_ref, cand.γ_new)
@@ -398,40 +361,21 @@ function run_method_tracked(name::Symbol, pricing_kind::Symbol, kwargs::Dict,
 
         elseif stage == 2
             # Multicut: per-sample inversion across the inversion-capable
-            # classes. With `sample_size`, only |S| of the K samples are
-            # inverted this round; each candidate's γ is re-expanded to
-            # the full K-shape before joining the master so γ_ref stays
-            # rectangular. Total atoms added per pass = |S| (or K when
-            # sample_size is 0 / >= K). Leontief gets picked up later by
-            # the single-cut cleanup phase.
-            do_sample = sample_size > 0 && sample_size < K_train
-            Ξ_pr, u_pr = if do_sample
-                S = randperm(K_train)[1:sample_size]
-                Ξ_train[S], u[S, :]
-            else
-                Ξ_train, u
+            # classes. Each candidate added with weight 0; the master LP
+            # can re-activate dropped androids via positive weights. Leontief
+            # is picked up later by the single-cut cleanup phase.
+            cands = find_cuts_multi(Ξ_train, u, classes; sample_size=sample_size)
+            for c in cands
+                add_to_gamma!(γ_ref, c.γ_new)
+                add_column_to_market!(fa, (y=c.y, σ=c.σ), c.class, 0.0)
             end
-            candidates = solve_pricing_inversion_multiclass(Ξ_pr, u_pr, classes)
-            counts = Dict{Symbol,Int}(:ces => 0, :linear => 0)
-            for cand in candidates
-                cand.class === :none && continue
-                γ_full = do_sample ?
-                         _gamma_over_full(Ξ_train, cand.y, cand.σ, cand.class) :
-                         cand.γ_new
-                add_to_gamma!(γ_ref, γ_full)
-                add_column_to_market!(fa, (y=cand.y, σ=cand.σ), cand.class, 0.0)
-                counts[cand.class] = get(counts, cand.class, 0) + 1
-            end
-            tags = String[]
-            counts[:ces] > 0 && push!(tags, "ces×$(counts[:ces])")
-            counts[:linear] > 0 && push!(tags, "lin×$(counts[:linear])")
-            class_str = isempty(tags) ? "-" : join(tags, "+")
+            class_str = format_cuts_tag(cands)
 
         else
-            error("Unknown pricing stage: $stage")
+            error("Unknown separation stage: $stage")
         end
 
-        # log after pricing
+        # log after separation
         _log_row(rc_val, class_str)
     end
 

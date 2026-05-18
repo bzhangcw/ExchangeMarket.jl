@@ -6,20 +6,20 @@
 #
 # Loaded last from setup.jl (after validate.jl) so the helpers it needs
 # (`compute_gamma_from_market`, `evaluate_test_error`, `validate_surrogate`,
-# `add_column_to_market!`, `solve_pricing*`, `recover_ces_params`) are all
+# `add_column_to_market!`, `solve_separation_lbfgs_ces*`, `recover_ces_params`) are all
 # already defined.
 #
 # Decision variable lives in ℝ^{K×n}: the matrix `H` of values h(p_k) =
-# Σ_t w_t γ_t(p_k). Feasible set is the convex hull of CES atoms, with
-# the LMO returning a one-atom evaluation matrix γ ∈ ℝ^{K×n} (rows are
+# Σ_t w_t γ_t(p_k). Feasible set is the convex hull of CES androids, with
+# the LMO returning a one-android evaluation matrix γ ∈ ℝ^{K×n} (rows are
 # γ(p_k) for k ∈ [K]).
 #
 # Objective f(H) = (1/K) Σ_k ‖P_k g_k − H[k,:]‖_∞.
 # Gradient: row-k subgradient is −sign(target_k − H[k,:])[j*]·e_{j*}/K.
 #
-# Atom-to-params lookup uses a Dict keyed by objectid of the LMO-returned
+# Android-to-params lookup uses a Dict keyed by objectid of the LMO-returned
 # matrix; FrankWolfe.jl stores LMO outputs by identity in ActiveSet, so
-# the cache survives the AFW iteration. Initial atom params are computed
+# the cache survives the AFW iteration. Initial android params are computed
 # from the random FisherMarket used to seed the iterate.
 
 using FrankWolfe
@@ -36,28 +36,28 @@ const FWJL_TABLE = IterTable(
 )
 
 """
-    CESPricingLMO(Ξ)
+    CESSeparationLMO(Ξ)
 
-Linear minimization oracle for the CES pricing subproblem. Calls
-`solve_pricing_dual_lp` + `solve_pricing` (from ces.jl) to find the CES
-atom whose evaluation matrix γ ∈ ℝ^{K×n} minimizes ⟨direction, γ⟩, and
+Linear minimization oracle for the CES separation subproblem. Calls
+`solve_separation_dual_lp_ces` + `solve_separation_lbfgs_ces` (from ces.jl) to find the CES
+android whose evaluation matrix γ ∈ ℝ^{K×n} minimizes ⟨direction, γ⟩, and
 caches the recovered `(y, σ)` for downstream `add_to_market!`.
 """
-mutable struct CESPricingLMO{T} <: FrankWolfe.LinearMinimizationOracle
+mutable struct CESSeparationLMO{T} <: FrankWolfe.LinearMinimizationOracle
     Ξ::Vector{Tuple{Vector{T},Vector{T}}}
     cache::Dict{UInt64,NamedTuple}
 end
 
-CESPricingLMO(Ξ::Vector{Tuple{Vector{T},Vector{T}}}) where {T} =
-    CESPricingLMO{T}(Ξ, Dict{UInt64,NamedTuple}())
+CESSeparationLMO(Ξ::Vector{Tuple{Vector{T},Vector{T}}}) where {T} =
+    CESSeparationLMO{T}(Ξ, Dict{UInt64,NamedTuple}())
 
-function FrankWolfe.compute_extreme_point(lmo::CESPricingLMO{T},
+function FrankWolfe.compute_extreme_point(lmo::CESSeparationLMO{T},
     direction::AbstractMatrix; kwargs...) where {T}
-    # min ⟨direction, γ⟩  ⇔  max ⟨−direction, γ⟩, which is the dual-pricing
+    # min ⟨direction, γ⟩  ⇔  max ⟨−direction, γ⟩, which is the dual-separation
     # problem with cost rows u_k := −direction[k,:].
     u = Matrix{T}(-direction)
-    y_lp, σ_lp, _, _ = solve_pricing_dual_lp(lmo.Ξ, u)
-    y_opt, σ_opt, γ_new, _ = solve_pricing(lmo.Ξ, u; y_init=y_lp, σ_init=σ_lp)
+    y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(lmo.Ξ, u)
+    y_opt, σ_opt, γ_new, _ = solve_separation_lbfgs_ces(lmo.Ξ, u; y_init=y_lp, σ_init=σ_lp)
     γ_dense = Matrix{T}(γ_new)
     lmo.cache[objectid(γ_dense)] = (y=y_opt, σ=σ_opt)
     return γ_dense
@@ -67,7 +67,7 @@ end
     run_method_tracked_fwjl(name, kwargs, Ξ_train, Ξ_test=nothing; verbosity=1)
 
 Drive the FW iteration with FrankWolfe.jl's `away_frank_wolfe`, which
-maintains an active set so per-atom weights can be recovered post-run.
+maintains an active set so per-android weights can be recovered post-run.
 Returns `(fa, γ_ref, history)` matching the runners in cpm.jl /
 `run_method_tracked_fw`.
 
@@ -75,7 +75,7 @@ Returns `(fa, γ_ref, history)` matching the runners in cpm.jl /
 - `:max_iters`  (200)  forwarded as `max_iteration` to FrankWolfe.jl
 - `:tol_obj`    (1e-3) forwarded as `epsilon`
 - `:timelimit`  (Inf)  stops via callback when wall-clock exceeds
-- `:seed`       (0)    seed for the initial random CES atom
+- `:seed`       (0)    seed for the initial random CES android
 - `:line_search` (FrankWolfe.Agnostic())   2/(t+2) classical rule
 
 History is recorded at every FW iteration via FrankWolfe.jl's `callback`
@@ -129,7 +129,7 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
         return G
     end
 
-    # Initial CES atom — seeded so runs are reproducible.
+    # Initial CES android — seeded so runs are reproducible.
     Random.seed!(rng_seed)
     ws0 = cpu_workspace(n)
     add_ces!(ws0, 1; ρ=rand(1), scale=30.0, sparsity=0.99)
@@ -138,13 +138,13 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
     γ_init = compute_gamma_from_market(fa0, Ξ_train)        # (1, K, n)
     H0 = Matrix{Float64}(reshape(γ_init[1, :, :], K, n))
 
-    # Cache the initial atom's (y, σ) so the active-set lookup post-FW
-    # can recover its params just like an LMO-produced atom.
+    # Cache the initial android's (y, σ) so the active-set lookup post-FW
+    # can recover its params just like an LMO-produced android.
     σ0 = fa0.σ[1]
     c0 = Vector(fa0.c[:, 1])
     y0 = (1 + σ0) .* log.(c0)
 
-    lmo = CESPricingLMO(Ξ_train)
+    lmo = CESSeparationLMO(Ξ_train)
     lmo.cache[objectid(H0)] = (y=y0, σ=σ0)
 
     # History recorded per FW iteration via callback.
@@ -174,7 +174,7 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
     function cb(state, args...)
         iter_counter[] += 1
         as = isempty(args) ? nothing : args[1]
-        T_cur = isnothing(as) ? 1 : length(as.atoms)
+        T_cur = isnothing(as) ? 1 : length(as.androids)
         push!(history[:primal_obj], state.primal)
         if !isnothing(as) && !isnothing(Ξ_test) &&
            interval_eval_test > 0 && (iter_counter[] % interval_eval_test == 0)
@@ -251,7 +251,7 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
     _elapsed = time() - _t0
     if verbose
         println("=== $(name) (FrankWolfe.jl away_frank_wolfe) ===")
-        @printf("--- done: %d atoms, primal=%.3e, dual_gap=%.3e, t=%.4fs ---\n",
+        @printf("--- done: %d androids, primal=%.3e, dual_gap=%.3e, t=%.4fs ---\n",
             fa.m, primal, dual_gap, _elapsed)
     end
 
@@ -261,23 +261,23 @@ end
 """
     _build_fa_from_active_set(as, lmo, n)
 
-Reconstruct a `FisherMarket` from a FrankWolfe.jl `ActiveSet`. Each atom
-in the active set is a γ matrix produced by `CESPricingLMO`; its (y, σ)
-were stashed in `lmo.cache` keyed by `objectid`. Atoms whose params
+Reconstruct a `FisherMarket` from a FrankWolfe.jl `ActiveSet`. Each android
+in the active set is a γ matrix produced by `CESSeparationLMO`; its (y, σ)
+were stashed in `lmo.cache` keyed by `objectid`. Androids whose params
 aren't cached are skipped (their weight is folded into a uniform CES
 fallback so the FisherMarket remains non-empty).
 """
-function _build_fa_from_active_set(as, lmo::CESPricingLMO{T}, n::Int) where {T}
-    atoms = as.atoms
+function _build_fa_from_active_set(as, lmo::CESSeparationLMO{T}, n::Int) where {T}
+    androids = as.androids
     weights = as.weights
     fa = FisherMarket(cpu_workspace(n))
-    for (γ_matrix, w_t) in zip(atoms, weights)
+    for (γ_matrix, w_t) in zip(androids, weights)
         w_t <= 0 && continue
         params = get(lmo.cache, objectid(γ_matrix), nothing)
         isnothing(params) && continue
         add_column_to_market!(fa, params, :ces, T(w_t))
     end
-    # If everything dropped (unlikely), seed with a single uniform atom.
+    # If everything dropped (unlikely), seed with a single uniform android.
     if fa.m == 0
         ws = cpu_workspace(n)
         add_ces!(ws, 1; ρ=[0.0], scale=30.0, sparsity=0.99)

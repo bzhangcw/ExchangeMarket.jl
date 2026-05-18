@@ -7,8 +7,9 @@ using JuMP
 using LinearAlgebra
 using ExchangeMarket
 using Gurobi
-# The Gurobi env is owned by `linear.jl::_gurobi_env`; we reuse it here so
-# the master LP doesn't reprint the license banner on every call.
+# Shared Gurobi env from gurobi_env.jl — same singleton used by the
+# linear MILP separation oracle. One env across all calls prints the
+# license banner exactly once at script load.
 # `MosekTools` is no longer needed for the master / dual — both run on the
 # shared Gurobi env. Other scripts in the repo still load Mosek directly.
 
@@ -46,8 +47,8 @@ function solve_wealth_redistribution_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}
     style=:inf,
     timelimit::Union{Real,Nothing}=nothing,
     # When non-`nothing`, the previous model (with its `s`, `t`, `balance`,
-    # `budget`, and the w-vars for atoms 1..last_m) is reused; only the new
-    # atoms `last_m+1..m` are added via `set_normalized_coefficient` on the
+    # `budget`, and the w-vars for androids 1..last_m) is reused; only the new
+    # androids `last_m+1..m` are added via `set_normalized_coefficient` on the
     # existing constraints. Caller wipes the Ref to force a rebuild (e.g.,
     # after `drop_zero_columns!` reshuffles the γ rows).
     cache::Union{Ref,Nothing}=nothing,
@@ -73,7 +74,7 @@ function solve_wealth_redistribution_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}
             s_var   = c.s
             balance = c.balance
             budget  = c.budget
-            # Append variables for new atoms.
+            # Append variables for new androids.
             # NOTE: the `lower_bound = 0.0` kwarg on an anonymous `@variable`
             # call is silently dropped by some JuMP versions (the bug that
             # caused master objective to go negative on iter 2). Apply the

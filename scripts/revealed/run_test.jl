@@ -21,179 +21,11 @@ using ExchangeMarket
 
 include("../tools.jl")
 include("../plots.jl")
-include("./plc.jl")
-include("./ql.jl")
+include("./androids/plc.jl")
+include("./androids/ql.jl")
 include("./setup.jl")
 
 switch_to_pdf(; bool_use_html=false)
-
-# -----------------------------------------------------------------------
-# CLI
-# -----------------------------------------------------------------------
-function parse_args_for_test_real(argv=ARGS)
-    s = ArgParseSettings(
-        prog="run_test.jl",
-        description="Benchmark CG / Multicut / FW / SFW on a CES or PLC market.",
-        autofix_names=true,
-    )
-
-    # ---- Problem instance ------------------------------------------------
-    add_arg_group!(s, "Problem instance")
-    @add_arg_table! s begin
-        "--market-type", "-t"
-        help = "Ground-truth market family"
-        arg_type = String
-        default = "ces"
-        range_tester = x -> x in ("ces", "plc", "ql")
-        "--n", "-n"
-        help = "Number of goods"
-        arg_type = Int
-        default = 5
-        "--m", "-m"
-        help = "Number of agents in the real market"
-        arg_type = Int
-        default = 50
-        "--k", "-k"
-        help = "Number of training (and test) observations"
-        arg_type = Int
-        default = 100
-        "--seed", "-s"
-        help = "Master random seed"
-        arg_type = Int
-        default = 42
-        "--rep"
-        help = "Number of repetitions (different seeds). When > 1, the plot shows mean ± 1σ ribbon across reps."
-        arg_type = Int
-        default = 1
-        "--plc-L"
-        help = "Number of PLC pieces (PLC market only)"
-        arg_type = Int
-        default = 5
-        "--plc-no-intercept"
-        help = "Disable PLC intercept (b=0); only meaningful for --market-type plc"
-        action = :store_true
-    end
-
-    # ---- IO --------------------------------------------------------------
-    add_arg_group!(s, "IO")
-    @add_arg_table! s begin
-        "--out-dir"
-        help = "Output directory for the data file (and the .csv if --csv is set without an absolute path)."
-        arg_type = String
-        default = @__DIR__
-        "--data-file", "-d"
-        help = "Serialize the per-method aggregation context to this path (consumable by run_plot.jl -f). Empty default ⇒ <out-dir>/real_<market>.jls."
-        arg_type = String
-        default = ""
-        "--no-data-file"
-        help = "Suppress the per-run context dump (overrides --data-file)."
-        action = :store_true
-        "--csv"
-        help = "If non-empty, append per-method-per-rep rows to this CSV (path; relative to revealed/)"
-        arg_type = String
-        default = ""
-        "--verbosity", "-v"
-        help = "0 = silent; 1 = per-iteration table; 2 = + per-pricing detail"
-        arg_type = Int
-        default = 0
-        range_tester = x -> x in (0, 1, 2)
-    end
-
-    # ---- Stopping --------------------------------------------------------
-    add_arg_group!(s, "Stopping")
-    @add_arg_table! s begin
-        "--timelimit", "-T"
-        help = "Wall-clock cap per method, in seconds"
-        arg_type = Float64
-        default = 60.0
-        "--iterlimit", "-I"
-        help = "Iteration cap per method; if > 0, overrides each method's :max_iters (default: use setup.jl value)"
-        arg_type = Int
-        default = -1
-        "--tol-obj"
-        help = "Objective tolerance; if > 0, overrides each method's :tol_obj; 0 disables the check; < 0 uses setup.jl default"
-        arg_type = Float64
-        default = -1.0
-        "--tol-delta"
-        help = "Fixed-point/improvement tolerance; if > 0, overrides each method's :tol_delta; 0 disables the stall stop (non-stop); < 0 uses setup.jl default"
-        arg_type = Float64
-        default = -1.0
-        "--tol-rc"
-        help = "Reduced-cost tolerance for the stage-1 convergence check; > 0 overrides each method's :tol_rc; 0 disables the rc-based stop entirely; < 0 uses setup.jl default."
-        arg_type = Float64
-        default = 1e-3
-    end
-
-    # ---- Method selection ------------------------------------------------
-    add_arg_group!(s, "Method selection")
-    @add_arg_table! s begin
-        "--methods"
-        help = """Comma-separated method names to run (any of CG,MultiCut,FW,SFW,FWjl), FW and SFW are implemented by myself, so by default we compare to FrankWolfe.jl"""
-        arg_type = String
-        default = "CG,MultiCut,FWjl"
-        "--classes"
-        help = "Comma-separated function classes for CG dispatch (any of ces,linear,leontief,ql)"
-        arg_type = String
-        default = "ces,linear,leontief"
-    end
-
-    # ---- Method: CG/MultiCut -----------------------------------------------------
-    add_arg_group!(s, "Method: CG/MultiCut")
-    @add_arg_table! s begin
-        "--stage-2-tol"
-        help = "MultiCut only: improvement threshold below which stage 2 auto-demotes to stage 1 (single-cut cleanup). > 0 overrides the per-method :tol_stage_2; ≤ 0 (default) keeps the in-code default (typically equals :tol_delta)."
-        arg_type = Float64
-        default = -1.0
-        "--android-dropping-interval"
-        help = "Drop zero-weight androids (columns) from the surrogate market every N iterations (working like regularization). 5 (default) is every iter; larger keeps dormant atoms longer (cheaper LP, but more clutter in the surrogate)."
-        arg_type = Int
-        default = 5
-    end
-
-    # ---- Pricing (shared across all classes) -----------------------------
-    add_arg_group!(s, "Pricing (shared)")
-    @add_arg_table! s begin
-        "--sample-size"
-        help = "Mini-batch size for the pricing oracle (Higle-Sen / Joachims style). If 0 (default) or >= K, uses the full training set; otherwise each pricing call sees a random subset of this size, master uses full K."
-        arg_type = Int
-        default = 0
-    end
-
-    # ---- Pricing: CES ----------------------------------------------------
-    add_arg_group!(s, "Pricing: CES")
-    @add_arg_table! s begin
-        "--stage1-ces-rho"
-        help = "MultiCut only: after the stage-2 → stage-1 demotion, restrict the CES pricer to a fixed ρ (corresponding σ = ρ/(1-ρ)) instead of the free-σ search. ρ near 1 (e.g. 0.97) yields a near-linear CES boundary cleanup. ≤ 0 (default) keeps the unrestricted free-σ behavior."
-        arg_type = Float64
-        default = -1.0
-    end
-
-    # ---- Pricing: Linear -------------------------------------------------
-    add_arg_group!(s, "Pricing: Linear")
-    @add_arg_table! s begin
-        "--linear-pricing-indicator"
-        help = "Linear pricing MILP: use Gurobi indicator constraints instead of the default big-M formulation. Slower on dense u (more per-node overhead), but tighter LP relaxation on sparse data."
-        action = :store_true
-    end
-
-    # ---- Evaluation ------------------------------------------------------
-    add_arg_group!(s, "Evaluation")
-    @add_arg_table! s begin
-        "--interval-eval-test"
-        help = "Evaluate test error every N iterations (per method); intervening iters carry forward the last value. Default 1 (every iter); -1 evaluates only once at the end."
-        arg_type = Int
-        default = 1
-        "--interval-eval-excess"
-        help = "Evaluate market-excess ‖p(q-g)‖∞ every N iterations (CES only; needs validation). Default -1 inherits --interval-eval-test; 0 disables per-iter tracking."
-        arg_type = Int
-        default = -1
-        "--no-validate"
-        help = "Skip the CES surrogate equilibrium validation (default ON for --market-type ces; PLC / QL are always skipped)."
-        action = :store_true
-    end
-
-    return parse_args(argv, s)
-end
 
 const cli = parse_args_for_test_real()
 
@@ -228,9 +60,22 @@ else
     joinpath(out_dir, "real_$(String(market_type)).jls")
 end
 
-method_names = Symbol.(split(cli["methods"], ","))
-allowed_classes = Symbol.(split(cli["classes"], ","))
-opt_plc = (L=cli["plc_L"], intercept=!cli["plc_no_intercept"])
+# Case-insensitive method lookup against the canonical names in
+# `method_kwargs` (defined in setup.jl). Accepts e.g. `accpm`, `ACCPM`,
+# `AcCpM` → :ACCPM. Unknown tokens raise with the full known list.
+const _CANONICAL_METHOD = Dict(lowercase(String(spec[1])) => spec[1]
+                               for spec in method_kwargs)
+const _METHOD_LIST_STR = join(sort(collect(values(_CANONICAL_METHOD))), ", ")
+function _resolve_method(token::AbstractString)
+    key = lowercase(strip(token))
+    haskey(_CANONICAL_METHOD, key) ||
+        error("unknown method: '$token' (known: $_METHOD_LIST_STR)")
+    return _CANONICAL_METHOD[key]
+end
+method_names = _resolve_method.(split(cli["methods"], ","))
+allowed_classes = Symbol.(lowercase.(strip.(split(cli["classes"], ","))))
+opt_plc = plc_opt_from_cli(cli)
+sparsity = cli["sparsity"]
 
 method_filter(name) = name in method_names
 
@@ -249,7 +94,7 @@ function build_rep_data(rep_idx::Int, rep_seed::Int)
     if market_type === :ces
         ρ_vec = -3.5 .+ 4.3 .* rand(m)
         ws = cpu_workspace(n)
-        add_ces!(ws, m; ρ=ρ_vec, scale=30.0, sparsity=0.99)
+        add_ces!(ws, m; ρ=ρ_vec, scale=30.0, sparsity=sparsity)
         ws.ces.w ./= sum(ws.ces.w)
         f0 = FisherMarket(ws)
         linconstr = LinearConstr(1, n, ones(1, n), [1.0])
@@ -264,7 +109,7 @@ function build_rep_data(rep_idx::Int, rep_seed::Int)
         f_real = f1
     elseif market_type === :plc
         L = opt_plc.L
-        plc_agents = [random_plc_agent(n, L; intercept=opt_plc.intercept) for _ in 1:m]
+        plc_agents = [random_plc_agent(n, L; sparsity=sparsity, intercept=opt_plc.intercept) for _ in 1:m]
         w_vec = rand(m)
         w_vec ./= sum(w_vec)
         @info "[rep $rep_idx] Ground-truth PLC market" n m L K seed = rep_seed
@@ -289,7 +134,7 @@ end
 # -----------------------------------------------------------------------
 function run_one_method(rep_idx::Int, rep_seed::Int,
     Ξ_train, Ξ_test, f_real,
-    name::Symbol, pricing_kind::Symbol, kwargs::Dict)
+    name::Symbol, separation_kind::Symbol, kwargs::Dict)
     local_extra = Dict{Symbol,Any}(
         :timelimit => timelimit,
         :interval_eval_test => interval_eval_test,
@@ -298,7 +143,7 @@ function run_one_method(rep_idx::Int, rep_seed::Int,
         local_extra[:f_real] = f_real
         local_extra[:interval_eval_excess] = interval_eval_excess
     end
-    if pricing_kind !== :fw
+    if separation_kind !== :fw
         local_extra[:classes] = allowed_classes
     end
     # Override semantics: > 0 sets the value; == 0 disables the corresponding
@@ -316,38 +161,35 @@ function run_one_method(rep_idx::Int, rep_seed::Int,
     if iterlimit_override > 0
         local_extra[:max_iters] = iterlimit_override
     end
-    if cli["sample_size"] > 0
-        local_extra[:sample_size] = cli["sample_size"]
-    end
-    if cli["android_dropping_interval"] > 0
-        local_extra[:interval_dropping] = cli["android_dropping_interval"]
-    end
-    if cli["linear_pricing_indicator"]
-        local_extra[:use_indicators] = true
-    end
-    if cli["stage1_ces_rho"] > 0
-        local_extra[:stage1_ces_rho] = cli["stage1_ces_rho"]
-    end
-    if cli["stage_2_tol"] > 0
-        local_extra[:tol_stage_2] = cli["stage_2_tol"]
-    end
+    # Per-class and per-method CLI forwarding lives next to each owner;
+    # the keys each apply_*! writes are no-ops for unrelated methods.
+    # Add more apply_cli_*! calls here when registering a new arg group.
+    apply_cli_separation!(local_extra, cli)
+    apply_cli_ces!(local_extra, cli)
+    apply_cli_linear!(local_extra, cli)
+    apply_cli_cpm!(local_extra, cli)
+    apply_cli_accpm!(local_extra, cli)
     if haskey(kwargs, :seed)
         local_extra[:seed] = rep_seed
     end
     local_kwargs = merge(kwargs, local_extra)
     @info "[rep $rep_idx] spawned $name" classes = get(local_kwargs, :classes, "n/a") timelimit = timelimit
     t_elapsed = @elapsed begin
-        if pricing_kind === :fw
+        if separation_kind === :fw
             fa, γ_ref, hist = run_method_tracked_fw(
                 name, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
             )
-        elseif pricing_kind === :fwjl
+        elseif separation_kind === :fwjl
             fa, γ_ref, hist = run_method_tracked_fwjl(
                 name, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
             )
+        elseif separation_kind === :accpm
+            fa, γ_ref, hist = run_method_tracked_accpm(
+                name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
+            )
         else
             fa, γ_ref, hist = run_method_tracked(
-                name, pricing_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
+                name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
             )
         end
     end
@@ -420,7 +262,7 @@ end
 # Per-method aggregation across reps:
 #   - pad trajectories with their last value to the longest length
 #   - compute mean & std at each iteration
-# Final-iter scalars (atoms, train, test, t) are reported as mean.
+# Final-iter scalars (androids, train, test, t) are reported as mean.
 # -----------------------------------------------------------------------
 function pad_forward(v::Vector{T}, L::Int) where {T}
     length(v) >= L && return v[1:L]
@@ -501,11 +343,11 @@ fmt_std(s) = isnan(s) ? "       -" : @sprintf("%8.1e", s)
 fmt_mean(v) = @sprintf("%9.3e", v)
 if do_validate_effective
     @printf("%-12s %8s %8s %20s %20s %16s %20s\n",
-        "method", "iters", "atoms", "train_obj (std)", "test_err (std)",
+        "method", "iters", "androids", "train_obj (std)", "test_err (std)",
         "time (s) (std)", "‖p(q-g)‖∞ (std)")
 else
     @printf("%-12s %8s %8s %20s %20s %16s\n",
-        "method", "iters", "atoms", "train_obj (std)", "test_err (std)",
+        "method", "iters", "androids", "train_obj (std)", "test_err (std)",
         "time (s) (std)")
 end
 for name in method_names

@@ -174,7 +174,7 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
     function cb(state, args...)
         iter_counter[] += 1
         as = isempty(args) ? nothing : args[1]
-        T_cur = isnothing(as) ? 1 : length(as.androids)
+        T_cur = isnothing(as) ? 1 : length(as.atoms)   # FrankWolfe.jl public API
         push!(history[:primal_obj], state.primal)
         if !isnothing(as) && !isnothing(Ξ_test) &&
            interval_eval_test > 0 && (iter_counter[] % interval_eval_test == 0)
@@ -268,10 +268,12 @@ aren't cached are skipped (their weight is folded into a uniform CES
 fallback so the FisherMarket remains non-empty).
 """
 function _build_fa_from_active_set(as, lmo::CESSeparationLMO{T}, n::Int) where {T}
-    androids = as.androids
+    # `atoms` / `weights` are FrankWolfe.jl's ActiveSet field names — they
+    # are NOT our "android" terminology and must stay verbatim.
+    γ_matrices = as.atoms
     weights = as.weights
     fa = FisherMarket(cpu_workspace(n))
-    for (γ_matrix, w_t) in zip(androids, weights)
+    for (γ_matrix, w_t) in zip(γ_matrices, weights)
         w_t <= 0 && continue
         params = get(lmo.cache, objectid(γ_matrix), nothing)
         isnothing(params) && continue

@@ -355,6 +355,24 @@ format_class_from_yσ(y, σ) = "ces($(round(σ / (1 + σ); digits=2)))"
 
 using Random  # for randperm
 
+# Re-expand a candidate's γ from subsampled to full K. Dispatches on
+# `cand.class` so each android class can use its own parametric form
+# (NN uses θ, CES uses (y, σ), linear uses y at σ=Inf).
+function _gamma_over_full_from_cand(Ξ_full, cand)
+    if cand.class === :nn
+        n = length(Ξ_full[1][1])
+        K = length(Ξ_full)
+        γ = Matrix{Float64}(undef, K, n)
+        H = get(cand.params, :hidden, NN_HIDDEN_DEFAULT)
+        @inbounds for k in 1:K
+            γ[k, :] .= nn_share(cand.params.θ, Ξ_full[k][1]; hidden=H)
+        end
+        return γ
+    else
+        return _gamma_over_full(Ξ_full, cand.params.y, cand.params.σ, cand.class)
+    end
+end
+
 # Re-expand a single separation-oracle candidate (class, y, σ) back to the
 # full K × n bidding matrix over `Ξ_full`. Used when the separation call ran
 # on a random subset but the master needs the full-shape γ.
@@ -451,7 +469,7 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
                 linear_y_warm=linear_y_warm, linear_γ_warm=_γ_warm,
                 linear_model_cache=_cache, kwargs...)
             γ_other_full = do_sample ?
-                           _gamma_over_full(Ξ_train, sub.params.y, sub.params.σ, sub.class) :
+                           _gamma_over_full_from_cand(Ξ_train, sub) :
                            sub.γ_new
             cand_other = (γ_new=γ_other_full, params=sub.params, obj=sub.obj,
                 class=sub.class, rc=reduced_cost(γ_other_full, u, μ))
@@ -465,7 +483,7 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
         linear_y_warm=linear_y_warm, linear_γ_warm=_γ_warm,
         linear_model_cache=_cache, kwargs...)
     if do_sample
-        γ_full = _gamma_over_full(Ξ_train, sub.params.y, sub.params.σ, sub.class)
+        γ_full = _gamma_over_full_from_cand(Ξ_train, sub)
         return (γ_new=γ_full, params=sub.params, obj=sub.obj,
             class=sub.class, rc=reduced_cost(γ_full, u, μ))
     else

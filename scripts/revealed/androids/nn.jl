@@ -29,6 +29,9 @@ using Optim
 using LogExpFunctions: logsumexp
 using ArgParse
 
+# Homothetic by construction: γ_θ depends on p only, no `w` input (see file header).
+is_homothetic(::Val{:nn}) = true
+
 # Default MLP architecture. Small on purpose: the polytope it has to push
 # the LP master through is bounded by ‖u_k‖_1 ≤ 1, so high capacity per
 # atom is overkill — more atoms each with modest expressiveness wins.

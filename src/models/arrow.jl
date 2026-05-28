@@ -48,7 +48,6 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     df::Union{DataFrame,Nothing} = nothing
 
     # constraints (reuse LinearConstr)
-    constr_x::Union{Vector{LinearConstr},Nothing} = nothing
     constr_p::Union{LinearConstr,Nothing} = nothing
 
     """
@@ -59,7 +58,6 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     budgets are computed as `w = b' * p`.
     """
     function ArrowDebreuMarket(m, n; ρ=1.0,
-        constr_x=nothing,
         constr_p=nothing,
         c=nothing,
         b=nothing,
@@ -101,7 +99,6 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
 
         # aux storages
         this.df = DataFrame()
-        this.constr_x = constr_x
         this.constr_p = constr_p
 
         # indirect utility (price-space) closures

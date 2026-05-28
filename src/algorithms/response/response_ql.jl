@@ -58,3 +58,41 @@ function solve_ql_demand(agent::QuasiLinearLogAgent, p::AbstractVector, w::Real)
     end
     return x, utility(agent, nothing, x)
 end
+
+# --------------------------------------------------------------------------
+# Response adapter: drives QL agents via play! → solve_substep! → solve!
+# Mirrors __analytic_response in response_ces.jl.
+# --------------------------------------------------------------------------
+"""
+    __ql_response(; i, p, market, agent, kwargs...)
+
+Compute the QL closed-form demand for the agent at global index `i`
+(reads `market.w[agent.i]` for the budget), writes the allocation into
+`agent.x` (a view into `market.x[:, agent.i]`) and the utility into
+`market.val_u[agent.i]`.
+
+Errors if the agent's `atype` is not a `QuasiLinearLogAgent`.
+"""
+function __ql_response(;
+    i::Int=1,
+    p::AbstractVector=nothing,
+    market::Market=nothing,
+    agent::Union{AgentView,Nothing}=nothing,
+    kwargs...
+)
+    av = isnothing(agent) ? market.agents[i] : agent
+    at = av.atype
+    at isa QuasiLinearLogAgent ||
+        error("QLResponse: expected QuasiLinearLogAgent at agent $(av.i), got $(typeof(at))")
+    w = market.w[av.i]
+    x_new, u = solve_ql_demand(at, p, w)
+    av.x .= x_new
+    market.val_u[av.i] = u
+    return nothing
+end
+
+QLResponse = ResponseOptimizer(
+    __ql_response,
+    :ql_analytic,
+    "QLResponse",
+)

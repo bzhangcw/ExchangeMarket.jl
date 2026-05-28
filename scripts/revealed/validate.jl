@@ -91,6 +91,20 @@ function validate_surrogate(
 )
     @assert fa_surrogate.n == f_real.n
     "surrogate and real must have the same number of goods"
+    # MirrorDec / CESAnalytic only support CES agents. If the surrogate
+    # carries any non-CES (gen) agents (QL, ...), the equilibrium solve
+    # is undefined here; warn once and return a NaN-shaped result so
+    # callers don't have to wrap every call in try/catch.
+    if fa_surrogate.storage.gen.m > 0
+        @warn "validate_surrogate: surrogate has $(fa_surrogate.storage.gen.m) non-CES (gen) agent(s); equilibrium ops are CES-only and not supported for mixed surrogates. Returning NaN excess." maxlog = 1
+        n = fa_surrogate.n
+        return (
+            p_surrogate=fill(NaN, n),
+            excess_surrogate_linf=NaN,
+            excess_surrogate_l1=NaN,
+            iters_surrogate=0,
+        )
+    end
     res_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...)
     p_s = res_s.p
     q = Vector(f_real.q)

@@ -22,181 +22,31 @@ using ExchangeMarket
 include("../tools.jl")
 include("../plots.jl")
 include("./androids/plc.jl")
-include("./androids/ql.jl")
+# androids/ql.jl is included transitively via separation.jl (loaded by
+# setup.jl below); it's the source of `solve_separation_ql` for the
+# :ql android class — the ground-truth :ql MARKET branch was removed.
 include("./setup.jl")
 
 switch_to_pdf(; bool_use_html=false)
 
 const cli = parse_args_for_test_real()
 
-# `autofix_names=true` maps hyphens to underscores in the returned dict.
-market_type = Symbol(cli["market_type"])
-n = cli["n"]
-m = cli["m"]
-K = cli["k"]
-seed = cli["seed"]
-rep = cli["rep"]
-timelimit = cli["timelimit"]
-iterlimit_override = cli["iterlimit"]
-tol_obj_override = cli["tol_obj"]
-tol_delta_override = cli["tol_delta"]
-interval_eval_test = cli["interval_eval_test"]
-# Default: per-iter excess shares the test cadence; -1 sentinel inherits.
-interval_eval_excess = cli["interval_eval_excess"] == -1 ?
-                       max(interval_eval_test, 0) : cli["interval_eval_excess"]
-do_validate = !cli["no_validate"]   # default ON; --no-validate disables
-csv_path = cli["csv"]
-verbosity = cli["verbosity"]
-out_dir = abspath(cli["out_dir"])
-mkpath(out_dir)
-
-# Data-file path mirrors the PDF naming (`real_<market>.jls` in out_dir)
-# unless overridden. `--no-data-file` suppresses the dump entirely.
-data_file_path = if cli["no_data_file"]
-    ""
-elseif !isempty(cli["data_file"])
-    abspath(cli["data_file"])
-else
-    joinpath(out_dir, "real_$(String(market_type)).jls")
-end
-
-# Case-insensitive method lookup against the canonical names in
-# `method_kwargs` (defined in setup.jl). Accepts e.g. `accpm`, `ACCPM`,
-# `AcCpM` → :ACCPM. Unknown tokens raise with the full known list.
-const _CANONICAL_METHOD = Dict(lowercase(String(spec[1])) => spec[1]
-                               for spec in method_kwargs)
-const _METHOD_LIST_STR = join(sort(collect(values(_CANONICAL_METHOD))), ", ")
-function _resolve_method(token::AbstractString)
-    key = lowercase(strip(token))
-    haskey(_CANONICAL_METHOD, key) ||
-        error("unknown method: '$token' (known: $_METHOD_LIST_STR)")
-    return _CANONICAL_METHOD[key]
-end
-method_names = _resolve_method.(split(cli["methods"], ","))
-allowed_classes = Symbol.(lowercase.(strip.(split(cli["classes"], ","))))
-opt_plc = plc_opt_from_cli(cli)
-sparsity = cli["sparsity"]
+# All CLI unpacking / derivation lives in `build_run_config` (setup.jl) so
+# run_one_method.jl shares the exact same plumbing. Destructure the fields
+# the rest of this script references by bare name.
+cfg = build_run_config(cli)
+(; market_type, n, m, K, K_test, seed, rep, timelimit, iterlimit_override,
+    tol_obj_override, tol_delta_override, interval_eval_test,
+    interval_eval_excess, do_validate, csv_path, verbosity, out_dir,
+    data_file_path, method_names, allowed_classes, opt_plc, ces_rho_range,
+    sparsity) = cfg
 
 method_filter(name) = name in method_names
 
-@info "configuration" market_type n m K seed rep timelimit methods = method_names classes = allowed_classes
+@info "configuration" market_type n m K seed rep timelimit methods = method_names classes = allowed_classes ces_rho_range sparsity
 
-# -----------------------------------------------------------------------
-# Per-rep data builder (sequential, fast). Returns (Ξ_train, Ξ_test).
-# Each rep gets a different seed so reps see independent train/test data.
-# -----------------------------------------------------------------------
-function build_rep_data(rep_idx::Int, rep_seed::Int)
-    Random.seed!(rep_seed)
-    # For CES: f_real is a FisherMarket.
-    # For PLC: f_real is the NamedTuple `(agents=..., w=...)` that the
-    # joint-LP equilibrium check in validate.jl dispatches on.
-    f_real = nothing
-    if market_type === :ces
-        ρ_vec = -3.5 .+ 4.3 .* rand(m)
-        ws = cpu_workspace(n)
-        add_ces!(ws, m; ρ=ρ_vec, scale=30.0, sparsity=sparsity)
-        ws.ces.w ./= sum(ws.ces.w)
-        f0 = FisherMarket(ws)
-        linconstr = LinearConstr(1, n, ones(1, n), [1.0])
-        f1 = copy(f0)
-        p₀ = ones(n) ./ n
-        f1.x .= ones(n, m) ./ m
-        alg = HessianBar(n, m, p₀; linconstr=linconstr)
-        alg.linsys = :direct
-        @info "[rep $rep_idx] Ground-truth CES market" n m K seed = rep_seed σ_range = extrema(f1.σ)
-        Ξ_train = produce_revealed_preferences(alg, f1, K; seed=rep_seed)
-        Ξ_test = produce_revealed_preferences(alg, f1, K; seed=rep_seed + 1)
-        f_real = f1
-    elseif market_type === :plc
-        L = opt_plc.L
-        plc_agents = [random_plc_agent(n, L; sparsity=sparsity, intercept=opt_plc.intercept) for _ in 1:m]
-        w_vec = rand(m)
-        w_vec ./= sum(w_vec)
-        @info "[rep $rep_idx] Ground-truth PLC market" n m L K seed = rep_seed
-        Ξ_train = produce_revealed_preferences_plc(plc_agents, w_vec, K, n; seed=rep_seed)
-        Ξ_test = produce_revealed_preferences_plc(plc_agents, w_vec, K, n; seed=rep_seed + 1)
-        f_real = (agents=plc_agents, w=w_vec)
-    elseif market_type === :ql
-        ql_agents = [random_ql_agent(n) for _ in 1:m]
-        w_vec = rand(m)
-        w_vec ./= sum(w_vec)
-        @info "[rep $rep_idx] Ground-truth QL market" n m K seed = rep_seed
-        Ξ_train = produce_revealed_preferences_ql(ql_agents, w_vec, K, n; seed=rep_seed)
-        Ξ_test = produce_revealed_preferences_ql(ql_agents, w_vec, K, n; seed=rep_seed + 1)
-    else
-        error("Unknown market_type: $market_type")
-    end
-    return (Ξ_train=Ξ_train, Ξ_test=Ξ_test, rep_seed=rep_seed, f_real=f_real)
-end
-
-# -----------------------------------------------------------------------
-# Per-method runner: takes the rep's data + the method spec.
-# -----------------------------------------------------------------------
-function run_one_method(rep_idx::Int, rep_seed::Int,
-    Ξ_train, Ξ_test, f_real,
-    name::Symbol, separation_kind::Symbol, kwargs::Dict)
-    local_extra = Dict{Symbol,Any}(
-        :timelimit => timelimit,
-        :interval_eval_test => interval_eval_test,
-    )
-    if !isnothing(f_real) && interval_eval_excess > 0
-        local_extra[:f_real] = f_real
-        local_extra[:interval_eval_excess] = interval_eval_excess
-    end
-    if separation_kind !== :fw
-        local_extra[:classes] = allowed_classes
-    end
-    # Override semantics: > 0 sets the value; == 0 disables the corresponding
-    # stop check (stored as `nothing` so runners skip it); < 0 leaves the
-    # method's setup.jl default in place.
-    if tol_obj_override >= 0
-        local_extra[:tol_obj] = tol_obj_override == 0 ? nothing : tol_obj_override
-    end
-    if tol_delta_override >= 0
-        local_extra[:tol_delta] = tol_delta_override == 0 ? nothing : tol_delta_override
-    end
-    if cli["tol_rc"] >= 0
-        local_extra[:tol_rc] = cli["tol_rc"] == 0 ? nothing : cli["tol_rc"]
-    end
-    if iterlimit_override > 0
-        local_extra[:max_iters] = iterlimit_override
-    end
-    # Per-class and per-method CLI forwarding lives next to each owner;
-    # the keys each apply_*! writes are no-ops for unrelated methods.
-    # Add more apply_cli_*! calls here when registering a new arg group.
-    apply_cli_separation!(local_extra, cli)
-    apply_cli_ces!(local_extra, cli)
-    apply_cli_linear!(local_extra, cli)
-    apply_cli_nn!(local_extra, cli)
-    apply_cli_cpm!(local_extra, cli)
-    apply_cli_accpm!(local_extra, cli)
-    if haskey(kwargs, :seed)
-        local_extra[:seed] = rep_seed
-    end
-    local_kwargs = merge(kwargs, local_extra)
-    @info "[rep $rep_idx] spawned $name" classes = get(local_kwargs, :classes, "n/a") timelimit = timelimit
-    t_elapsed = @elapsed begin
-        if separation_kind === :fw
-            fa, γ_ref, hist = run_method_tracked_fw(
-                name, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
-            )
-        elseif separation_kind === :fwjl
-            fa, γ_ref, hist = run_method_tracked_fwjl(
-                name, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
-            )
-        elseif separation_kind === :accpm
-            fa, γ_ref, hist = run_method_tracked_accpm(
-                name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
-            )
-        else
-            fa, γ_ref, hist = run_method_tracked(
-                name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
-            )
-        end
-    end
-    @info "[rep $rep_idx] $name done" iters = length(hist[:primal_obj]) atoms_T = fa.m final_train = hist[:primal_obj][end] final_test = hist[:test_err][end] time_s = t_elapsed
-    return (rep_idx=rep_idx, name=name, fa=fa, hist=hist, t=t_elapsed)
-end
+# `build_rep_data` and `run_one_method` now live in setup.jl (shared with
+# run_one_method.jl); both take the `cfg` NamedTuple built above.
 
 # -----------------------------------------------------------------------
 # Drive the reps × methods grid concurrently.
@@ -210,13 +60,13 @@ selected_methods = [(name, pk, kw) for (name, pk, kw) in method_kwargs if method
 
 rep_data = Vector{NamedTuple}(undef, rep)
 for r in 1:rep
-    rep_data[r] = build_rep_data(r, seed + (r - 1) * 1000)
+    rep_data[r] = build_rep_data(cfg, r, seed + (r - 1) * 1000)
 end
 
 grid_tasks = Task[]
 for r in 1:rep, (name, pk, kw) in selected_methods
     rd = rep_data[r]
-    push!(grid_tasks, Threads.@spawn run_one_method(r, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real, name, pk, kw))
+    push!(grid_tasks, Threads.@spawn run_one_method(cfg, cli, r, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real, name, pk, kw))
 end
 grid_results = [fetch(t) for t in grid_tasks]
 

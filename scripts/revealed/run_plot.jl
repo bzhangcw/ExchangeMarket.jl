@@ -187,6 +187,19 @@ function plot_risk_curves(ctx;
         ex_mn = a.has_excess ? sm(a.excess_min) : a.excess_min
         ex_mx = a.has_excess ? sm(a.excess_max) : a.excess_max
 
+        # Mask NaN and ≤ 0 (or the build_plot_ctx clamp floor 1e-8) in
+        # the excess series, so Plots.jl breaks the line at those points
+        # instead of drawing a fake floor (1e-8 came from
+        # `max.(r.hist[:excess], 1e-8)` in run_test.jl, which masks
+        # validate_surrogate failures or impossible negatives). Ribbon
+        # bounds inherit the NaN through `ex_mean .- ex_std` etc., so
+        # masking just the mean is sufficient.
+        if a.has_excess
+            ex_mean = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mean]
+            ex_mn   = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mn]
+            ex_mx   = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mx]
+        end
+
         if rep > 1
             tr_lo = max.(max.(tr_mean .- tr_std, tr_mn), 1e-8)
             tr_hi = min.(tr_mean .+ tr_std, tr_mx)

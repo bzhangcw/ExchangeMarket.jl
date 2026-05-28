@@ -113,8 +113,12 @@ function produce_revealed_preferences_plc(
     Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
 
     for k in 1:K
-        p_k = price_range[1] .+ (price_range[2] - price_range[1]) .* rand(n)
-        p_k = p_k ./ sum(p_k)
+        # Uniform on the unit simplex via Dirichlet(1,…,1): draw n iid
+        # Exp(1) and normalize. Drawing uniform on `[lo, hi]^n` then
+        # normalizing biases away from corners — same convention as
+        # produce_revealed_preferences in setup.jl.
+        e_k = -log.(rand(n))
+        p_k = e_k ./ sum(e_k)
 
         g_k = zeros(n)
         for i in 1:m

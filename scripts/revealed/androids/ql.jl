@@ -8,6 +8,20 @@
 using LinearAlgebra, Random
 using ExchangeMarket
 
+# Non-homothetic: γ_QL(p, w) has an explicit `w` regime split (cf. ql_share),
+# so each QL atom must be pinned at a fixed wealth in the LP master.
+is_homothetic(::Val{:ql}) = false
+
+"""
+    ql_config_summary(kwargs::Dict; nonh_w::Real) -> String
+
+Banner line for the QL class. `nonh_w` is the pinning wealth used by the
+caller's master (cpm.jl uses `1/max_iters`, accpm.jl uses 1.0).
+"""
+function ql_config_summary(kwargs::Dict; nonh_w::Real)
+    return @sprintf("quasi-linear-log QL: Σ_{j<n} c_j log(x_j) + x_n (w_0 = %g)", nonh_w)
+end
+
 """
     random_ql_agent(n; seed=nothing)
 
@@ -50,8 +64,12 @@ function produce_revealed_preferences_ql(
     Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
 
     for k in 1:K
-        p_k = price_range[1] .+ (price_range[2] - price_range[1]) .* rand(n)
-        p_k = p_k ./ sum(p_k)
+        # Uniform on the unit simplex via Dirichlet(1,…,1): draw n iid
+        # Exp(1) and normalize. Drawing uniform on `[lo, hi]^n` then
+        # normalizing biases away from corners — same convention as
+        # produce_revealed_preferences in setup.jl.
+        e_k = -log.(rand(n))
+        p_k = e_k ./ sum(e_k)
 
         g_k = zeros(n)
         for i in 1:m
@@ -66,6 +84,19 @@ end
 # -----------------------------------------------------------------------
 # QL separation oracle (CG separation for the QL android subfamily)
 # -----------------------------------------------------------------------
+"""
+    share(agent::QuasiLinearLogAgent, p, w) -> γ (length n)
+
+Per-class share dispatch for the GenStore-backed evaluate_test_error
+(see scripts/revealed/setup.jl). Delegates to `ql_share(agent.c, p, w)`.
+Unlike GES, the QL share is an exact closed-form piecewise-linear
+function of `(p, w)` (regime check on `p_n vs w/⟨1,c⟩` and then direct
+formulas — no Newton, no overflow path), so a `_by_opt` fallback is
+unnecessary.
+"""
+share(agent::QuasiLinearLogAgent, p::AbstractVector, w::Real) =
+    ql_share(agent.c, p, w)
+
 """
     ql_share(c, p, w) -> γ (length n)
 
@@ -95,14 +126,20 @@ function ql_share(c::AbstractVector{T}, p::AbstractVector{T}, w::Real) where T
 end
 
 """
-    solve_separation_ql(Ξ, u; w=1.0, verbose=false, kwargs...)
+    solve_separation_ql(Ξ, u, w; verbose=false, kwargs...)
 
-CG separation oracle for the QL function class. Solves
+CG separation oracle for the QL function class at *fixed* budget `w`
+(the pinning wealth w_0 for non-homothetic atoms in the LP-with-pinning
+master; see eq.wealth.hybrid.lp). Solves
     max_{c ∈ R^{n-1}_{++}}  Σ_k ⟨U e_k, γ_k(c, w)⟩
 by the regime-enumeration scheme: for each m ∈ {0,...,K}, the constrained
 subproblem reduces (after Charnes-Cooper β := ⟨1,c⟩, y := c/β) to a 1D max
 of a convex piecewise-linear function on a closed interval, hence attained
 at an endpoint. The overall optimum is the max over m and the two endpoints.
+
+`w` is positional (not a kwarg) because every non-homothetic separation
+oracle requires the pinning wealth as a mandatory input — there is no
+sensible default.
 
 Returns a NamedTuple compatible with the per-class separation oracle:
     (γ_new::Matrix{T}, params=(c, w), obj::T, class=:ql).
@@ -110,8 +147,8 @@ Returns a NamedTuple compatible with the per-class separation oracle:
 `γ_new[k, :]` holds γ_k(c*, w) evaluated at each sample's price.
 """
 function solve_separation_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
-    u::Matrix{T};
-    w::Real=1.0,
+    u::Matrix{T},
+    w::Real;
     verbose::Bool=false,
     kwargs...) where T
     K = length(Ξ)
@@ -213,4 +250,3 @@ function solve_separation_ql(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     verbose && println("QL separation: obj=$best_obj, β*=$best_β, j*=$best_jstar")
     return (γ_new=γ_new, params=(c=c_star, w=w), obj=best_obj, class=:ql)
 end
-

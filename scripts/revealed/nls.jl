@@ -228,7 +228,7 @@ end
 """
     nls_to_gamma(Ξ, Y, σ_vec, w)
 
-Convert NLS solution to the γ array format used by solve_wealth_redistribution_primal.
+Convert NLS solution to the γ array format used by solve_wealth_redist_primal.
 Returns γ of size (t, K, n) and weight vector w.
 """
 function nls_to_gamma(Ξ::Vector{Tuple{Vector{T},Vector{T}}},

@@ -11,6 +11,42 @@ using ArgParse
 import MathOptInterface as MOI
 using ExchangeMarket
 
+# Homothetic: linear-utility demand is bang-per-buck on `p` alone — independent of `w`.
+is_homothetic(::Val{:linear}) = true
+
+# ---- Persistent separation state ---------------------------------------
+# Module-local caches for the linear MILP separation oracle. The CG driver
+# previously threaded both through `cpm.jl`; that exposed solver internals
+# in the driver. They now live next to the solver that uses them.
+#
+# `_linear_model_cache` — persistent Gurobi model. When (K, n, log_p,
+#   use_indicators) match the previous call, the constraint matrix is
+#   reused and only the objective is rewritten. Saves the constraint-build
+#   / presolve cost on every CG iteration.
+#
+# `_linear_warm` — the last winning (y, γ) pair, fed to Gurobi as a
+#   MIPstart on the next separation call. Often 3–10× faster on subsequent
+#   CG rounds.
+#
+# Both are invalidated by `clear_linear_separation_cache!()`, which the CG
+# driver calls whenever `drop_zero_columns!` reshuffles γ rows (the cached
+# (y, γ) would then point at the wrong column indices).
+const _linear_model_cache = Ref{Any}(nothing)
+const _linear_warm = Ref{Union{Nothing,NamedTuple{(:y, :γ),Tuple{Vector{Float64},Matrix{Float64}}}}}(nothing)
+
+"""
+    clear_linear_separation_cache!()
+
+Invalidate both the persistent Gurobi model cache and the warm-start
+payload for the linear MILP separation oracle. Called by the CG driver
+when column indices are reshuffled (e.g., after `drop_zero_columns!`).
+"""
+function clear_linear_separation_cache!()
+    _linear_model_cache[] = nothing
+    _linear_warm[] = nothing
+    return nothing
+end
+
 # ---- CLI surface --------------------------------------------------------
 """
     register_cli_linear!(s::ArgParseSettings)
@@ -23,6 +59,10 @@ function register_cli_linear!(s::ArgParseSettings)
         "--linear-separation-indicator"
         help = "Linear separation MILP: use Gurobi indicator constraints instead of the default big-M formulation. Slower on dense u (more per-node overhead), but tighter LP relaxation on sparse data."
         action = :store_true
+        "--linear-mip-relgap"
+        help = "Gurobi `MIPGap` for the linear-separation MILP (relative optimality gap). Negative ⇒ leave the solver default (`solve_separation_linear`'s `mip_relgap` default applies)."
+        arg_type = Float64
+        default = -1.0
     end
     return s
 end
@@ -36,7 +76,26 @@ function apply_cli_linear!(local_extra::Dict, cli)
     if cli["linear_separation_indicator"]
         local_extra[:use_indicators] = true
     end
+    if cli["linear_mip_relgap"] >= 0
+        local_extra[:mip_relgap] = cli["linear_mip_relgap"]
+    end
     return local_extra
+end
+
+"""
+    linear_config_summary(kwargs::Dict) -> String
+
+Short one-line description of the linear class's solver knobs, formatted
+for cpm.jl's banner under the `linear` print_config entry. Owned here so
+the constraint encoding (indicator vs big-M) lives next to the solver
+that uses it, rather than being read out in the driver.
+"""
+function linear_config_summary(kwargs::Dict)
+    use_indicators = get(kwargs, :use_indicators, false)
+    relgap = get(kwargs, :mip_relgap, 1e-2)  # matches solve_separation_linear's default
+    return "MILP, " *
+           (use_indicators ? "indicator" : "big-M") *
+           @sprintf(", MIPGap=%g", relgap)
 end
 
 # `_gurobi_env()` (shared Gurobi env singleton) lives in gurobi_env.jl,
@@ -190,34 +249,31 @@ rather than a large-σ CES stand-in.
 Returns a NamedTuple compatible with the per-class separation oracle:
     (γ_new::Matrix{T} of shape (K, n), params=(y=log c, σ=Inf), obj, class=:linear).
 """
-function solve_separation_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_linear(
+    Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     M::Union{T,Nothing}=nothing,
     mip_timelimit::Real=60.0,
-    mip_relgap::Real=1e-4,
+    mip_relgap::Real=1e-2,
     mip_logfile::String=joinpath(tempdir(), "gurobi_linear_mip.log"),
     timelimit::Union{Real,Nothing}=nothing,   # overrides mip_timelimit when set
-    # ---- solver-side speed-ups -------------------------------------------
-    # `y_warm`, `γ_warm`: warm-start values from a previous CG iteration.
-    #   Threaded through `solve_separation_class` / `solve_separation`
-    #   as `linear_y_warm` / `linear_γ_warm` (renamed in the splat below).
     # `use_indicators`: replace big-M with JuMP indicator constraints
     #   (`γ_{k,j} ⇒ {y_j - log p_{k,j} ≥ y_{j'} - log p_{k,j'}}`). Native
     #   support in Gurobi; tighter LP relaxation but more overhead per node.
-    # `linear_model_cache`: a `Ref{Any}` from the caller. When non-`nothing`
-    #   and shape/log-prices match the previous call, the persistent
-    #   Gurobi model is reused: constraints are kept, only the objective
-    #   coefficients are rewritten. Saves the constraint-build / presolve
-    #   cost on every CG iteration. Caller wipes the Ref to force a rebuild.
-    linear_y_warm::Union{Vector{T},Nothing}=nothing,
-    linear_γ_warm::Union{Matrix{T},Nothing}=nothing,
     # Indicator constraints look tighter on paper but Gurobi pays per-node
     # callback overhead; on dense u they usually lose to a tight big-M, so
-    # we default to OFF. `--no-indicators` removed (default already off).
+    # we default to OFF.
     use_indicators::Bool=false,
-    linear_model_cache::Union{Ref,Nothing}=nothing,
     verbose::Bool=false,
-    kwargs...) where T
+    kwargs...
+) where T
+
+    # Pull persistent state from the module-level caches. The CG driver
+    # invalidates both via `clear_linear_separation_cache!()` when γ rows
+    # are reshuffled (post drop_zero_columns!).
+    linear_y_warm = isnothing(_linear_warm[]) ? nothing : _linear_warm[].y
+    linear_γ_warm = isnothing(_linear_warm[]) ? nothing : _linear_warm[].γ
+    linear_model_cache = _linear_model_cache
     # When the caller provides a remaining-budget hint, clip the MIP cap to it.
     if !isnothing(timelimit) && timelimit > 0
         mip_timelimit = min(mip_timelimit, Float64(timelimit))
@@ -256,7 +312,7 @@ function solve_separation_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
             # Update solver limits in case the caller tightened them
             # between iterations (e.g., shrinking remaining time budget).
             set_attribute(md, "TimeLimit", float(mip_timelimit))
-            set_attribute(md, "MIPGap",   float(mip_relgap))
+            set_attribute(md, "MIPGap", float(mip_relgap))
             # The subsequent set_start_value.(y, linear_y_warm) overwrites
             # the previous start; if no warm-start is supplied we let
             # Gurobi keep the previous incumbent's values, which often
@@ -331,10 +387,15 @@ function solve_separation_linear(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     obj_val = has_incumbent ? T(JuMP.objective_value(md)) : T(NaN)
 
     # Persist (or refresh) the cache entry so the next call hits the warm path.
-    if !isnothing(linear_model_cache)
-        linear_model_cache[] = (md=md, y=y, γ=γ, K=K, n=n,
-                                log_p=copy(log_p),
-                                use_indicators=use_indicators)
+    linear_model_cache[] = (md=md, y=y, γ=γ, K=K, n=n,
+        log_p=copy(log_p),
+        use_indicators=use_indicators)
+
+    # Stash the winning incumbent for the next call's MIPstart. Skip when
+    # the solver returned NaNs (no feasible point) so we don't poison the
+    # warm-start with garbage.
+    if has_incumbent && all(isfinite, y_opt)
+        _linear_warm[] = (y=Vector{Float64}(y_opt), γ=Matrix{Float64}(γ_new))
     end
 
     verbose && println("Linear separation MIP: obj=$obj_val (cache_hit=$cache_hit, status=$status, primal=$primal)")

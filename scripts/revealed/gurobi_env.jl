@@ -1,7 +1,7 @@
 # Shared Gurobi environment singleton.
 #
 # Used by every Gurobi-backed model in /revealed/ — the master LP
-# (redistribute.jl::solve_wealth_redistribution_primal) and the linear
+# (redistribute.jl::solve_wealth_redist_primal) and the linear
 # MILP separation oracle (linear.jl::solve_separation_linear). One env across
 # all calls means:
 #   - the academic-license banner prints exactly ONCE at script load,

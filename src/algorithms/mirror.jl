@@ -145,9 +145,15 @@ function iterate!(alg::MirrorDec, market::FisherMarket)
             alg.dₙ = dₙ = norm(dp)
         end
     end
+    # Safeguard: floating-point noise (shmyrev sums over signed slacks,
+    # eg denormal underflow on `pb .* exp(-large)`) can leave alg.p with
+    # tiny-negative entries. The downstream CES analytic response divides
+    # by p^(1/(1-ρ)) and then evaluates spow(x[j], ρ) on the recovered
+    # allocation; a negative x[j] of magnitude ~1e-34 throws a DomainError
+    # in `x^ρ` for fractional ρ. Clamp non-negative here to keep that
+    # invariant intact without changing the algorithm's intended step.
+    @. alg.p = max(alg.p, zero(eltype(alg.p)))
     alg.gₙ = gₙ = norm(alg.∇)
-
-    # @assert all(alg.p .>= 0)
     # check pareto gap if optimizer is not CESAnalytic
     _Δu = 0.0
     if alg.optimizer.name != "CESAnalytic"

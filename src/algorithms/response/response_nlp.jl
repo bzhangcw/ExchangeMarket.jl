@@ -76,4 +76,4 @@ function __optim_newton(;
     return nothing
 end
 
-ONR = OptimjlNewtonResponse = ResponseOptimizer(__optim_newton, :nlp, "Optim.jl-Newton")
+ONR = OptimNewtonResponse = ResponseOptimizer(__optim_newton, :nlp, "Optim.jl-Newton")

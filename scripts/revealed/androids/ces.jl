@@ -15,19 +15,39 @@ using LogExpFunctions: logsumexp
 using ArgParse
 using ExchangeMarket
 
+# Homothetic: γ(p, w) = γ(p) — no wealth dependence in the CES share.
+is_homothetic(::Val{:ces}) = true
+
 # ---- CLI surface --------------------------------------------------------
+# Defaults for the CES σ search range. CES is only defined for σ > -1
+# (the Leontief limit); the LBFGS step uses a hardcoded strict-interior
+# floor (-0.9) one step above that boundary because the downstream
+# (y, σ) → (c, ρ) recovery (ρ = σ/(1+σ)) diverges as σ ↘ -1.
+# These were previously file-level `const`s; they are now CLI knobs so
+# σ-grid extents (for inversion) and the LBFGS upper bound (for the free-σ
+# search) can be tuned per run without recompiling.
+const _CES_SIGMA_LOWER_DEFAULT = -1.0
+const _CES_SIGMA_UPPER_DEFAULT = 20.0
+
 """
     register_cli_ces!(s::ArgParseSettings)
 
-Add the "Separation: CES" arg group (`--stage1-ces-rho`).
+Add the "Separation: CES" arg group: `--ces-sigma-lower`, `--ces-sigma-upper`.
+These tune the σ search range for the free-σ LBFGS step
+(`solve_separation_lbfgs_ces`) and the σ grid for per-sample inversion
+(`solve_separation_inversion_ces`).
 """
 function register_cli_ces!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: CES")
     @add_arg_table! s begin
-        "--stage1-ces-rho"
-        help = "cgma only: after the stage-2 → stage-1 demotion, restrict the CES pricer to a fixed ρ (corresponding σ = ρ/(1-ρ)) instead of the free-σ search. ρ near 1 (e.g. 0.97) yields a near-linear CES boundary cleanup. ≤ 0 (default) keeps the unrestricted free-σ behavior."
+        "--ces-sigma-lower"
+        help = "Lower bound on σ for the CES inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so this is the conceptual floor."
         arg_type = Float64
-        default = -1.0
+        default = _CES_SIGMA_LOWER_DEFAULT
+        "--ces-sigma-upper"
+        help = "Upper bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_UPPER_DEFAULT); raise for near-linear (σ → ∞) regimes."
+        arg_type = Float64
+        default = _CES_SIGMA_UPPER_DEFAULT
     end
     return s
 end
@@ -35,25 +55,73 @@ end
 """
     apply_cli_ces!(local_extra::Dict, cli)
 
-Forward CES-separation CLI values into the runner kwargs.
+Forward CES-separation σ-bound CLI values into the runner kwargs, which
+solve_separation_class threads down to the CES oracles.
 """
 function apply_cli_ces!(local_extra::Dict, cli)
-    if cli["stage1_ces_rho"] > 0
-        local_extra[:stage1_ces_rho] = cli["stage1_ces_rho"]
-    end
+    local_extra[:ces_sigma_lower] = cli["ces_sigma_lower"]
+    local_extra[:ces_sigma_upper] = cli["ces_sigma_upper"]
     return local_extra
 end
 
-# Conceptual CES parameter ranges, used as the source of truth for the
-# Fminbox / LBFGS bounds in `solve_separation_lbfgs_ces` and the σ grid in
-# `solve_separation_inversion_ces`. CES is only defined for σ > -1, but
-# `1/(1+σ)` explodes as σ ↘ -1, so the LBFGS step uses a strict-interior
-# floor `STRICT_SIGMA_LOWER` well inside the boundary.
-const LOWER_SIGMA_BOUND = -1.0
-const UPPER_SIGMA_BOUND = 30.0
+"""
+    ces_config_summary(kwargs::Dict; is_multicut::Bool) -> String
+
+Short one-line description of the CES class's separation solver, formatted
+for cpm.jl's banner under the `ces` print_config entry. Owned here so the
+solver knobs (σ box, separation regime) live next to the code that uses
+them rather than being hardcoded in the driver.
+"""
+function ces_config_summary(kwargs::Dict; is_multicut::Bool)
+    lo = get(kwargs, :ces_sigma_lower, _CES_SIGMA_LOWER_DEFAULT)
+    hi = get(kwargs, :ces_sigma_upper, _CES_SIGMA_UPPER_DEFAULT)
+    if is_multicut
+        return @sprintf("Inversion (σ [%g, %g] × LBFGS refine)", lo, hi)
+    else
+        return @sprintf("LBFGS (σ ∈ [%g, %g])", lo, hi)
+    end
+end
+
+# ---- Ground-truth CES market knobs --------------------------------------
+"""
+    register_cli_ces_market!(s::ArgParseSettings)
+
+Add the "Market: CES" arg group — knobs for building the ground-truth
+CES market when `--market-type ces`. Currently the per-agent ρ sampling
+range, which used to be hardcoded as ρ ∈ [-3.5, 0.8) in run_test.jl.
+"""
+function register_cli_ces_market!(s::ArgParseSettings)
+    add_arg_group!(s, "Market: CES")
+    @add_arg_table! s begin
+        "--ces-rho-low"
+        help = "Lower bound for per-agent ρ sampling when --market-type ces. CES is defined for ρ ∈ (-∞, 1); large-negative ρ → Leontief, ρ → 1 → linear. Default -3.5 (matches prior hardcoded range)."
+        arg_type = Float64
+        default = -3.5
+        "--ces-rho-high"
+        help = "Upper bound for per-agent ρ sampling (exclusive). Default 0.8 (matches prior hardcoded range; > 0.95 may produce near-linear preferences that hurt CG convergence)."
+        arg_type = Float64
+        default = 0.9
+    end
+    return s
+end
+
+"""
+    ces_rho_range_from_cli(cli) -> (lo::Float64, hi::Float64)
+
+Bundle the parsed CES market-build flags. Asserts `lo < hi`.
+"""
+function ces_rho_range_from_cli(cli)
+    lo, hi = cli["ces_rho_low"], cli["ces_rho_high"]
+    @assert lo < hi "--ces-rho-low ($lo) must be strictly less than --ces-rho-high ($hi)"
+    return (lo, hi)
+end
+
+# `y` (log-coefficient) box for the LBFGS step in
+# `solve_separation_lbfgs_ces`. Kept as `const` because the CES gauge
+# `max(y) = 0` is enforced by the LBFGS-projected solver itself, and
+# this generous box only serves as a sanity cap.
 const LOWER_Y_BOUND = -100.0
 const UPPER_Y_BOUND = 100.0
-const STRICT_SIGMA_LOWER = -0.9
 
 # -----------------------------------------------------------------------
 # Standalone CES demand via conic programming
@@ -213,8 +281,17 @@ function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     y_init::Union{Vector{T},Nothing}=nothing,
     σ_init::T=0.5,
+    # σ upper bound for the LBFGS box; same value the inversion σ-grid uses.
+    ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
     timelimit::Union{Real,Nothing}=nothing,
-    verbose=false) where T
+    verbose=false,
+    kwargs...) where T
+
+    # Strict-interior floor for σ. The softmax objective itself is fine
+    # at σ = -1, but the (y, σ) → (c, ρ) recovery used downstream by
+    # `add_column_to_market!` (ρ = σ/(1+σ), c = exp(y/(1+σ))) diverges
+    # there. -0.98 keeps the LBFGS box one step above the boundary.
+    strict_sigma_lower = T(-0.98)
 
     K = length(Ξ)
     n = length(Ξ[1][1])
@@ -249,13 +326,13 @@ function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
-    lower = vcat(fill(T(LOWER_Y_BOUND), n), T(STRICT_SIGMA_LOWER))
-    upper = vcat(fill(T(UPPER_Y_BOUND), n), T(UPPER_SIGMA_BOUND))
+    lower = vcat(fill(T(LOWER_Y_BOUND), n), strict_sigma_lower)
+    upper = vcat(fill(T(UPPER_Y_BOUND), n), T(ces_sigma_upper))
     # Strict-interior clamps (Fminbox warns and nudges if x0 sits on a bound).
     ϵ = T(1e-6)
     y0 = isnothing(y_init) ? zeros(T, n) :
          clamp.(y_init, T(LOWER_Y_BOUND) + ϵ, T(UPPER_Y_BOUND) - ϵ)
-    σ0 = clamp(σ_init, T(STRICT_SIGMA_LOWER) + ϵ, T(UPPER_SIGMA_BOUND) - ϵ)
+    σ0 = clamp(σ_init, strict_sigma_lower + ϵ, T(ces_sigma_upper) - ϵ)
     x0 = vcat(y0, σ0)
 
     _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
@@ -332,7 +409,10 @@ function solve_separation_fix_σ_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         neg_objective, neg_gradient!,
         y0,
         LBFGS(),
-        Optim.Options(; show_trace=verbose, show_every=50, iterations=1000, g_tol=1e-8, _tlim_opts...)
+        Optim.Options(;
+            show_trace=verbose, show_every=50, iterations=1000,
+            g_tol=1e-8, _tlim_opts...
+        )
     )
 
     y_opt = Optim.minimizer(result)
@@ -394,7 +474,12 @@ Returns all K candidate columns as a vector of (y, σ, γ, obj).
 function solve_separation_inversion_ces(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
-    σ_grid=range(LOWER_SIGMA_BOUND, UPPER_SIGMA_BOUND, length=50)
+    # σ-grid endpoints (50 grid points). Defaults reproduce the previous
+    # `const` extents.
+    ces_sigma_lower::Real=_CES_SIGMA_LOWER_DEFAULT,
+    ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
+    σ_grid=range(ces_sigma_lower, ces_sigma_upper, length=50),
+    kwargs...
 ) where T
 
     K = length(Ξ)
@@ -473,8 +558,16 @@ function solve_separation_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     verbose::Bool=false,
     timelimit::Union{Real,Nothing}=nothing,
     kwargs...) where T
-    y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(Ξ, u; verbose=verbose)
-    y_opt, σ_opt, γ_new, obj = solve_separation_lbfgs_ces(Ξ, u;
-        y_init=y_lp, σ_init=σ_lp, timelimit=timelimit, verbose=verbose)
+    y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(
+        Ξ, u; verbose=verbose
+    )
+    # Thread the CES σ-bound kwargs (ces_strict_sigma_lower, ces_sigma_upper)
+    # through to the LBFGS box. Other kwargs (e.g., from other classes)
+    # are silently absorbed by `solve_separation_lbfgs_ces`'s `kwargs...`.
+    y_opt, σ_opt, γ_new, obj = solve_separation_lbfgs_ces(
+        Ξ, u;
+        y_init=y_lp, σ_init=σ_lp, timelimit=timelimit, verbose=verbose,
+        kwargs...
+    )
     return (γ_new=γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces)
 end

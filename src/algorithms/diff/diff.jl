@@ -145,9 +145,6 @@ function __ces_hess!(alg, market::FisherMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
     if alg.linsys == :direct
         __ces_compute_exact_hess_optimized!(alg, market)
-    elseif alg.linsys == :direct_afcon
-        # compute the exact Hessian of the affine-constrained problem
-        __ces_compute_exact_hess_afcon!(alg, market)
     elseif alg.linsys == :DRq
         __ces_compute_approx_hess_drq!(alg, market)
     elseif alg.linsys == :krylov

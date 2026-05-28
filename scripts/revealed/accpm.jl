@@ -33,7 +33,7 @@
 #   - test_err / excess / drop / banner: same as cpm.jl.
 #
 # Depends on:
-#   - solve_wealth_redistribution_primal       (redistribute.jl; final + μ_ub refresh)
+#   - solve_wealth_redist_primal       (redistribute.jl; final + μ_ub refresh)
 #   - drop_zero_columns!, add_to_gamma!,
 #     add_column_to_market!, format_class,
 #     solve_separation                 (separation.jl)
@@ -298,7 +298,7 @@ end
 # "T(lp)" replaces the "class" cell with the analytic-center solver
 # status when interesting.
 const ACCPM_TABLE = IterTable(
-    ["k", "primal", "test", "rc", "Δ(μ_ub)", "T", "class", "t(s)"],
+    ["k", "primal", "test", "|∇|", "Δ(μ_ub)", "T", "class", "t(s)"],
     ["%5d", "%10.3e", "%10.3e", "%10.3e", "%10.3e", "%5d", "%14s", "%10.4f"],
     Any[1, 1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3, 1, "ces×1", 1.234],
 )
@@ -324,7 +324,7 @@ Find the analytic center of the wealth-redistribution dual polytope:
     s.t. ⟨u, γ_i⟩ < μ  ∀i,   μ < μ_ub,   ‖u_k‖_1 < 1  ∀k
 
 over (u ∈ ℝ^{K×n}, μ ∈ ℝ) — matches `style=:inf` in
-solve_wealth_redistribution_dual (signed u, L1 ball lifted via auxiliaries
+solve_wealth_redist_dual (signed u, L1 ball lifted via auxiliaries
 a_{kj} ≥ ±u_{kj} with Σ_j a_{kj} ≤ 1).
 
 Solved as a smooth convex program via Mosek using the exponential-cone
@@ -339,7 +339,29 @@ function solve_analytic_center(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     m, K, n = size(γ)
     model = Model(Mosek.Optimizer)
-    verbose || set_silent(model)
+    if verbose
+        set_attribute(model, "MSK_IPAR_LOG", 10)
+    else
+        # `set_silent` alone isn't enough for Mosek — it leaves the IPM
+        # iteration banner on. Use the native MSK_IPAR_LOG=0 to fully
+        # silence.
+        set_silent(model)
+        set_attribute(model, "MSK_IPAR_LOG", 0)
+    end
+    # Cap Mosek's IPM at 60 iterations: on near-vertex CES instances
+    # (large m, high sparsity) the exp-cone IPM converges within ~15
+    # iters then grinds with no progress at MU ≈ 1e-10. Without this cap
+    # Mosek can spend 100+ wasted iterations per AC call; with it, the
+    # per-call cost is bounded. The returned u is the best incumbent
+    # Mosek had — the same accuracy as letting it run to its internal
+    # default cap.
+    set_attribute(model, "MSK_IPAR_INTPNT_MAX_ITERATIONS", 60)
+    # Slightly looser tolerances than the defaults so termination is
+    # reached at the natural plateau instead of hitting the iter cap.
+    # The CG loop doesn't need exp-cone solutions tighter than ~1e-6.
+    set_attribute(model, "MSK_DPAR_INTPNT_CO_TOL_PFEAS",   1e-6)
+    set_attribute(model, "MSK_DPAR_INTPNT_CO_TOL_DFEAS",   1e-6)
+    set_attribute(model, "MSK_DPAR_INTPNT_CO_TOL_REL_GAP", 1e-6)
 
     @variable(model, u[1:K, 1:n])
     @variable(model, μ)
@@ -483,20 +505,16 @@ function run_method_tracked_accpm(name::Symbol, separation_kind::Symbol,
         print_config("method",            String(name))
         print_config("alias",             "ACCPM (analytic-center CG)")
         print_config("classes",           join(String.(classes), ", "))
-        :ces      in classes && print_config("ces",      "free σ via LBFGS, warm-started by dual-LP"; indent=true)
-        :linear   in classes && print_config("linear",
-            "Gurobi MILP, " *
-            (use_indicators_kw ? "indicator constraints" : "big-M (2·max|log p|)") *
-            ", warm-start + model cache"; indent=true)
-        :leontief in classes && print_config("leontief", "fixed σ = -1 via LBFGS"; indent=true)
-        :ql       in classes && print_config("ql",       "piecewise-linear-concave QL (w = 1)"; indent=true)
+        # Per-class banner rows via the shared dispatcher (see separation.jl).
+        # ACCPM pins QL/GES atoms at w = 1 (analytic-center variant).
+        print_class_configs(classes, kwargs; is_multicut=false, nonh_w=1.0)
         print_config("K (training samples)", K_train)
         print_config("n (goods)",            n)
         print_config("max_iters",            max_iters)
         print_config("timelimit (s)",        @sprintf("%g", Float64(timelimit)))
         print_config("tol_obj",              isnothing(tol_obj)   ? "off" : @sprintf("%g", tol_obj))
         print_config("tol_delta",            isnothing(tol_delta) ? "off" : @sprintf("%g", tol_delta))
-        print_config("tol_rc",               isnothing(tol_rc)    ? "off" : @sprintf("%g", tol_rc))
+        print_config("tol_|∇|",              isnothing(tol_rc)    ? "off" : @sprintf("%g", tol_rc))
         print_config("ac_solver",            String(ac_solver))
         print_config("multicut",             multicut)
         print_config("interval_primal",      interval_primal)
@@ -538,7 +556,7 @@ function run_method_tracked_accpm(name::Symbol, separation_kind::Symbol,
         # 2. Optional LP-master solve to refresh μ_ub and record primal_obj.
         if interval_primal > 0 && (iter % interval_primal == 0)
             _remaining = isfinite(timelimit) ? max(1.0, timelimit - (time() - _t0)) : nothing
-            w_lp, _, model_p, _, _ = solve_wealth_redistribution_primal(Ξ_train, γ_ref[];
+            w_lp, _, model_p, _, _ = solve_wealth_redist_primal(Ξ_train, γ_ref[];
                 verbose=false, timelimit=_remaining, cache=master_cache)
             last_primal_obj[] = objective_value(model_p) / K_train
             # Tighten μ_ub from incumbent (LP primal == LP dual at optimum,
@@ -638,7 +656,7 @@ function run_method_tracked_accpm(name::Symbol, separation_kind::Symbol,
         if !isnothing(tol_rc) && (rc_val > 0.0) && (rc_val <= tol_rc)
             _log_row(rc=rc_val, class_str=class_str)
             verbose && print_continuation(ACCPM_TABLE,
-                @sprintf("converged (rc = %.2e ≤ tol_rc=%g, %s)",
+                @sprintf("converged (|∇| = %.2e ≤ tol_|∇|=%g, %s)",
                          rc_val, tol_rc, class_str))
             break
         end
@@ -680,7 +698,7 @@ function run_method_tracked_accpm(name::Symbol, separation_kind::Symbol,
 
     # Final LP solve — recover w for the surrogate market and the closing
     # primal_obj value (analytic center alone doesn't give a primal).
-    w_final, _, model_p_final, _, _ = solve_wealth_redistribution_primal(Ξ_train, γ_ref[];
+    w_final, _, model_p_final, _, _ = solve_wealth_redist_primal(Ξ_train, γ_ref[];
         verbose=false, cache=master_cache)
     if drop
         drop_zero_columns!(fa, γ_ref, w_final)

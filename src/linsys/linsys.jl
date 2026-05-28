@@ -12,7 +12,7 @@ end
 function linsolve!(alg, market::FisherMarket)
     alg.linsys_msg = ""
     if alg.option_step == :affinesc
-        if alg.linsys ∈ [:direct, :direct_afcon]
+        if alg.linsys == :direct
             return __direct_afsc!(alg, market)
         elseif alg.linsys == :krylov
             return __krylov_afsc!(alg, market)

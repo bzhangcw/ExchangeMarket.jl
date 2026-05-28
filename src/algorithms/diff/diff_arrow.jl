@@ -10,14 +10,6 @@ function __ces_hess!(alg, market::ArrowDebreuMarket)
     # compute 1/σ w_i * log(cs_i'p^{-σ})
     if alg.linsys == :direct
         __ces_compute_exact_hess!(alg, market)
-    elseif alg.linsys == :direct_afcon
-        # compute the exact Hessian of the affine-constrained problem
-        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
-    elseif alg.linsys == :DRq
-        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
-    elseif alg.linsys == :krylov
-        # no preprocessing needed
-        throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     else
         throw(ArgumentError("linsys not supported: $(alg.linsys)"))
     end

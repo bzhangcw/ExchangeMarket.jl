@@ -16,25 +16,18 @@ function play!(
     timed=true,
 )
     _ts = time()
-    ws = market.workspace
-
-    if ws !== nothing
-        # Batched path: GPU or CPU dense — all agents via matrix broadcasts
-        sample!(alg.sampler, market)  # set batchsize for grad!
-        σ_scalar = market.σ[1]  # assumes uniform ρ
-        _play_batched!(ws, alg.p, σ_scalar)
-    else
-        # Per-agent path: CPU — AgentView + SparseColRef + @threads
-        sample!(alg.sampler, market)
-        if isempty(market.agents)
-            init_agents!(market)
-        end
-        indices = all ? (1:market.m) : alg.sampler.indices
-        Threads.@threads for i in indices
-            solve_substep!(alg, market.agents[i], market; ϵᵢ=ϵᵢ)
-        end
-        market.sumx .= sum(market.x[:, alg.sampler.indices]; dims=2)[:]
+    # Per-agent path (CPU): AgentView + SparseColRef + @threads. The
+    # GPU / batched-compute path has been removed; CPU per-agent is
+    # the only mode.
+    sample!(alg.sampler, market)
+    if isempty(market.agents)
+        init_agents!(market)
     end
+    indices = all ? (1:market.m) : alg.sampler.indices
+    Threads.@threads for i in indices
+        solve_substep!(alg, market.agents[i], market; ϵᵢ=ϵᵢ)
+    end
+    market.sumx .= sum(market.x[:, alg.sampler.indices]; dims=2)[:]
 
     timed && (alg.tₗ += time() - _ts)
     verbose && validate(market, alg.μ)

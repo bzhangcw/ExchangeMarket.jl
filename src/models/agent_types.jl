@@ -70,10 +70,30 @@ struct QuasiLinearLogAgent <: AgentType
 end
 
 """
+    GESAgent <: AgentType
+
+Generalized-elasticity-of-substitution (GES) utility:
+  u(x) = Σ_j c_j x_j^{r_j},  c ∈ ℝ^n_{++},  r ∈ (0, 1)^n,
+with per-good elasticity σ_j := r_j / (1 - r_j) > 0. Non-homothetic
+whenever r is not constant; r_j ≡ r recovers CES.
+
+Fields:
+- `n`: number of goods
+- `c`: coefficient vector of length n, strictly positive
+- `r`: elasticity exponents of length n, each in (0, 1)
+"""
+struct GESAgent <: AgentType
+    n::Int
+    c::Vector{Float64}   # length n, strictly positive
+    r::Vector{Float64}   # length n, each in (0, 1)
+end
+
+"""
     agent_type(ρ, σ) -> AgentType
 
 Derive the agent type from CES parameter ρ.
 """
 @inline function agent_type(ρ::Float64, σ::Float64)
+    @assert σ == (ρ / (1 - ρ)) "σ must be ρ/(1-ρ)"
     ρ == 1.0 ? LinearAgent() : CESAgent(ρ, σ)
 end

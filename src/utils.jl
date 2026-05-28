@@ -7,13 +7,17 @@ using Printf, LaTeXStrings, Dates
 
 current_date() = Dates.format(Dates.now(), "yyyymmddHH")
 
-LOGDIR = joinpath(@__DIR__, "../logs")
-RESULTSDIR = joinpath(@__DIR__, "../results", "$(current_date())")
-if !isdir(LOGDIR)
-    mkdir(LOGDIR)
-end
-if !isdir(RESULTSDIR)
-    mkpath(RESULTSDIR)
+const _RESULTS_ROOT = joinpath(@__DIR__, "../results")
+const LOGDIR = joinpath(@__DIR__, "../logs")
+
+# Always call `current_results_dir()` for a date-bucketed output dir —
+# the date is re-evaluated on every call, so it can't go stale across a
+# date boundary or because of an older precompile cache.
+current_results_dir() = joinpath(_RESULTS_ROOT, current_date())
+
+function __init__()
+    isdir(LOGDIR) || mkpath(LOGDIR)
+    isdir(_RESULTS_ROOT) || mkpath(_RESULTS_ROOT)
 end
 
 # -----------------------------------------------------------------------
@@ -40,8 +44,10 @@ end
 
 # projection back (stepsize control)
 proj(x) = x < 0 ? Inf : x
-# safe power function
-spow(x, y) = x == 0.0 ? 0.0 : x^y
+# safe power function: x ≤ 0 → 0 (sub-ulp negatives from FP noise in the
+# CES analytic demand reach `utility` and would otherwise throw a DomainError
+# from `x^y` for fractional y).  Symmetric with `slog` below.
+spow(x, y) = x > 0 ? x^y : 0.0
 # safe log: log(0) → 0
 slog(x) = x > 0 ? log(x) : 0.0
 
@@ -61,7 +67,7 @@ end
 # --------------------------------------
 const HEADER = [
     "ExchangeMarket.jl: A Julia Package for Exchange Market",
-    "© Chuwen Zhang (2024)",
+    "© Chuwen Zhang (2025)",
 ]
 
 function format_header(log)

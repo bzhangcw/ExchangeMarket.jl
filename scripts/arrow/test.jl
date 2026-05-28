@@ -11,7 +11,12 @@ if bool_multiple
     # elasticity of substitution is 1+σ = 0.25
     γ = 1e3
     bool_run_conic = false
-    f0 = FisherMarket(m, n; ρ=ρ, bool_unit=true)
+    f0 = let
+        ws = cpu_workspace(n)
+        add_ces!(ws, m; ρ=ρ, bool_unit=true)
+        ws.ces.w ./= sum(ws.ces.w)
+        FisherMarket(ws)
+    end
     f0.c = [a 1; 1 a]
     b = [1 0; 0 1]
     pₛ = [0.01900011819411108, 0.8739340528089753]
@@ -29,7 +34,12 @@ else
     end
     ρ = -38
     γ = 1e3
-    f0 = FisherMarket(m, n; ρ=ρ, bool_unit=true, sparse=false)
+    f0 = let
+        ws = cpu_workspace(n)
+        add_ces!(ws, m; ρ=ρ, bool_unit=true, sparse=false)
+        ws.ces.w ./= sum(ws.ces.w)
+        FisherMarket(ws)
+    end
 end
 bool_run_conic = false
 

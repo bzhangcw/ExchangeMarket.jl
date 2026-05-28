@@ -1,18 +1,127 @@
 # -----------------------------------------------------------------------
-# CES-specific pricing primitives.
+# CES-specific separation primitives.
 #   - Standalone CES demand via conic programming
 #   - Recovery of CES parameters (y, σ) from observed shares
-#   - Pricing subproblems (non-convex, convex surrogate, fixed-σ, dual LP,
+#   - Separation subproblems (non-convex, convex surrogate, fixed-σ, dual LP,
 #     inversion-multicut)
 #   - Conversion (y, σ) → (c, ρ) and market expansion
-# Required by pricing.jl (multi-class dispatcher) and used directly by
+# Required by separation.jl (per-class separation oracle) and used directly by
 # notebooks for ad-hoc experiments.
 # -----------------------------------------------------------------------
 
 using LinearAlgebra, SparseArrays
 using Optim
 using LogExpFunctions: logsumexp
+using ArgParse
 using ExchangeMarket
+
+# Homothetic: γ(p, w) = γ(p) — no wealth dependence in the CES share.
+is_homothetic(::Val{:ces}) = true
+
+# ---- CLI surface --------------------------------------------------------
+# Defaults for the CES σ search range. CES is only defined for σ > -1
+# (the Leontief limit); the LBFGS step uses a hardcoded strict-interior
+# floor (-0.9) one step above that boundary because the downstream
+# (y, σ) → (c, ρ) recovery (ρ = σ/(1+σ)) diverges as σ ↘ -1.
+# These were previously file-level `const`s; they are now CLI knobs so
+# σ-grid extents (for inversion) and the LBFGS upper bound (for the free-σ
+# search) can be tuned per run without recompiling.
+const _CES_SIGMA_LOWER_DEFAULT = -1.0
+const _CES_SIGMA_UPPER_DEFAULT = 20.0
+
+"""
+    register_cli_ces!(s::ArgParseSettings)
+
+Add the "Separation: CES" arg group: `--ces-sigma-lower`, `--ces-sigma-upper`.
+These tune the σ search range for the free-σ LBFGS step
+(`solve_separation_lbfgs_ces`) and the σ grid for per-sample inversion
+(`solve_separation_inversion_ces`).
+"""
+function register_cli_ces!(s::ArgParseSettings)
+    add_arg_group!(s, "Separation: CES")
+    @add_arg_table! s begin
+        "--ces-sigma-lower"
+        help = "Lower bound on σ for the CES inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so this is the conceptual floor."
+        arg_type = Float64
+        default = _CES_SIGMA_LOWER_DEFAULT
+        "--ces-sigma-upper"
+        help = "Upper bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_UPPER_DEFAULT); raise for near-linear (σ → ∞) regimes."
+        arg_type = Float64
+        default = _CES_SIGMA_UPPER_DEFAULT
+    end
+    return s
+end
+
+"""
+    apply_cli_ces!(local_extra::Dict, cli)
+
+Forward CES-separation σ-bound CLI values into the runner kwargs, which
+solve_separation_class threads down to the CES oracles.
+"""
+function apply_cli_ces!(local_extra::Dict, cli)
+    local_extra[:ces_sigma_lower] = cli["ces_sigma_lower"]
+    local_extra[:ces_sigma_upper] = cli["ces_sigma_upper"]
+    return local_extra
+end
+
+"""
+    ces_config_summary(kwargs::Dict; is_multicut::Bool) -> String
+
+Short one-line description of the CES class's separation solver, formatted
+for cpm.jl's banner under the `ces` print_config entry. Owned here so the
+solver knobs (σ box, separation regime) live next to the code that uses
+them rather than being hardcoded in the driver.
+"""
+function ces_config_summary(kwargs::Dict; is_multicut::Bool)
+    lo = get(kwargs, :ces_sigma_lower, _CES_SIGMA_LOWER_DEFAULT)
+    hi = get(kwargs, :ces_sigma_upper, _CES_SIGMA_UPPER_DEFAULT)
+    if is_multicut
+        return @sprintf("Inversion (σ [%g, %g] × LBFGS refine)", lo, hi)
+    else
+        return @sprintf("LBFGS (σ ∈ [%g, %g])", lo, hi)
+    end
+end
+
+# ---- Ground-truth CES market knobs --------------------------------------
+"""
+    register_cli_ces_market!(s::ArgParseSettings)
+
+Add the "Market: CES" arg group — knobs for building the ground-truth
+CES market when `--market-type ces`. Currently the per-agent ρ sampling
+range, which used to be hardcoded as ρ ∈ [-3.5, 0.8) in run_test.jl.
+"""
+function register_cli_ces_market!(s::ArgParseSettings)
+    add_arg_group!(s, "Market: CES")
+    @add_arg_table! s begin
+        "--ces-rho-low"
+        help = "Lower bound for per-agent ρ sampling when --market-type ces. CES is defined for ρ ∈ (-∞, 1); large-negative ρ → Leontief, ρ → 1 → linear. Default -3.5 (matches prior hardcoded range)."
+        arg_type = Float64
+        default = -3.5
+        "--ces-rho-high"
+        help = "Upper bound for per-agent ρ sampling (exclusive). Default 0.8 (matches prior hardcoded range; > 0.95 may produce near-linear preferences that hurt CG convergence)."
+        arg_type = Float64
+        default = 0.9
+    end
+    return s
+end
+
+"""
+    ces_rho_range_from_cli(cli) -> (lo::Float64, hi::Float64)
+
+Bundle the parsed CES market-build flags. Asserts `lo < hi`.
+"""
+function ces_rho_range_from_cli(cli)
+    lo, hi = cli["ces_rho_low"], cli["ces_rho_high"]
+    @assert lo < hi "--ces-rho-low ($lo) must be strictly less than --ces-rho-high ($hi)"
+    return (lo, hi)
+end
+
+# `y` (log-coefficient) box for the LBFGS step in
+# `solve_separation_lbfgs_ces`. Kept as `const` because the CES gauge
+# `max(y) = 0` is enforced by the LBFGS-projected solver itself, and
+# this generous box only serves as a sanity cap.
+const LOWER_Y_BOUND = -100.0
+const UPPER_Y_BOUND = 100.0
 
 # -----------------------------------------------------------------------
 # Standalone CES demand via conic programming
@@ -147,7 +256,7 @@ function add_to_market!(f1::FisherMarket, c_new::Vector{T}, ρ_new::T, w_new::T)
 end
 
 #=
-Two formulations for the CES pricing problem:
+Two formulations for the CES separation problem:
 
 1. ORIGINAL (non-convex):
    max_{y, σ > 0} Σ_k u_k^T γ_k = Σ_k u_k^T softmax(y - σ log p_k)
@@ -155,23 +264,34 @@ Two formulations for the CES pricing problem:
 2. CONVEX SURROGATE:
    max_{y, σ > 0} Σ_k u_k^T log γ_k
    = Σ_k [u_k^T (y - σ log p_k) - (1^T u_k) · lse(y - σ log p_k)]
+   # @note, this will not be implemented.
 
 The convex surrogate replaces γ with log(γ), making it concave in (y, σ).
 =#
 
 """
-    solve_pricing(Ξ, u; y_init=nothing, σ_init=0.5, verbose=false)
+    solve_separation_lbfgs_ces(Ξ, u; y_init=nothing, σ_init=0.5, verbose=false)
 
-Solve the ORIGINAL pricing problem (non-convex):
+Solve the ORIGINAL separation problem (non-convex):
     max_{y ∈ ℝ^n, σ > -1} Σ_k u_k^T γ_k = Σ_k u_k^T softmax(y - σ log p_k)
 
 Returns: y, σ, γ_new, obj_val
 """
-function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     y_init::Union{Vector{T},Nothing}=nothing,
     σ_init::T=0.5,
-    verbose=false) where T
+    # σ upper bound for the LBFGS box; same value the inversion σ-grid uses.
+    ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
+    timelimit::Union{Real,Nothing}=nothing,
+    verbose=false,
+    kwargs...) where T
+
+    # Strict-interior floor for σ. The softmax objective itself is fine
+    # at σ = -1, but the (y, σ) → (c, ρ) recovery used downstream by
+    # `add_column_to_market!` (ρ = σ/(1+σ), c = exp(y/(1+σ))) diverges
+    # there. -0.98 keeps the LBFGS box one step above the boundary.
+    strict_sigma_lower = T(-0.98)
 
     K = length(Ξ)
     n = length(Ξ[1][1])
@@ -206,17 +326,22 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         end
     end
 
-    lower = vcat(fill(-100, n), T(-0.9))
-    upper = vcat(fill(100, n), T(30.0))
-    y0 = isnothing(y_init) ? zeros(T, n) : clamp.(y_init, -100, 100)
-    σ0 = clamp(σ_init, T(-0.9), T(30.0))
+    lower = vcat(fill(T(LOWER_Y_BOUND), n), strict_sigma_lower)
+    upper = vcat(fill(T(UPPER_Y_BOUND), n), T(ces_sigma_upper))
+    # Strict-interior clamps (Fminbox warns and nudges if x0 sits on a bound).
+    ϵ = T(1e-6)
+    y0 = isnothing(y_init) ? zeros(T, n) :
+         clamp.(y_init, T(LOWER_Y_BOUND) + ϵ, T(UPPER_Y_BOUND) - ϵ)
+    σ0 = clamp(σ_init, strict_sigma_lower + ϵ, T(ces_sigma_upper) - ϵ)
     x0 = vcat(y0, σ0)
 
+    _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
+                 (time_limit=Float64(timelimit),)
     result = optimize(
         neg_objective, neg_gradient!,
         lower, upper, x0,
         Fminbox(LBFGS(; m=15)),
-        Optim.Options(show_trace=verbose, iterations=1000, g_tol=1e-8)
+        Optim.Options(; show_trace=verbose, iterations=1000, g_tol=1e-8, _tlim_opts...)
     )
 
     x_opt = Optim.minimizer(result)
@@ -225,84 +350,14 @@ function solve_pricing(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     γ_new = produce_gamma(Ξ, y_opt, σ_opt)
 
-    verbose && println("CES pricing: σ=$σ_opt, obj=$obj_val")
+    verbose && println("CES separation: σ=$σ_opt, obj=$obj_val")
     return y_opt, σ_opt, γ_new, obj_val
 end
 
 """
-    solve_pricing_convex(Ξ, u; σ_init=0.5, verbose=false)
+    solve_separation_fix_σ_ces(Ξ, u, σ; y_init=nothing, verbose=false)
 
-Solve the CONVEX SURROGATE pricing problem:
-    max_{y ∈ ℝ^n, σ > -1} Σ_k u_k^T log γ_k
-
-This is concave in (y, σ), guaranteeing global optimum.
-Returns: y, σ, γ_new, obj_val
-"""
-function solve_pricing_convex(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
-    u::Matrix{T};
-    σ_init::T=0.5,
-    verbose=false) where T
-
-    K = length(Ξ)
-    n = length(Ξ[1][1])
-
-    function neg_objective(x)
-        y = x[1:n]
-        σ = x[n+1]
-        val = zero(T)
-        for k in 1:K
-            p_k = Ξ[k][1]
-            u_k = u[k, :]
-            z_k = y .- σ .* log.(p_k)
-            lse_k = logsumexp(z_k)
-            sum_u_k = sum(u_k)
-            val += dot(u_k, z_k) - sum_u_k * lse_k
-        end
-        return -val
-    end
-
-    function neg_gradient!(G, x)
-        y = x[1:n]
-        σ = x[n+1]
-        G .= 0.0
-        for k in 1:K
-            p_k = Ξ[k][1]
-            u_k = u[k, :]
-            log_p_k = log.(p_k)
-            z_k = y .- σ .* log_p_k
-            softmax_k = exp.(z_k .- logsumexp(z_k))
-            sum_u_k = sum(u_k)
-            G[1:n] .-= (u_k .- sum_u_k .* softmax_k)
-            G[n+1] -= -dot(u_k, log_p_k) + sum_u_k * dot(softmax_k, log_p_k)
-        end
-    end
-
-    y_init = zeros(T, n)
-    x0 = vcat(y_init, σ_init)
-    lower = vcat(fill(-Inf, n), T(-0.95))
-    upper = vcat(fill(Inf, n), T(100.0))
-
-    result = optimize(
-        neg_objective, neg_gradient!,
-        lower, upper, x0,
-        Fminbox(LBFGS()),
-        Optim.Options(show_trace=verbose, iterations=1000, g_tol=1e-8)
-    )
-
-    x_opt = Optim.minimizer(result)
-    y_opt, σ_opt = x_opt[1:n], x_opt[n+1]
-    obj_val = -Optim.minimum(result)
-
-    γ_new = produce_gamma(Ξ, y_opt, σ_opt)
-
-    verbose && println("Convex CES pricing: σ=$σ_opt, obj=$obj_val")
-    return y_opt, σ_opt, γ_new, obj_val
-end
-
-"""
-    solve_pricing_fix_σ(Ξ, u, σ; y_init=nothing, verbose=false)
-
-Solve the pricing problem with fixed σ:
+Solve the separation problem with fixed σ:
     max_{y ∈ ℝ^n} Σ_k u_k^T softmax(y - σ log p_k)
 
 With σ fixed this is concave in y (softmax is log-concave, and u_k ≥ 0),
@@ -310,10 +365,11 @@ so any local maximum is global.
 
 Returns: y, σ, γ_new, obj_val
 """
-function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_fix_σ_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T},
     σ::T;
     y_init::Union{Vector{T},Nothing}=nothing,
+    timelimit::Union{Real,Nothing}=nothing,
     verbose=false) where T
 
     K = length(Ξ)
@@ -347,11 +403,16 @@ function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     # the softmax shift, so the optimum is a level set rather than a point.
     # LBFGS starting at y0 converges in objective value; the gauge is fixed
     # downstream by add_column_to_market!.
+    _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
+                 (time_limit=Float64(timelimit),)
     result = optimize(
         neg_objective, neg_gradient!,
         y0,
         LBFGS(),
-        Optim.Options(show_trace=verbose, show_every=50, iterations=1000, g_tol=1e-8)
+        Optim.Options(;
+            show_trace=verbose, show_every=50, iterations=1000,
+            g_tol=1e-8, _tlim_opts...
+        )
     )
 
     y_opt = Optim.minimizer(result)
@@ -359,18 +420,18 @@ function solve_pricing_fix_σ(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     γ_new = produce_gamma(Ξ, y_opt, σ)
 
-    verbose && println("Fixed-σ pricing: σ=$σ, obj=$obj_val")
+    verbose && println("Fixed-σ separation: σ=$σ, obj=$obj_val")
     return y_opt, σ, γ_new, obj_val
 end
 
 """
-    solve_pricing_dual_lp(Ξ, u; δ₁=nothing, verbose=false)
+    solve_separation_dual_lp_ces(Ξ, u; δ₁=nothing, verbose=false)
 
-Pricing via direct dual normalization + LP matching.
+Separation via direct dual normalization + LP matching.
 Normalizes each dual vector u_k to the simplex to obtain a bidding vector,
 then calls `_linear_prog_ces_gamma_single` to recover (y, δ).
 """
-function solve_pricing_dual_lp(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_dual_lp_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     δ₁::Union{Float64,Nothing}=nothing,
     verbose=false) where T
@@ -391,29 +452,34 @@ function solve_pricing_dual_lp(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     γ_new = produce_gamma(Ξ, y_opt, δ_opt)
 
     obj_val = sum(dot(u[k, :], γ_new[k, :]) for k in 1:K)
-    verbose && println("Dual-LP pricing: δ=$δ_opt, obj=$obj_val")
+    verbose && println("Dual-LP separation: δ=$δ_opt, obj=$obj_val")
     return y_opt, δ_opt, γ_new, obj_val
 end
 
 # -----------------------------------------------------------------------
-# Multicut pricing via inversion + 1D line search
+# Multicut separation via inversion + 1D line search
 # -----------------------------------------------------------------------
 """
-    solve_pricing_inversion(Ξ, u; σ_grid=range(-0.9, 30.0, length=50))
+    solve_separation_inversion_ces(Ξ, u; σ_grid=range(-1.0, 30.0, length=50))
 
-Multicut pricing via single-k inversion + 1D line search over σ.
+Multicut separation via single-k inversion + 1D line search over σ.
 
 For each observation k = 1,...,K:
 1. Shift u_k to be positive and normalize to the simplex.
 2. Invert the softmax log-ratio equations to obtain y_j(σ) = L_j + σ ℓ_j.
-3. Search over σ (grid + Brent refinement) to maximize the pricing objective.
+3. Search over σ (grid + Brent refinement) to maximize the separation objective.
 
 Returns all K candidate columns as a vector of (y, σ, γ, obj).
 """
-function solve_pricing_inversion(
+function solve_separation_inversion_ces(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
-    σ_grid=range(-0.9, 30.0, length=50)
+    # σ-grid endpoints (50 grid points). Defaults reproduce the previous
+    # `const` extents.
+    ces_sigma_lower::Real=_CES_SIGMA_LOWER_DEFAULT,
+    ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
+    σ_grid=range(ces_sigma_lower, ces_sigma_upper, length=50),
+    kwargs...
 ) where T
 
     K = length(Ξ)
@@ -429,7 +495,7 @@ function solve_pricing_inversion(
         L = log.(u_k[2:end] ./ u_k[1])
         ℓ_k = log_p[k][2:end] .- log_p[k][1]
 
-        function pricing_obj(σ)
+        function separation_obj(σ)
             y = zeros(T, n)
             for j in 2:n
                 y[j] = L[j-1] + σ * ℓ_k[j-1]
@@ -445,9 +511,9 @@ function solve_pricing_inversion(
         end
 
         best_σ = zero(T)
-        best_obj = pricing_obj(best_σ)
+        best_obj = separation_obj(best_σ)
         for σ_try in σ_grid
-            obj = pricing_obj(σ_try)
+            obj = separation_obj(σ_try)
             if obj > best_obj
                 best_obj = obj
                 best_σ = σ_try
@@ -458,7 +524,7 @@ function solve_pricing_inversion(
         if !isnothing(idx)
             lo = idx > 1 ? σ_grid[idx-1] : σ_grid[1]
             hi = idx < length(σ_grid) ? σ_grid[idx+1] : σ_grid[end]
-            res = optimize(σ -> -pricing_obj(σ), lo, hi, Brent())
+            res = optimize(σ -> -separation_obj(σ), lo, hi, Brent())
             best_σ = Optim.minimizer(res)
             best_obj = -Optim.minimum(res)
         end
@@ -474,25 +540,34 @@ function solve_pricing_inversion(
 end
 
 # -----------------------------------------------------------------------
-# Wrapper for multi-class dispatcher
+# Wrapper for per-class separation oracle
 # -----------------------------------------------------------------------
 """
-    solve_pricing_ces(Ξ, u; verbose=false, kwargs...)
+    solve_separation_ces(Ξ, u; verbose=false, kwargs...)
 
-Run the LP-warmstart + LBFGS CES pricing pipeline and return a NamedTuple
-suitable for the multi-class dispatcher:
+Run the LP-warmstart + LBFGS CES separation pipeline and return a NamedTuple
+suitable for the per-class separation oracle:
     (γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces).
 
 Same procedure as the previous cg_single path in run_method_tracked:
-1. Warm-start (y, σ) via the dual-LP fit (solve_pricing_dual_lp).
-2. Refine via the non-convex LBFGS objective (solve_pricing).
+1. Warm-start (y, σ) via the dual-LP fit (solve_separation_dual_lp_ces).
+2. Refine via the non-convex LBFGS objective (solve_separation_lbfgs_ces).
 """
-function solve_pricing_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+function solve_separation_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     verbose::Bool=false,
+    timelimit::Union{Real,Nothing}=nothing,
     kwargs...) where T
-    y_lp, σ_lp, _, _ = solve_pricing_dual_lp(Ξ, u; verbose=verbose)
-    y_opt, σ_opt, γ_new, obj = solve_pricing(Ξ, u;
-        y_init=y_lp, σ_init=σ_lp, verbose=verbose)
+    y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(
+        Ξ, u; verbose=verbose
+    )
+    # Thread the CES σ-bound kwargs (ces_strict_sigma_lower, ces_sigma_upper)
+    # through to the LBFGS box. Other kwargs (e.g., from other classes)
+    # are silently absorbed by `solve_separation_lbfgs_ces`'s `kwargs...`.
+    y_opt, σ_opt, γ_new, obj = solve_separation_lbfgs_ces(
+        Ξ, u;
+        y_init=y_lp, σ_init=σ_lp, timelimit=timelimit, verbose=verbose,
+        kwargs...
+    )
     return (γ_new=γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces)
 end

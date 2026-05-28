@@ -14,7 +14,12 @@ m = 2000
 n = 200
 ρ = 0.3
 bool_run_conic = false
-f0 = FisherMarket(m, n; ρ=ρ, bool_unit=false)
+f0 = let
+    ws = cpu_workspace(n)
+    add_ces!(ws, m; ρ=ρ, bool_unit=false)
+    ws.ces.w ./= sum(ws.ces.w)
+    FisherMarket(ws)
+end
 
 method_kwargs = [
     (:HessianBar, HessianBar, Dict(:tol => 1e-10, :linsys => :direct)),

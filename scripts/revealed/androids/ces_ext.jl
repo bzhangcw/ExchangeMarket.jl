@@ -5,9 +5,9 @@ using Printf
 import MathOptInterface as MOI
 
 """
-    solve_pricing_shor_fix_σ(Ξ, u, σ; verbose=false)
+    solve_separation_shor_fix_σ(Ξ, u, σ; verbose=false)
 
-Solve the pricing problem with fixed σ via Shor SDP relaxation.
+Solve the separation problem with fixed σ via Shor SDP relaxation.
 
 The problem (for fixed σ):
     max_q  Σ_k ⟨q, ν_k⟩ / ⟨q, f_k⟩
@@ -25,7 +25,7 @@ Returns: (q_opt, obj_upper, obj_rounded, status)
     - obj_upper: SDP upper bound
     - obj_rounded: feasible objective from rounded solution
 """
-function solve_pricing_shor_fix_σ(
+function solve_separation_shor_fix_σ(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T},
     σ::T;
@@ -123,9 +123,9 @@ function solve_pricing_shor_fix_σ(
 end
 
 """
-    solve_pricing_expcone(Ξ, u; verbose=false)
+    solve_separation_expcone(Ξ, u; verbose=false)
 
-Solve the pricing problem via exponential-cone relaxation (convex):
+Solve the separation problem via exponential-cone relaxation (convex):
     max_{γ,v,A,y,σ}  Σ_k u_k^T γ_k
     s.t.  v_k = y - σ log(p_k) - A_k 1,   ∀k
           (v_{k,j}, 1, γ_{k,j}) ∈ K_exp,   ∀k,j
@@ -138,7 +138,7 @@ so the relaxation is exact (not just a relaxation).
 
 Returns: (y_opt, σ_opt, γ_new, obj_val)
 """
-function solve_pricing_expcone(
+function solve_separation_expcone(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     σ_bounds::Tuple{T,T}=(-0.95, 30.0),
@@ -213,7 +213,7 @@ function solve_pricing_expcone(
     # Check tightness: compare cone γ vs softmax γ
     if verbose
         gap = maximum(abs.(γ_opt .- γ_new))
-        println("Exp-cone pricing:")
+        println("Exp-cone separation:")
         println("  Status:       $status")
         println("  Objective (cone):    $obj_val")
         println("  Objective (softmax): $obj_softmax")
@@ -227,9 +227,9 @@ end
 
 
 """
-    solve_pricing_mip(Ξ, u; L=30, B=50.0, σ_bounds=(-0.95, 30.0), time_limit=60.0, verbose=false)
+    solve_separation_mip(Ξ, u; L=30, B=50.0, σ_bounds=(-0.95, 30.0), time_limit=60.0, verbose=false)
 
-Solve the pricing problem to global optimality via MIP with piecewise-linear
+Solve the separation problem to global optimality via MIP with piecewise-linear
 approximation of the exponential. Uses Gurobi with SOS2 constraints.
 
 The logits θ_{k,j} = y_j - σ log p_{k,j} are affine in (y, σ).
@@ -238,7 +238,7 @@ Normalization γ_{k,j} = a_{k,j} / D_k uses Gurobi's bilinear constraints.
 
 Returns: (y, σ, γ, obj)
 """
-function solve_pricing_mip(
+function solve_separation_mip(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     L::Int=30,
@@ -326,7 +326,7 @@ function solve_pricing_mip(
 
     if verbose
         gap_mip = maximum(abs.(value.(γ_var) .- γ_new))
-        println("MIP pricing:")
+        println("MIP separation:")
         println("  Status:       $status")
         println("  Objective (MIP):     $obj_mip")
         println("  Objective (softmax): $obj_softmax")
@@ -340,9 +340,9 @@ end
 
 
 """
-    solve_pricing_admm(Ξ, u; ρ=1.0, max_iters=500, tol=1e-8, verbose=false)
+    solve_separation_admm(Ξ, u; ρ=1.0, max_iters=500, tol=1e-8, verbose=false)
 
-Linearized ADMM for the pricing problem. Consensus formulation:
+Linearized ADMM for the separation problem. Consensus formulation:
     max  Σ_k ⟨u_k, softmax(y_k - σ_k log p_k)⟩
     s.t. y_k = y, σ_k = σ,  ∀k
 
@@ -352,7 +352,7 @@ least-squares (closed-form scalar problem).
 
 Returns: (y, σ, γ, obj, history)
 """
-function solve_pricing_admm(
+function solve_separation_admm(
     Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     ρ::T=1.0,

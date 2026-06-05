@@ -65,9 +65,15 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         scale=1.0,
         sparsity=(2.0 / n),
         bool_force_dense=true,
+        # Normalize endowments so each good's total endowment is 1
+        # (b ./= sum(b; dims=2) ⇒ q = 1). Matches the unit-supply convention
+        # of the revealed-preference scripts and the AD wealth-redistribution
+        # master (Σ_t b_t = 1).
+        bool_unit_supply=false,
+        verbose=true,
     )
         ts = time()
-        println("ArrowDebreuMarket initialization started...")
+        verbose && println("ArrowDebreuMarket initialization started...")
         Random.seed!(seed)
         this = new{Float64}()
         this.m = m
@@ -88,6 +94,12 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         # endowments b (n × m), total supply q = sum(b, dims=2)
         _b = isnothing(b) ? sprand(Float64, n, m, sparsity) : b
         _b = bool_force_dense ? Matrix(_b) : _b
+        if bool_unit_supply
+            # Per-good normalization: each row of b sums to 1 ⇒ q = 1.
+            row_sums = sum(_b; dims=2)
+            @assert all(row_sums .> 0) "bool_unit_supply: every good needs at least one positive endowment"
+            _b = _b ./ row_sums
+        end
         this.b = copy(_b)
         this.q = sum(_b; dims=2)[:]
 
@@ -138,9 +150,71 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         this.val_∇f = similar(c)
         this.val_Hf = similar(c)
 
-        println("ArrowDebreuMarket initialized in $(time() - ts) seconds")
+        verbose && println("ArrowDebreuMarket initialized in $(time() - ts) seconds")
         return this
     end
+end
+
+"""
+    ces_share(ad::ArrowDebreuMarket, i::Int, p::AbstractVector)
+
+Closed-form CES expenditure share of agent `i` at price `p` (independent of
+the budget by homotheticity):
+
+    γ_{ij} = c_{ij}^{1+σ_i} p_j^{-σ_i} / Σ_l c_{il}^{1+σ_l} p_l^{-σ_i},
+
+computed in log space for numerical stability. The linear boundary ρ_i = 1
+(σ_i = ∞) is the bang-per-buck vertex: γ puts mass 1 on argmax_j c_{ij}/p_j.
+Zero entries of `c` (sparse instances) carry zero share.
+"""
+function ces_share(ad::ArrowDebreuMarket{T}, i::Int, p::AbstractVector) where {T}
+    n = ad.n
+    c_i = @view ad.c[:, i]
+    σ_i = ad.σ[i]
+    γ = zeros(T, n)
+    if isinf(σ_i)
+        # linear utility: spend everything on the best bang-per-buck good
+        j_star = argmax([c_i[j] > 0 ? c_i[j] / p[j] : -Inf for j in 1:n])
+        γ[j_star] = one(T)
+        return γ
+    end
+    # log-space softmax over goods with positive c
+    z = fill(T(-Inf), n)
+    for j in 1:n
+        c_i[j] > 0 && (z[j] = (1 + σ_i) * log(c_i[j]) - σ_i * log(p[j]))
+    end
+    z_max = maximum(z)
+    @assert isfinite(z_max) "ces_share: agent $i has no positive c entries"
+    s = zero(T)
+    for j in 1:n
+        if isfinite(z[j])
+            γ[j] = exp(z[j] - z_max)
+            s += γ[j]
+        end
+    end
+    γ ./= s
+    return γ
+end
+
+"""
+    aggregate_demand(ad::ArrowDebreuMarket, p::AbstractVector)
+
+Aggregate Arrow–Debreu demand at price `p`: each agent's budget is the value
+of its endowment, w_i(p) = ⟨p, b_i⟩, and its demand is the CES closed form
+
+    x_{ij} = w_i(p) γ_{ij}(p) / p_j.
+
+Returns g(p) = Σ_i x_i ∈ ℝⁿ. Side effect: `ad.w` is updated to the budgets at
+`p` (via `update_budget!`).
+"""
+function aggregate_demand(ad::ArrowDebreuMarket{T}, p::AbstractVector) where {T}
+    update_budget!(ad, Vector{T}(p))
+    g = zeros(T, ad.n)
+    for i in 1:ad.m
+        γ_i = ces_share(ad, i, p)
+        g .+= ad.w[i] .* γ_i ./ p
+    end
+    return g
 end
 
 """

@@ -65,6 +65,9 @@ function register_cli_separation!(s::ArgParseSettings)
         help = "Mini-batch size for the separation oracle (Higle-Sen / Joachims style). If 0 (default) or >= K, uses the full training set; otherwise each separation call sees a random subset of this size, master uses full K."
         arg_type = Int
         default = 0
+        "--sample-hard"
+        help = "Boosting-style mini-batch: when --sample-size subsamples, draw the batch with probability proportional to each sample's current master residual ‖s_k‖₁ (column-generation = LPBoost; the dual already weights the oracle, this concentrates the *batch* on hard examples). No effect without --sample-size. Default: uniform."
+        action = :store_true
     end
     return s
 end
@@ -77,6 +80,9 @@ Forward shared-separation CLI values into the runner kwargs.
 function apply_cli_separation!(local_extra::Dict, cli)
     if cli["sample_size"] > 0
         local_extra[:sample_size] = cli["sample_size"]
+    end
+    if get(cli, "sample_hard", false)
+        local_extra[:sample_hard] = true
     end
     return local_extra
 end
@@ -565,13 +571,39 @@ function _gamma_over_full(Ξ_full, y::AbstractVector, σ::Real, class::Symbol)
     return γ
 end
 
+# Weighted sampling of `k` indices from 1:length(w) WITHOUT replacement,
+# with selection probability proportional to w (Efraimidis–Spirakis A-Res:
+# key_i = randexp()/w_i, take the k smallest keys). No StatsBase dependency.
+# Nonpositive / non-finite weights are floored to a tiny ε so every sample
+# stays eligible (AdaBoost keeps nonzero weight everywhere); if the whole
+# weight vector is ~0 the caller falls back to uniform.
+function _weighted_sample_no_replace(w::AbstractVector, k::Int)
+    m = length(w)
+    k >= m && return collect(1:m)
+    wmax = maximum(w)
+    ε = wmax > 0 ? 1e-12 * wmax : 1.0
+    keys = [randexp() / max(w[i], ε) for i in 1:m]
+    return partialsortperm(keys, 1:k)
+end
+
 # Internal: build the (Ξ_pr, u_pr) pair the separation oracle actually sees,
 # given an optional sample-size cap. Returns (Ξ_pr, u_pr, do_sample::Bool).
-function _maybe_subsample(Ξ_train, u, sample_size::Int)
+#
+# `weights` (per-sample, length K) turns the uniform mini-batch into a
+# residual-weighted one (--sample-hard / boosting): the batch is drawn
+# proportional to `weights` so the oracle concentrates on hard examples.
+# This biases only *which candidate is proposed*; the reduced cost is always
+# re-scored on the full data (see find_cut_single), so the CG stop is exact.
+function _maybe_subsample(Ξ_train, u, sample_size::Int;
+    weights::Union{AbstractVector,Nothing}=nothing)
     K_train = length(Ξ_train)
     do_sample = sample_size > 0 && sample_size < K_train
     if do_sample
-        S = randperm(K_train)[1:sample_size]
+        S = if isnothing(weights) || !any(>(0), weights)
+            randperm(K_train)[1:sample_size]            # uniform (default / degenerate weights)
+        else
+            _weighted_sample_no_replace(weights, sample_size)
+        end
         return Ξ_train[S], u[S, :], true
     else
         return Ξ_train, u, false
@@ -593,6 +625,9 @@ Keyword arguments:
   to each non-homothetic oracle (e.g., `solve_separation_ql(Ξ, u, w; …)`).
   Homothetic classes ignore it.
 - `sample_size::Int = 0` — subsample size for the separation oracle (0 ⇒ full).
+- `sample_weights::Union{AbstractVector,Nothing} = nothing` — per-sample
+  weights for a residual-weighted mini-batch (--sample-hard / boosting). Only
+  used when `sample_size` subsamples; `nothing` ⇒ uniform.
 - `verbose::Bool = false`, `timelimit::Union{Real,Nothing} = nothing`.
 
 The persistent caches for the :linear MILP (model + (y, γ) warm-start)
@@ -604,12 +639,13 @@ function find_cut_single(Ξ_train, u::AbstractMatrix, μ::Real,
     classes::Vector{Symbol};
     nonh_w::Real=1.0,
     sample_size::Int=0,
+    sample_weights::Union{AbstractVector,Nothing}=nothing,
     verbose::Bool=false,
     timelimit::Union{Real,Nothing}=nothing,
     kwargs...)   # forwards class-specific knobs (e.g. :nn_hidden, :nn_iters)
     # to solve_separation_class.
 
-    Ξ_pr, u_pr, do_sample = _maybe_subsample(Ξ_train, u, sample_size)
+    Ξ_pr, u_pr, do_sample = _maybe_subsample(Ξ_train, u, sample_size; weights=sample_weights)
     # When subsampling, the cached linear MILP from the previous (larger
     # Ξ) call has the wrong shape — wipe it so this call rebuilds.
     do_sample && clear_linear_separation_cache!()
@@ -637,10 +673,11 @@ adds each via `add_to_gamma!` / `add_column_to_market!` with weight 0.
 """
 function find_cuts_multi(Ξ_train, u::AbstractMatrix, classes::Vector{Symbol};
     sample_size::Int=0,
+    sample_weights::Union{AbstractVector,Nothing}=nothing,
     kwargs...)   # forwards CES σ-bound kwargs (ces_sigma_lower, ces_sigma_upper)
     # to solve_separation_inversion_ces; other classes silently ignore.
 
-    Ξ_pr, u_pr, do_sample = _maybe_subsample(Ξ_train, u, sample_size)
+    Ξ_pr, u_pr, do_sample = _maybe_subsample(Ξ_train, u, sample_size; weights=sample_weights)
     raw = solve_separation_multicut(Ξ_pr, u_pr, classes; kwargs...)
     out = NamedTuple[]
     for cand in raw

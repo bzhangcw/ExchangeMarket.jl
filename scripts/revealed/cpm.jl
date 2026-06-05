@@ -152,6 +152,13 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     # cutting per-iteration cost roughly K / sample_size on the separation side.
     # See Higle-Sen '91 / Joachims '09 for the cutting-plane subsampling literature.
     sample_size = get(kwargs, :sample_size, 0)
+    # Boosting-style mini-batch (--sample-hard): when subsampling, draw the
+    # batch proportional to each sample's current master residual ‖s_k‖₁ so
+    # the oracle concentrates on hard examples (column generation = LPBoost;
+    # the dual u already weights the objective, this weights the *batch*).
+    # Only matters when sample_size subsamples; the reduced cost is still
+    # re-scored on the full data, so the CG stop stays exact.
+    sample_hard = get(kwargs, :sample_hard, false) === true
     # Per-iteration market-excess tracking: solves the surrogate equilibrium
     # and evaluates ‖p_s · (q − g_real(p_s))‖_∞ in the real market.
     # `f_real::Union{FisherMarket,Nothing}` — pass via kwargs from test_real.jl.
@@ -269,6 +276,8 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         print_config("tol_delta", isnothing(tol_delta) ? "off" : @sprintf("%g", tol_delta))
         print_config("tol_|∇|", isnothing(tol_rc) ? "off" : @sprintf("%g", tol_rc))
         print_config("sample_size", sample_size)
+        sample_size > 0 && print_config("mini-batch", sample_hard ?
+            "residual-weighted (--sample-hard)" : "uniform")
         print_config("interval_dropping", interval_dropping)
         println("-"^table_width(CPM_TABLE))
         print_header(CPM_TABLE)
@@ -286,7 +295,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # Show Gurobi's barrier log on the FIRST master solve only — useful
         # to confirm Method=2 / Crossover=0 are taking effect and to spot
         # numerical issues early — and stay silent afterward.
-        w, _, model_primal, balance, budget = solve_wealth_redist_primal(
+        w, s_slack, model_primal, balance, budget = solve_wealth_redist_primal(
             Ξ_train, γ_ref[];
             verbose=(iter == 1) && verbose,
             timelimit=_remaining,
@@ -296,6 +305,12 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         )
         primal_obj = objective_value(model_primal) / K_train
         u, μ = extract_duals(model_primal, balance, budget, K_train, n_train)
+        # Boosting-style mini-batch weights: per-sample master residual ‖s_k‖₁,
+        # recomputed each iteration so the next oracle batch concentrates on the
+        # samples the surrogate currently misfits (--sample-hard). `nothing`
+        # (default) ⇒ uniform mini-batch. No-op unless sample_size subsamples.
+        sample_w = (sample_hard && sample_size > 0) ?
+                   vec(sum(abs, s_slack; dims=2)) : nothing
 
         if drop && interval_dropping > 0 && (iter % interval_dropping == 0)
             # drop_zero_columns! now prunes both substores, rebuilds
@@ -403,6 +418,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
                 # layer; homothetic oracles ignore it.
                 nonh_w=nonh_w,
                 sample_size=sample_size,
+                sample_weights=sample_w,
                 verbose=verbose_separation,
                 timelimit=_separation_remaining,
                 kwargs...
@@ -473,7 +489,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
             # ces_sigma_upper for the CES inversion σ-grid) to the per-class
             # inverters; unrelated classes silently absorb them.
             cands = find_cuts_multi(Ξ_train, u, classes_homo;
-                sample_size=sample_size, kwargs...)
+                sample_size=sample_size, sample_weights=sample_w, kwargs...)
             for c in cands
                 add_to_gamma!(γ_ref, c.γ_new)
                 # Multicut produces only homothetic classes (:ces, :linear,

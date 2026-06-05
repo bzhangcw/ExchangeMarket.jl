@@ -38,7 +38,21 @@ name = cfg.method_names[1]
 spec = first(s for s in method_kwargs if s[1] == name)
 (_, separation_kind, kwargs) = spec
 
-@info "configuration" market_type = cfg.market_type cfg.n cfg.m cfg.K cfg.K_test cfg.seed cfg.timelimit method = name classes = cfg.allowed_classes cfg.ces_rho_range cfg.sparsity
+print_tree("configuration", [
+    "market" => cfg.market_type,
+    "dimensions" => [
+        "n" => cfg.n,
+        "m" => cfg.m,
+        "K" => cfg.K,
+        "K_test" => cfg.K_test,
+    ],
+    "method" => name,
+    "classes" => cfg.allowed_classes,
+    "ces_ρ_range" => cfg.ces_rho_range,
+    "sparsity" => cfg.sparsity,
+    "seed" => cfg.seed,
+    "timelimit" => @sprintf("%g s", cfg.timelimit),
+])
 
 # One dataset at the master seed; one fit.
 rd = build_rep_data(cfg, 1, cfg.seed)
@@ -62,7 +76,10 @@ fa_fit = deepcopy(res.fa)
 # real market via the price-scaled excess demand. Mirrors run_test.jl.
 # -----------------------------------------------------------------------
 do_validate_effective = cfg.do_validate &&
-                        (cfg.market_type === :ces || cfg.market_type === :plc)
+                        (cfg.market_type === :ces || cfg.market_type === :plc) &&
+                        # AD validation (surrogate or ground truth) not wired yet
+                        cfg.budget_type !== :ad &&
+                        !(res.fa isa ArrowDebreuMarket)
 if cfg.do_validate && !(cfg.market_type === :ces || cfg.market_type === :plc)
     @warn "--validate only supported for --market-type ces|plc; skipping" market_type = cfg.market_type
 end
@@ -88,8 +105,20 @@ end
 # (CES `f_real` is a FisherMarket whose AgentView registry must survive;
 # the PLC `f_real` is a plain NamedTuple of numeric agents). deepcopy
 # detaches it from the live objects mutated during validation.
+#
+# ArrowDebreuMarket (AD ground truth and/or adcg surrogate) carries closure
+# fields (f, f∇f) whose anonymous types don't round-trip across Julia
+# sessions — strip them on the serialized copies; all numeric state
+# (c, ρ, σ, b, w, q) survives.
 # -----------------------------------------------------------------------
-f_real_ser = deepcopy(rd.f_real)
+_strip_closures!(x) = x
+function _strip_closures!(ad::ArrowDebreuMarket)
+    ad.f = nothing
+    ad.f∇f = nothing
+    return ad
+end
+_strip_closures!(fa_fit)
+f_real_ser = _strip_closures!(deepcopy(rd.f_real))
 payload = (
     fa=fa_fit,
     hist=res.hist,

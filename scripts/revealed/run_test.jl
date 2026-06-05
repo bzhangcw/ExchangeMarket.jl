@@ -35,7 +35,7 @@ const cli = parse_args_for_test_real()
 # run_one_method.jl shares the exact same plumbing. Destructure the fields
 # the rest of this script references by bare name.
 cfg = build_run_config(cli)
-(; market_type, n, m, K, K_test, seed, rep, timelimit, iterlimit_override,
+(; market_type, budget_type, n, m, K, K_test, seed, rep, timelimit, iterlimit_override,
     tol_obj_override, tol_delta_override, interval_eval_test,
     interval_eval_excess, do_validate, csv_path, verbosity, out_dir,
     data_file_path, method_names, allowed_classes, opt_plc, ces_rho_range,
@@ -83,9 +83,13 @@ end
 # into the summary table.
 # -----------------------------------------------------------------------
 validate_per_rep = [Dict{Symbol,NamedTuple}() for _ in 1:rep]
-do_validate_effective = do_validate && (market_type === :ces || market_type === :plc)
+do_validate_effective = do_validate && (market_type === :ces || market_type === :plc) &&
+                        budget_type !== :ad   # AD validation not wired (any market type)
 if do_validate && !(market_type === :ces || market_type === :plc)
     @warn "--validate only supported for --market-type ces|plc; skipping" market_type
+end
+if do_validate && budget_type === :ad
+    @warn "--validate not supported for --budget-type ad; skipping" budget_type
 end
 if do_validate_effective
     println()
@@ -100,6 +104,8 @@ if do_validate_effective
         for name in method_names
             haskey(per_rep_results[r], name) || continue
             fa = per_rep_results[r][name].fa
+            # AD (adcg surrogate or AD ground truth): validate_surrogate not wired.
+            (fa isa ArrowDebreuMarket || f_real isa ArrowDebreuMarket) && continue
             v = validate_surrogate(fa, f_real; verbose=false)
             validate_per_rep[r][name] = v
             pretty = get(display_name, name, String(name))
@@ -260,10 +266,16 @@ plot_ctx = build_plot_ctx(;
 )
 if !isempty(data_file_path)
     save_plot_ctx(data_file_path, plot_ctx)
-    println()
-    println("─"^60)
-    println("To render the risk curves:")
-    println("  julia --project=. revealed/run_plot.jl -f $(data_file_path)")
-    println("  (add --smooth N for a moving-average window, --no-tex to skip pgfplots .tex)")
-    println("─"^60)
+    # Print the render hint to stderr (same stream as the @info "saved …"
+    # logs above). stdout is block-buffered when the output isn't a TTY
+    # (piped to a file, captured, or filtered), so a trailing `println`
+    # to stdout gets reordered after / buried under the stderr logs and is
+    # easy to miss; stderr is unbuffered and shows reliably.
+    println(stderr)
+    println(stderr, "─"^60)
+    println(stderr, "To render the risk curves:")
+    println(stderr, "  julia --project=. revealed/run_plot.jl -f $(data_file_path)")
+    println(stderr, "  (add --smooth N for a moving-average window, --no-tex to skip pgfplots .tex)")
+    println(stderr, "─"^60)
+    flush(stdout)
 end

@@ -114,6 +114,59 @@ print_banner(t::IterTable, title_lines::Vector{String}; io::IO=stdout) =
     print_banner(title_lines; width=table_width(t), io=io)
 
 """
+    print_tree(root, children; io=stdout)
+
+Render a key/value configuration as a Unicode tree (a compact, scannable
+replacement for `@info "title" a b c…` named-tuple dumps). Each child is a
+`Pair`:
+
+- `label => value` — a leaf; `value` is stringified via `string`.
+- `label => Vector{<:Pair}` — a subtree; recursed with deeper indentation.
+
+Leaf labels within one sibling group are aligned in a column. Example:
+
+    configuration
+    ├── market       :ges
+    ├── dimensions
+    │   ├── n        5
+    │   └── K        150
+    └── method       :adcg
+
+`Pair`s preserve insertion order, so pass a `Vector` of `Pair`s (not a Dict)
+to control the row order.
+"""
+function print_tree(root::AbstractString, children::AbstractVector; io::IO=stdout)
+    println(io, root)
+    _print_tree_children(children, ""; io=io)
+    return nothing
+end
+
+# A value is a subtree iff it is a non-empty vector whose every element is a
+# Pair; anything else (including a plain Vector like `[:ces]`) is a leaf.
+_is_subtree(v) = v isa AbstractVector && !isempty(v) && all(x -> x isa Pair, v)
+
+function _print_tree_children(children::AbstractVector, prefix::AbstractString; io::IO=stdout)
+    # Align leaf labels among these siblings (subtree rows have no value, so
+    # they don't participate in the value column).
+    leafw = maximum((length(string(first(c))) for c in children if !_is_subtree(last(c)));
+        init=0)
+    n = length(children)
+    for (i, c) in enumerate(children)
+        label = string(first(c))
+        val = last(c)
+        branch = i == n ? "└── " : "├── "
+        cont = i == n ? "    " : "│   "
+        if _is_subtree(val)
+            println(io, prefix * branch * label)
+            _print_tree_children(val, prefix * cont; io=io)
+        else
+            println(io, prefix * branch * rpad(label, leafw) * "  " * string(val))
+        end
+    end
+    return nothing
+end
+
+"""
     print_config(key, value; keywidth, indent, io)
 
 Emit one config row of the form ` key := value` (or `  |- key := value`

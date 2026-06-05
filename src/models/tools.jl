@@ -34,6 +34,11 @@ function __generate_empty_jump_model(; bool_nlp=false, verbose=false, tol=1e-7)
     else
         md = Model(MosekTools.Optimizer)
         set_attribute(md, "MSK_IPAR_LOG", verbose ? 50 : 0)
+        # Suppress Mosek data-validation warnings (e.g. 705, near-zero
+        # coefficients in a sparse row) when running quietly; MSK_IPAR_LOG=0
+        # silences the log stream but not the warning channel, so cap the
+        # number of warning messages explicitly.
+        set_attribute(md, "MSK_IPAR_MAX_NUM_WARNINGS", verbose ? 10 : 0)
         set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_MU_RED", tol)
         set_attribute(md, "MSK_DPAR_INTPNT_CO_TOL_REL_GAP", tol)
         return md

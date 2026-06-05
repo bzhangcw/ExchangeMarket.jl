@@ -61,7 +61,14 @@ cfg = build_run_config(cli)
 cfg.market_type === :plc ||
     error("run_plc_phased: requires --market-type plc, got $(cfg.market_type)")
 
-@info "configuration" market_type = cfg.market_type cfg.n cfg.m cfg.K cfg.K_test cfg.seed cfg.timelimit phases = [ph.label for ph in PHASES] phase_iters = PHASE_ITERS
+# Arrow–Debreu mode: `--methods adcg` runs each phase through the AD master
+# (run_ad_tracked, endowments b_t ∈ ℝⁿ₊) instead of the Fisher master.
+# Columns carry across phases via run_ad_tracked's :initial_cands warm
+# restart. Default (`cg`/`cgma`/…) keeps the Fisher path. AD requires
+# homothetic phase classes (run_ad_tracked errors otherwise).
+const use_ad = :adcg in cfg.method_names
+
+@info "configuration" market_type = cfg.market_type cfg.n cfg.m cfg.K cfg.K_test cfg.seed cfg.timelimit method = (use_ad ? :adcg : :cg) phases = [ph.label for ph in PHASES] phase_iters = PHASE_ITERS
 
 rd = build_rep_data(cfg, 1, cfg.seed)
 
@@ -77,7 +84,9 @@ function _base_kwargs()
         :timelimit => Inf,
         :interval_eval_test => cfg.interval_eval_test,
     )
-    if cfg.do_validate && !isnothing(rd.f_real) && cfg.interval_eval_excess > 0
+    # AD ground truth (--budget-type ad): per-iter excess validation not wired.
+    if cfg.do_validate && !isnothing(rd.f_real) && cfg.interval_eval_excess > 0 &&
+       cfg.budget_type !== :ad
         kw[:f_real] = rd.f_real
         kw[:interval_eval_excess] = cfg.interval_eval_excess
     end
@@ -117,6 +126,13 @@ end
 # -----------------------------------------------------------------------
 fa = nothing
 γ_ref = nothing
+# AD mode only: the prior phase's atom list (NamedTuples with oracle params)
+# and endowment masks, threaded into the next phase via :initial_cands /
+# :initial_masks. The returned ArrowDebreuMarket stores converted (c, ρ)
+# columns, not the oracle params or masks, so the warm restart needs this
+# side channel (run_ad_tracked puts them in hist[:cands] / hist[:masks]).
+prev_cands = nothing
+prev_masks = nothing
 combined = Dict(
     :primal_obj => Float64[],
     :test_err => Float64[],
@@ -131,15 +147,28 @@ for (ph_idx, ph) in enumerate(PHASES)
     kw[:classes] = ph.classes
     kw[:max_iters] = PHASE_ITERS[ph_idx]
     if !isnothing(fa)
-        kw[:initial_fa] = fa
-        kw[:initial_γ_ref] = γ_ref   # row-aligned with fa.storage after the previous phase's tail drop
+        if use_ad
+            # AD warm restart: thread the prior phase's atoms + masks + tensor.
+            kw[:initial_cands] = prev_cands
+            kw[:initial_masks] = prev_masks
+        else
+            kw[:initial_fa] = fa
+        end
+        kw[:initial_γ_ref] = γ_ref   # row-aligned after the previous phase's tail drop
     end
 
     @info "=== Phase $ph_idx/$(length(PHASES)): $(ph.label) ==="
     t_ph = @elapsed begin
-        global fa, γ_ref
-        fa, γ_ref, hist = run_method_tracked(Symbol("phase_", ph_idx), :cg, kw,
-            rd.Ξ_train, rd.Ξ_test; verbosity=cfg.verbosity)
+        global fa, γ_ref, prev_cands, prev_masks
+        if use_ad
+            fa, γ_ref, hist = run_ad_tracked(kw, rd.Ξ_train, rd.Ξ_test;
+                verbosity=cfg.verbosity)
+            prev_cands = hist[:cands]
+            prev_masks = hist[:masks]
+        else
+            fa, γ_ref, hist = run_method_tracked(Symbol("phase_", ph_idx), :cg, kw,
+                rd.Ξ_train, rd.Ξ_test; verbosity=cfg.verbosity)
+        end
     end
     global t_total += t_ph
     append!(combined[:primal_obj], hist[:primal_obj])

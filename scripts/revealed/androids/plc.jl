@@ -86,7 +86,7 @@ function solve_plc_demand(agent::PLCAgent, p::AbstractVector, w::Real; verbose=f
 end
 
 """
-    produce_revealed_preferences_plc(agents, w_vec, K, n;
+    produce_revealed_preferences_plc(agents, budgets, K, n;
         price_range=(0.5, 2.0), seed=nothing)
 
 Generate K revealed-preference observations from a PLC market.
@@ -94,7 +94,9 @@ Each observation is a random price vector and the aggregate demand g(p) = Σᵢ 
 
 Arguments:
 - agents: Vector{PLCAgent}, one per agent
-- w_vec: budgets (m,)
+- budgets: either a Vector (m,) of fixed Fisher budgets w_i, or an n×m
+  Matrix of Arrow–Debreu endowments — column b_i per agent, budget
+  evaluated per sample as w_i(p_k) = ⟨p_k, b_i⟩.
 - K: number of observations
 - n: number of goods
 
@@ -102,7 +104,7 @@ Returns Ξ = [(p₁, g₁), ..., (p_K, g_K)].
 """
 function produce_revealed_preferences_plc(
     agents::Vector{PLCAgent},
-    w_vec::Vector{Float64},
+    budgets::Union{Vector{Float64},Matrix{Float64}},
     K::Int,
     n::Int;
     price_range=(0.5, 2.0),
@@ -110,6 +112,8 @@ function produce_revealed_preferences_plc(
 )
     !isnothing(seed) && Random.seed!(seed)
     m = length(agents)
+    budgets isa AbstractMatrix &&
+        @assert size(budgets) == (n, m) "endowment matrix must be n×m"
     Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
 
     for k in 1:K
@@ -122,7 +126,10 @@ function produce_revealed_preferences_plc(
 
         g_k = zeros(n)
         for i in 1:m
-            x_i, _ = solve_plc_demand(agents[i], p_k, w_vec[i])
+            # Fisher: fixed budget. AD: endowment value at this sample's price.
+            w_i = budgets isa AbstractMatrix ?
+                  dot(p_k, view(budgets, :, i)) : budgets[i]
+            x_i, _ = solve_plc_demand(agents[i], p_k, w_i)
             g_k .+= x_i
         end
         Ξ[k] = (copy(p_k), copy(g_k))

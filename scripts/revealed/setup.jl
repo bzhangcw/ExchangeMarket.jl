@@ -44,6 +44,14 @@ using ExchangeMarket
 include("./gurobi_env.jl")
 
 # -----------------------------------------------------------------------
+# SPLC ground-truth market (separable PLC; greedy closed-form demand).
+# Included here (not in the drivers) because build_rep_data below needs
+# random_splc_agent / produce_revealed_preferences_splc. The general-PLC
+# generator (androids/plc.jl) stays driver-included since it needs Mosek.
+# -----------------------------------------------------------------------
+include("./androids/splc.jl")
+
+# -----------------------------------------------------------------------
 # Master / dual LP solvers (define before runners include them).
 # -----------------------------------------------------------------------
 include("./redistribute.jl")
@@ -100,6 +108,30 @@ function produce_revealed_preferences(alg, f1::FisherMarket, K::Int;
         Ξ[k] = (copy(p_k), copy(g_k))
     end
 
+    return Ξ
+end
+
+"""
+    produce_revealed_preferences_ad(ad::ArrowDebreuMarket, K; seed=nothing)
+
+Arrow–Debreu sibling of `produce_revealed_preferences`: prices are sampled
+uniformly on the simplex (same Exp(1)-normalize recipe), and the aggregate
+demand at each price is the closed-form `aggregate_demand(ad, p_k)` from
+src/models/arrow.jl — each agent's budget is its endowment value
+w_i(p_k) = ⟨p_k, b_i⟩, so no equilibrium solver (play!/HessianBar) is needed.
+"""
+function produce_revealed_preferences_ad(ad::ArrowDebreuMarket, K::Int; seed=nothing)
+    if !isnothing(seed)
+        Random.seed!(seed)
+    end
+    n = ad.n
+    Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
+    for k in 1:K
+        e_k = -log.(rand(n))                 # n iid Exp(1)
+        p_k = e_k ./ sum(e_k)                # uniform on the unit simplex
+        g_k = aggregate_demand(ad, p_k)      # price-dependent budgets ⟨p_k, b_i⟩
+        Ξ[k] = (copy(p_k), copy(g_k))
+    end
     return Ξ
 end
 
@@ -240,11 +272,6 @@ function parse_args_for_test_real(argv=ARGS)
     # ---- (1) Problem instance ----------------------------------------
     add_arg_group!(s, "Problem instance")
     @add_arg_table! s begin
-        "--market-type", "-t"
-        help = "Ground-truth market family"
-        arg_type = String
-        default = "ces"
-        range_tester = x -> x in ("ces", "plc")
         "--n", "-n"
         help = "Number of goods"
         arg_type = Int
@@ -260,7 +287,7 @@ function parse_args_for_test_real(argv=ARGS)
         "--k-test"
         help = "Number of TEST observations. Independent of --k."
         arg_type = Int
-        default = 50
+        default = 20
         "--seed", "-s"
         help = "Master random seed"
         arg_type = Int
@@ -276,11 +303,25 @@ function parse_args_for_test_real(argv=ARGS)
         range_tester = x -> 0.0 <= x < 1.0
     end
 
-    # ---- (2) Ground-truth market knobs -------------------------------
+    # ---- (2) Market: ground-truth family + budget model + per-family knobs
+    add_arg_group!(s, "Market")
+    @add_arg_table! s begin
+        "--market-type", "-t"
+        help = "Ground-truth market family"
+        arg_type = String
+        default = "ces"
+        range_tester = x -> x in ("ces", "plc", "ges", "splc")
+        "--budget-type"
+        help = "Budget model of the ground-truth market: fisher (fixed budgets w_i, default) or ad (Arrow–Debreu: endowments b_i with price-dependent budgets w_i(p)=⟨p,b_i⟩). Supported for all market types (ces/plc/ges)."
+        arg_type = String
+        default = "fisher"
+        range_tester = x -> x in ("fisher", "ad")
+    end
     # One register_cli_*_market! call per market family. These only
     # bite when `--market-type` selects the matching family.
     register_cli_ces_market!(s)   # --ces-rho-low, --ces-rho-high
     register_cli_plc!(s)          # --plc-L, --plc-no-intercept
+    register_cli_splc!(s)         # --splc-L
 
     # ---- (3) Method selection + per-method knobs ---------------------
     add_arg_group!(s, "Method selection")
@@ -300,6 +341,8 @@ function parse_args_for_test_real(argv=ARGS)
     register_cli_accpm!(s)
     # Master LP (redistribute.jl) owns --redist-use-nlp and --redist-nonh-w.
     register_cli_redist!(s)
+    # AD master (redistribute_ad.jl) owns --ad-endow-mode and --ad-mask-size.
+    register_cli_ad!(s)
 
     # ---- (4) Separation oracle knobs ---------------------------------
     # Separation CLI surface lives in the per-android files so each
@@ -390,6 +433,13 @@ include("./separation.jl")
 include("./logging.jl")
 include("./cpm.jl")
 include("./accpm.jl")
+# Arrow–Debreu stack: redistribute_ad.jl holds the master/dual/pricing
+# primitives + ad_market_from_atoms; cpm_ad.jl holds the CG loop run_ad_tracked
+# (sibling of redistribute.jl / cpm.jl). Loaded after separation.jl
+# (find_cut_single, _gamma_over_full_from_cand) and cpm.jl/logging.jl
+# (CPM_TABLE, print_*) since they reuse all of them.
+include("./redistribute_ad.jl")
+include("./cpm_ad.jl")
 include("./validate.jl")
 include("./frankwolfe/frankwolfe.jl")
 include("./frankwolfe/wrapper_frankwolfe.jl")
@@ -412,6 +462,20 @@ method_kwargs = [
             :tol_delta => 1e-5,
             :drop => true,
             :classes => [:ces, :linear],
+        )
+    ],
+    # Arrow–Debreu column generation: same CG loop with the AD master
+    # (endowments b_t ∈ ℝⁿ₊, Σ_t b_t = 1, price-dependent budget ⟨p,b_t⟩).
+    # separation_kind :cg_ad routes run_one_method to run_ad_tracked.
+    # Homothetic classes only (ces,linear,leontief); --classes overrides.
+    [:adcg, :cg_ad,
+        Dict(
+            :max_iters => 500,
+            :tol_obj => 1e-3,
+            :tol_rc => 1e-5,
+            :tol_delta => 1e-5,
+            :drop => true,
+            :classes => [:ces],
         )
     ],
     [:cgma, :cg_multicut,
@@ -482,6 +546,7 @@ colors = Dict(
     :SFW => 5,
     :FWjl => 3,
     :ACCPM => 6,
+    :adcg => 7,
 )
 
 marker_style = Dict(
@@ -491,6 +556,7 @@ marker_style = Dict(
     :SFW => :star5,
     :FWjl => :rect,
     :ACCPM => :utriangle,
+    :adcg => :pentagon,
 )
 
 # Pretty display names for legends and summary output. The CLI / symbol
@@ -503,6 +569,7 @@ display_name = Dict(
     :FW => "FW",
     :SFW => "SFW",
     :FWjl => "FW.jl",
+    :adcg => "AD-CG",
 )
 
 # -----------------------------------------------------------------------
@@ -542,6 +609,11 @@ function build_run_config(cli)
     # `Ces`, `ces`) all resolve to the same dispatch symbol `:ces` AND yield
     # the same lowercase output filename.
     market_type = Symbol(lowercase(strip(cli["market_type"])))
+    # Budget model of the ground truth: :fisher (fixed w_i) or :ad
+    # (endowments, w_i(p) = ⟨p, b_i⟩). Supported for all market types:
+    # CES rides ArrowDebreuMarket; PLC/GES carry an n×m endowment matrix
+    # in their f_real NamedTuple and evaluate budgets per sample.
+    budget_type = Symbol(lowercase(strip(cli["budget_type"])))
     n = cli["n"]
     m = cli["m"]
     K = cli["k"]
@@ -575,14 +647,15 @@ function build_run_config(cli)
     method_names = _resolve_method.(split(cli["methods"], ","))
     allowed_classes = Symbol.(lowercase.(strip.(split(cli["classes"], ","))))
     opt_plc = plc_opt_from_cli(cli)
+    opt_splc = splc_opt_from_cli(cli)
     ces_rho_range = ces_rho_range_from_cli(cli)
     sparsity = cli["sparsity"]
 
-    return (; market_type, n, m, K, K_test, seed, rep, timelimit,
+    return (; market_type, budget_type, n, m, K, K_test, seed, rep, timelimit,
         iterlimit_override, tol_obj_override, tol_delta_override,
         interval_eval_test, interval_eval_excess, do_validate, csv_path,
         verbosity, out_dir, data_file_path, method_names, allowed_classes,
-        opt_plc, ces_rho_range, sparsity)
+        opt_plc, opt_splc, ces_rho_range, sparsity)
 end
 
 # -----------------------------------------------------------------------
@@ -590,13 +663,38 @@ end
 # Each rep gets a different seed so reps see independent train/test data.
 # -----------------------------------------------------------------------
 function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
-    (; market_type, n, m, K, K_test, ces_rho_range, opt_plc, sparsity) = cfg
+    (; market_type, budget_type, n, m, K, K_test, ces_rho_range, opt_plc, opt_splc, sparsity) = cfg
     Random.seed!(rep_seed)
-    # For CES: f_real is a FisherMarket.
-    # For PLC: f_real is the NamedTuple `(agents=..., w=...)` that the
+    # For CES + fisher budgets: f_real is a FisherMarket.
+    # For CES + ad budgets: f_real is an ArrowDebreuMarket (endowments b,
+    #   budgets w_i(p) = ⟨p, b_i⟩).
+    # For PLC/GES: f_real is the NamedTuple `(agents=..., w=...)` that the
     # joint-LP equilibrium check in validate.jl dispatches on.
     f_real = nothing
-    if market_type === :ces
+    if market_type === :ces && budget_type === :ad
+        # Arrow–Debreu ground truth: same per-agent CES preferences as the
+        # Fisher branch (ρ sampled from ces_rho_range, scale-30 coefficients),
+        # but each agent owns an endowment column b_i; budgets are the
+        # endowment values at the sampled price. Demand is closed-form
+        # (aggregate_demand in src/models/arrow.jl), so no play!/HessianBar.
+        ρ_lo, ρ_hi = ces_rho_range
+        ρ_vec = ρ_lo .+ (ρ_hi - ρ_lo) .* rand(m)
+        b_mat = rand(n, m)
+        # c is generated inside the constructor (scale * sprand(n, m, sparsity)),
+        # same coefficient policy as the Fisher branch's add_ces!.
+        f_real = ArrowDebreuMarket(m, n; ρ=ρ_vec, b=b_mat,
+            scale=30.0, sparsity=sparsity,
+            bool_unit_supply=true, verbose=false, seed=rep_seed)
+        print_tree("[rep $rep_idx] ground-truth: CES Arrow–Debreu", [
+            "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+            "ces_ρ_range" => ces_rho_range,
+            "ρ_range" => extrema(f_real.ρ),
+            "σ_range" => extrema(f_real.σ),
+            "seed" => rep_seed,
+        ])
+        Ξ_train = produce_revealed_preferences_ad(f_real, K; seed=rep_seed)
+        Ξ_test = produce_revealed_preferences_ad(f_real, K_test; seed=rep_seed + 1)
+    elseif market_type === :ces
         ρ_lo, ρ_hi = ces_rho_range
         ρ_vec = ρ_lo .+ (ρ_hi - ρ_lo) .* rand(m)
         ws = cpu_workspace(n)
@@ -609,19 +707,114 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
         f1.x .= ones(n, m) ./ m
         alg = HessianBar(n, m, p₀; linconstr=linconstr)
         alg.linsys = :direct
-        @info "[rep $rep_idx] Ground-truth CES market" n m K K_test ces_rho_range seed = rep_seed ρ_range = extrema(f1.ρ) σ_range = extrema(f1.σ)
+        print_tree("[rep $rep_idx] ground-truth: CES (Fisher)", [
+            "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+            "ces_ρ_range" => ces_rho_range,
+            "ρ_range" => extrema(f1.ρ),
+            "σ_range" => extrema(f1.σ),
+            "seed" => rep_seed,
+        ])
         Ξ_train = produce_revealed_preferences(alg, f1, K; seed=rep_seed)
         Ξ_test = produce_revealed_preferences(alg, f1, K_test; seed=rep_seed + 1)
         f_real = f1
     elseif market_type === :plc
         L = opt_plc.L
         plc_agents = [random_plc_agent(n, L; sparsity=sparsity, intercept=opt_plc.intercept) for _ in 1:m]
-        w_vec = rand(m)
-        w_vec ./= sum(w_vec)
-        @info "[rep $rep_idx] Ground-truth PLC market" n m L K K_test seed = rep_seed intercept = opt_plc.intercept
-        Ξ_train = produce_revealed_preferences_plc(plc_agents, w_vec, K, n; seed=rep_seed)
-        Ξ_test = produce_revealed_preferences_plc(plc_agents, w_vec, K_test, n; seed=rep_seed + 1)
-        f_real = (agents=plc_agents, w=w_vec)
+        if budget_type === :ad
+            # Arrow–Debreu: each agent owns an endowment column b_i (n×m),
+            # normalized so each good's total endowment is 1 (unit supply).
+            # The producer evaluates budgets per sample as w_i(p_k) = ⟨p_k, b_i⟩.
+            B = rand(n, m)
+            B ./= sum(B; dims=2)
+            print_tree("[rep $rep_idx] ground-truth: PLC Arrow–Debreu", [
+                "dimensions" => ["n" => n, "m" => m, "L" => L, "K" => K, "K_test" => K_test],
+                "intercept" => opt_plc.intercept,
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_plc(plc_agents, B, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_plc(plc_agents, B, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=plc_agents, b=B)
+        else
+            w_vec = rand(m)
+            w_vec ./= sum(w_vec)
+            print_tree("[rep $rep_idx] ground-truth: PLC (Fisher)", [
+                "dimensions" => ["n" => n, "m" => m, "L" => L, "K" => K, "K_test" => K_test],
+                "intercept" => opt_plc.intercept,
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_plc(plc_agents, w_vec, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_plc(plc_agents, w_vec, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=plc_agents, w=w_vec)
+        end
+    elseif market_type === :ges
+        # Non-homothetic polynomial-utility market (cf. sec.ges). Like PLC,
+        # f_real is the NamedTuple `(agents=..., w=...)` (Fisher) or
+        # `(agents=..., b=...)` (Arrow–Debreu endowments); demand depends on
+        # the budget via `share(::GESAgent, p, w)`.
+        ges_agents = [random_ges_agent(n) for _ in 1:m]
+        if budget_type === :ad
+            B = rand(n, m)
+            B ./= sum(B; dims=2)
+            print_tree("[rep $rep_idx] ground-truth: GES Arrow–Debreu", [
+                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_ges(ges_agents, B, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_ges(ges_agents, B, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=ges_agents, b=B)
+        else
+            w_vec = rand(m)
+            w_vec ./= sum(w_vec)
+            print_tree("[rep $rep_idx] ground-truth: GES (Fisher)", [
+                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_ges(ges_agents, w_vec, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_ges(ges_agents, w_vec, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=ges_agents, w=w_vec)
+        end
+    elseif market_type === :splc
+        # Separable PLC market (cf. sec.splc in choice-ump-utility.tex):
+        # u_i(x) = Σ_j f_ij(x_j), each f_ij concave piecewise-linear
+        # increasing. The Vazirani–Yannakakis setting — Fisher equilibrium
+        # is PPAD-complete, but individual demand is a closed-form greedy
+        # (no LP), so sampling is much cheaper than general PLC. Like
+        # PLC/GES, f_real is a NamedTuple with fixed budgets `w` (Fisher)
+        # or endowments `b` (Arrow–Debreu).
+        L_splc = opt_splc.L
+        # intercept=false ⇒ homogeneous SPLC: zero intercepts collapse each
+        # f_ij to a single linear piece, so every agent is LINEAR
+        # (rem.splc.homogeneous) — the homothetic regime of SPLC.
+        if !opt_splc.intercept
+            @warn "--splc-no-intercept: homogeneous SPLC collapses to ONE linear piece per good " *
+                  "(min_ℓ a_ℓ x = (min_ℓ a_ℓ)x, cf. rem.splc.homogeneous) — every ground-truth agent " *
+                  "is a linear agent and --splc-L=$(L_splc) is ignored. Linear androids alone should " *
+                  "fit this market to ≈0 error."
+        end
+        splc_agents = [random_splc_agent(n, L_splc; intercept=opt_splc.intercept) for _ in 1:m]
+        if budget_type === :ad
+            B = rand(n, m)
+            B ./= sum(B; dims=2)
+            print_tree("[rep $rep_idx] ground-truth: SPLC Arrow–Debreu", [
+                "dimensions" => ["n" => n, "m" => m, "L" => L_splc, "K" => K, "K_test" => K_test],
+                "intercept" => opt_splc.intercept,
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_splc(splc_agents, B, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_splc(splc_agents, B, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=splc_agents, b=B)
+        else
+            w_vec = rand(m)
+            w_vec ./= sum(w_vec)
+            print_tree("[rep $rep_idx] ground-truth: SPLC (Fisher)", [
+                "dimensions" => ["n" => n, "m" => m, "L" => L_splc, "K" => K, "K_test" => K_test],
+                "intercept" => opt_splc.intercept,
+                "seed" => rep_seed,
+            ])
+            Ξ_train = produce_revealed_preferences_splc(splc_agents, w_vec, K, n; seed=rep_seed)
+            Ξ_test = produce_revealed_preferences_splc(splc_agents, w_vec, K_test, n; seed=rep_seed + 1)
+            f_real = (agents=splc_agents, w=w_vec)
+        end
     else
         error("Unknown market_type: $market_type")
     end
@@ -636,7 +829,7 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
     name::Symbol, separation_kind::Symbol, kwargs::Dict)
     (; timelimit, interval_eval_test, interval_eval_excess, allowed_classes,
         tol_obj_override, tol_delta_override, iterlimit_override, verbosity,
-        do_validate) = cfg
+        do_validate, budget_type) = cfg
     local_extra = Dict{Symbol,Any}(
         :timelimit => timelimit,
         :interval_eval_test => interval_eval_test,
@@ -648,7 +841,11 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
     # CESAnalytic) and crashes on mixed surrogates (any non-CES atom in
     # `fa.storage.gen`: QL, GES, Leontief), so users running with those
     # classes should pass `--no-validate` to skip both.
-    if do_validate && !isnothing(f_real) && interval_eval_excess > 0
+    # An AD ground truth (--budget-type ad, any market type) is also excluded:
+    # validate_surrogate has no method for price-dependent budgets (AD
+    # validation is deferred).
+    if do_validate && !isnothing(f_real) && interval_eval_excess > 0 &&
+       budget_type !== :ad
         local_extra[:f_real] = f_real
         local_extra[:interval_eval_excess] = interval_eval_excess
     end
@@ -681,11 +878,15 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
     apply_cli_cpm!(local_extra, cli)
     apply_cli_accpm!(local_extra, cli)
     apply_cli_redist!(local_extra, cli)
+    apply_cli_ad!(local_extra, cli)
     if haskey(kwargs, :seed)
         local_extra[:seed] = rep_seed
     end
     local_kwargs = merge(kwargs, local_extra)
-    @info "[rep $rep_idx] spawned $name" classes = get(local_kwargs, :classes, "n/a") timelimit = timelimit
+    print_tree("[rep $rep_idx] spawned $name", [
+        "classes" => get(local_kwargs, :classes, "n/a"),
+        "timelimit" => @sprintf("%g s", timelimit),
+    ])
     t_elapsed = @elapsed begin
         if separation_kind === :fw
             fa, γ_ref, hist = run_method_tracked_fw(
@@ -699,13 +900,25 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
             fa, γ_ref, hist = run_method_tracked_accpm(
                 name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
             )
+        elseif separation_kind === :cg_ad
+            # Arrow–Debreu CG: returns (fa::ArrowDebreuMarket, γ_ref, hist).
+            # run_ad_tracked enforces homothetic-only classes.
+            fa, γ_ref, hist = run_ad_tracked(
+                local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
+            )
         else
             fa, γ_ref, hist = run_method_tracked(
                 name, separation_kind, local_kwargs, Ξ_train, Ξ_test; verbosity=verbosity
             )
         end
     end
-    @info "[rep $rep_idx] $name done" iters = length(hist[:primal_obj]) atoms_T = fa.m final_train = hist[:primal_obj][end] final_test = hist[:test_err][end] time_s = t_elapsed
+    print_tree("[rep $rep_idx] $name done", [
+        "iters" => length(hist[:primal_obj]),
+        "atoms (T)" => fa.m,
+        "final train" => @sprintf("%.3e", hist[:primal_obj][end]),
+        "final test" => @sprintf("%.3e", hist[:test_err][end]),
+        "time" => @sprintf("%.2f s", t_elapsed),
+    ])
     return (rep_idx=rep_idx, name=name, fa=fa, hist=hist, t=t_elapsed)
 end
 

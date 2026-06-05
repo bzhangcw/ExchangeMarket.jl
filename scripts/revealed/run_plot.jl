@@ -88,6 +88,7 @@ function build_plot_ctx(;
     opt_plc,
     method_names::Vector{Symbol},
     interval_marker::Int,
+    style::Dict=Dict{Symbol,Any}(),
 )
     slim = Dict{Symbol,NamedTuple}()
     for (name, a) in agg
@@ -111,6 +112,13 @@ function build_plot_ctx(;
         opt_plc=opt_plc,
         method_names=method_names,
         interval_marker=interval_marker,
+        # Optional per-series styling, keyed by the same Symbols as `agg`.
+        # Each value is a NamedTuple `(color, marker, label)`. When empty (the
+        # default, e.g. run_test.jl contexts), the plotter falls back to the
+        # global `colors` / `marker_style` / `display_name` tables. Lets a
+        # producer (e.g. run_one_method_ablation.jl) describe pseudo-methods
+        # the global tables don't know, so run_plot.jl renders them unchanged.
+        style=style,
     )
 end
 
@@ -147,6 +155,9 @@ function plot_risk_curves(ctx;
     method_names = ctx.method_names
     interval_marker = something(interval_marker, ctx.interval_marker)
     agg = ctx.agg
+    # Optional per-series styling carried by the ctx (see build_plot_ctx).
+    # Absent on older contexts ⇒ empty ⇒ fall back to the global tables.
+    style = hasproperty(ctx, :style) ? ctx.style : Dict{Symbol,Any}()
 
     mkpath(pdf_dir)
     !isempty(tex_dir) && mkpath(tex_dir)
@@ -165,10 +176,11 @@ function plot_risk_curves(ctx;
         haskey(agg, name) || continue
         a = agg[name]
         iters = 1:a.Lmax
-        c = get(colors, name, 1)
-        mk = get(marker_style, name, :circle)
+        st = get(style, name, nothing)
+        c = isnothing(st) ? get(colors, name, 1) : st.color
+        mk = isnothing(st) ? get(marker_style, name, :circle) : st.marker
         m_end = round(Int, a.finals.nag_mean)
-        pretty = get(display_name, name, String(name))
+        pretty = isnothing(st) ? get(display_name, name, String(name)) : st.label
         lbl = L"($T=%$m_end$)~\texttt{%$pretty}"
         mk_idx = 1:max(interval_marker, 1):length(iters)
 
@@ -284,6 +296,18 @@ function _main_test_plot(argv)
         help = "Place a plot marker every N iterations (single-rep mode only). Overrides the value stored in the ctx file."
         arg_type = Int
         default = -1
+        "--xmax"
+        help = "Upper x-limit (iterations). <= 0 keeps the default (200). Use a small value for short runs (e.g. ablations)."
+        arg_type = Int
+        default = -1
+        "--ymin"
+        help = "Lower y-limit (log scale). <= 0 keeps the default (5e-4)."
+        arg_type = Float64
+        default = -1.0
+        "--ymax"
+        help = "Upper y-limit (log scale). <= 0 keeps the default (1.0). Raise it when train error exceeds 1."
+        arg_type = Float64
+        default = -1.0
     end
     cli = parse_args(argv, s)
     ctx_path = cli["file"]
@@ -297,8 +321,13 @@ function _main_test_plot(argv)
         abspath(cli["tex-dir"])
     end
     im_arg = cli["interval-marker"]
+    # Axis limits: keep the function defaults unless the user overrides, so
+    # benchmark replays look identical to the inline run_test.jl figures.
+    xlims = cli["xmax"] > 0 ? (1, cli["xmax"]) : (1, 200)
+    ylims = (cli["ymin"] > 0 ? cli["ymin"] : 5e-4, cli["ymax"] > 0 ? cli["ymax"] : 1e0)
     plot_risk_curves(ctx;
         pdf_dir=pdf_dir, tex_dir=tex_dir, smooth=cli["smooth"],
+        xlims_common=xlims, ylims_common=ylims,
         interval_marker=(im_arg > 0 ? im_arg : nothing))
 end
 

@@ -41,7 +41,7 @@ function register_cli_ces!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: CES")
     @add_arg_table! s begin
         "--ces-sigma-lower"
-        help = "Lower bound on σ for the CES inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so this is the conceptual floor."
+        help = "Lower bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so the LBFGS box floors this at -0.98 (the (c, ρ) recovery diverges at -1). Raise (e.g. to 0) to restrict to gross substitutes."
         arg_type = Float64
         default = _CES_SIGMA_LOWER_DEFAULT
         "--ces-sigma-upper"
@@ -281,17 +281,21 @@ function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
     y_init::Union{Vector{T},Nothing}=nothing,
     σ_init::T=0.5,
-    # σ upper bound for the LBFGS box; same value the inversion σ-grid uses.
+    # σ box for LBFGS; same values the inversion σ-grid uses.
+    ces_sigma_lower::Real=_CES_SIGMA_LOWER_DEFAULT,
     ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
     timelimit::Union{Real,Nothing}=nothing,
     verbose=false,
     kwargs...) where T
 
-    # Strict-interior floor for σ. The softmax objective itself is fine
+    # Lower bound for the σ box: the user's --ces-sigma-lower, floored at
+    # the strict-interior value -0.98. The softmax objective itself is fine
     # at σ = -1, but the (y, σ) → (c, ρ) recovery used downstream by
     # `add_column_to_market!` (ρ = σ/(1+σ), c = exp(y/(1+σ))) diverges
-    # there. -0.98 keeps the LBFGS box one step above the boundary.
-    strict_sigma_lower = T(-0.98)
+    # there, so the box must stay one step above the boundary regardless
+    # of the CLI value. Raising the bound (e.g. --ces-sigma-lower 0 for
+    # gross substitutes only) is honored as-is.
+    strict_sigma_lower = max(T(ces_sigma_lower), T(-0.98))
 
     K = length(Ξ)
     n = length(Ξ[1][1])
@@ -561,7 +565,7 @@ function solve_separation_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(
         Ξ, u; verbose=verbose
     )
-    # Thread the CES σ-bound kwargs (ces_strict_sigma_lower, ces_sigma_upper)
+    # Thread the CES σ-bound kwargs (ces_sigma_lower, ces_sigma_upper)
     # through to the LBFGS box. Other kwargs (e.g., from other classes)
     # are silently absorbed by `solve_separation_lbfgs_ces`'s `kwargs...`.
     y_opt, σ_opt, γ_new, obj = solve_separation_lbfgs_ces(

@@ -67,6 +67,8 @@ export LOGDIR, _RESULTS_ROOT, current_results_dir
 export pprint
 export logbar, log_to_expcone!, powerp_to_cone!, proj, extract_standard_form
 export AbstractMarket, Market, FisherMarket, ArrowDebreuMarket, validate, update_budget!, update_supply!, expand_players!
+# Arrow–Debreu closed-form CES demand (price-dependent budgets w = b'p)
+export ces_share, aggregate_demand
 
 # agent interface
 export AgentType, LinearAgent, CESAgent, PLCAgent, LeontiefAgent, QuasiLinearLogAgent, GESAgent, AgentView, @agent

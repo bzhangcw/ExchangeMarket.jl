@@ -110,6 +110,48 @@ function random_ges_agent(n::Int; seed=nothing)
     return GESAgent(n, c, r)
 end
 
+"""
+    produce_revealed_preferences_ges(agents, budgets, K, n; seed=nothing)
+
+Generate K revealed-preference observations `(p_k, g_k)` from a GES market,
+where `g_k = Σ_i x_i(p_k, w_i)` is the aggregate demand. GES is
+non-homothetic, so each agent's spending share `share(agent, p, w)` (via
+`ges_share_by_opt`) depends on its budget `w_i`; demand is `x_i = w_i γ_i / p`.
+Prices are drawn uniformly on the simplex (Dirichlet(1,…,1)), matching the
+CES/PLC generators. Mirrors `produce_revealed_preferences_plc`.
+
+`budgets` is either a Vector (m,) of fixed Fisher budgets, or an n×m Matrix
+of Arrow–Debreu endowments (column b_i per agent; budget per sample is
+w_i(p_k) = ⟨p_k, b_i⟩).
+"""
+function produce_revealed_preferences_ges(
+    agents::Vector{GESAgent},
+    budgets::Union{Vector{Float64},Matrix{Float64}},
+    K::Int,
+    n::Int;
+    seed=nothing
+)
+    !isnothing(seed) && Random.seed!(seed)
+    m = length(agents)
+    budgets isa AbstractMatrix &&
+        @assert size(budgets) == (n, m) "endowment matrix must be n×m"
+    Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
+    for k in 1:K
+        e_k = -log.(rand(n))
+        p_k = e_k ./ sum(e_k)
+        g_k = zeros(n)
+        for i in 1:m
+            # Fisher: fixed budget. AD: endowment value at this sample's price.
+            w_i = budgets isa AbstractMatrix ?
+                  dot(p_k, view(budgets, :, i)) : budgets[i]
+            γ_i = share(agents[i], p_k, w_i)   # GES spending share at (p_k, w_i)
+            g_k .+= w_i .* γ_i ./ p_k          # x_i = w_i γ_i / p
+        end
+        Ξ[k] = (copy(p_k), copy(g_k))
+    end
+    return Ξ
+end
+
 # -----------------------------------------------------------------------
 # Closed-form share at fixed (c, r, p, w)
 # -----------------------------------------------------------------------

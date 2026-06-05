@@ -17,11 +17,26 @@
 using Gurobi
 
 const _GRB_ENV = Ref{Gurobi.Env}()
+# Set once we've discovered the license is unusable (expired / missing), so we
+# don't retry Gurobi.Env() — and its multi-second timeout — on every call.
+const _GRB_ENV_FAILED = Ref{Bool}(false)
 
 function _gurobi_env()
+    if _GRB_ENV_FAILED[]
+        return nothing
+    end
     if !isassigned(_GRB_ENV)
-        _GRB_ENV[] = Gurobi.Env()
-        Gurobi.GRBsetintparam(_GRB_ENV[], "OutputFlag", 0)
+        try
+            _GRB_ENV[] = Gurobi.Env()
+            Gurobi.GRBsetintparam(_GRB_ENV[], "OutputFlag", 0)
+        catch err
+            # License expired / not found / token unavailable. Don't crash the
+            # whole run at load time — mark Gurobi unusable and let callers fall
+            # back to another solver (or skip Gurobi-only paths).
+            _GRB_ENV_FAILED[] = true
+            @warn "Gurobi unavailable; continuing without it" exception = (err, catch_backtrace())
+            return nothing
+        end
     end
     return _GRB_ENV[]
 end

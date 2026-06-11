@@ -1,22 +1,32 @@
-# Stochastic Frank-Wolfe / gradient boosting variant for the surrogate-fitting master.
+# Hand-rolled away-step Frank–Wolfe runner for the surrogate-fitting master.
 #
 #   minimize  F(h) = (1/K) Σ_k ‖P_k g_k - h(p_k)‖_∞   over   h ∈ conv(H)
 #
-# Each FW step:
-#   1. Sample mini-batch S ⊂ [K] (full batch if batch_size == 0 or ≥ K).
-#   2. Subgradient r_k = sign(target_k - h(p_k))[j*] · e_{j*} for k ∈ S.
-#   3. LMO ≡ existing separation solver:  γ_ℓ = argmax_γ Σ_k ⟨r_k, γ(p_k)⟩.
-#   4. Update  h_{ℓ+1} = (1 - η_ℓ) h_ℓ + η_ℓ γ_ℓ,  η_ℓ = 2/(ℓ+2).
+# This is our own FW loop (no FrankWolfe.jl dependency), so WE own the stopping
+# rule: it stops on tol_obj / tol_delta / max_iters / timelimit — never on a
+# duality gap. The gap-based stop in FrankWolfe.jl's away_frank_wolfe is unsafe
+# here because the CES separation LMO is LBFGS-local (non-global) and, with
+# subsampling, stochastic; an inexact LMO under-estimates the gap and can quit
+# far from the optimum (see frankwolfe/wrapper_frankwolfe.jl).
 #
-# Reuses separation.jl: `solve_separation_lbfgs_ces`, `solve_separation_dual_lp_ces`,
-# `recover_ces_params`, `add_to_gamma!`, `add_to_market!`.
+# Each iteration:
+#   1. H = Σ_t w_t γ_t,  subgradient u_k = sign(target_k - H_k)[j*]·e_{j*}.
+#   2. LMO ≡ separation oracle:  s = argmax_γ Σ_k ⟨u_k, γ(p_k)⟩  (find_cut_single).
+#   3. Away vertex a = active atom minimizing ⟨u, γ_a⟩; pick FW vs away by gap.
+#   4. Line search η on the convex 1-D restriction; weight update + optional drop.
+#
+# FW vs SFW is NOT a separate code path: it is implied by subsampling alone.
+# `:sample_size` (CLI --sample-size; legacy alias `:batch_size`) > 0 makes the LMO
+# stochastic — find_cut_single subsamples (Ξ, u) jointly, solves on the subset,
+# and re-expands the cut over the full data. sample_size == 0 ⇒ full-batch FW.
+#
+# Reuses separation.jl (`find_cut_single`, `add_column_to_market!`) and
+# setup.jl (`compute_gamma_from_market`, `evaluate_test_error`).
 
 using LinearAlgebra
 using Random
 
 # separation.jl is included by setup.jl; this file is included after setup.jl.
-# The third-party FrankWolfe.jl wrapper lives in third-party/wrapper_frankwolfe.jl
-# (included from setup.jl after validate.jl).
 
 """
     compute_h_at_prices(γ_ref, w)
@@ -51,27 +61,6 @@ function linfty_subgradient(r::AbstractVector{T}) where {T}
 end
 
 """
-    compute_residual_subgrad(Ξ, γ_ref, w, batch)
-
-Return u ∈ ℝ^{K×n} with rows u[k,:] = ∂‖target_k - h_ℓ(p_k)‖_∞ for k ∈ batch
-(zero outside batch). This is the LMO direction: maximize Σ_k ⟨u_k, γ(p_k)⟩.
-"""
-function compute_residual_subgrad(Ξ, γ_ref::Ref{Array{T,3}},
-    w::AbstractVector{T}, batch::AbstractVector{Int}) where {T}
-    K = length(Ξ)
-    n = length(Ξ[1][1])
-    H = compute_h_at_prices(γ_ref, w)
-    u = zeros(T, K, n)
-    for k in batch
-        p_k, g_k = Ξ[k]
-        target = p_k .* g_k
-        r = target .- @view H[k, :]
-        u[k, :] .= linfty_subgradient(r)
-    end
-    return u
-end
-
-"""
     evaluate_train_loss(Ξ, γ_ref, w)
 
 Mean L∞ residual over Ξ:  (1/K) Σ_k ‖P_k g_k - h(p_k)‖_∞.
@@ -101,82 +90,158 @@ function fw_step_size(iter::Int; rule::Symbol=:diminishing)
     end
 end
 
-# Iteration-table layout for run_method_tracked_fw. Widths are taken from
-# the formatted dummy row so the header lines up without hand-tuned %5/%10
-# magic in the per-iter call site.
+# Iteration-table layout for run_method_tracked_fw.
 const FW_TABLE = IterTable(
-    ["iter", "train",  "test",   "step η", "Δ(F)",   "T",   "t(s)"],
-    ["%5d",  "%10.3e", "%10.3e", "%10.3e", "%10.3e", "%5d", "%10.4f"],
-    Any[1,   1.0e-3,   1.0e-3,   1.0e-3,   1.0e-3,   1,     1.234],
+    ["iter", "train",  "test",   "step η", "Δ(F)",   "T",   "step", "t(s)"],
+    ["%5d",  "%10.3e", "%10.3e", "%10.3e", "%10.3e", "%5d", "%6s",  "%10.4f"],
+    Any[1,   1.0e-3,   1.0e-3,   1.0e-3,   1.0e-3,   1,     "FW",   1.234],
 )
 
 """
-    run_method_tracked_fw(name, kwargs, Ξ_train, Ξ_test=nothing; verbose=true)
+    fw_line_search(φ, η_max; iters=45) -> η
 
-Stochastic Frank-Wolfe / gradient boosting runner. Same return signature
-as `run_method_tracked`: returns `(fa, γ_ref, history)`.
+Line search for a CONVEX 1-D restriction `φ(η) = f(x + η·d)` on `[0, η_max]`, by
+golden-section search. Both FW runners (Fisher ℓ∞ and Arrow–Debreu ℓ1) minimize a
+convex objective, so the restriction is convex and golden-section converges to its
+minimizer; the endpoints `{0, η_max}` are compared too, so a min at 0 (no improving
+step) or at `η_max` (a full FW step / a weight-zeroing away "drop") is captured.
+Shared by `run_method_tracked_fw` and `run_ad_tracked_fw`.
+"""
+function fw_line_search(φ, η_max::Real; iters::Int=45)
+    η_max <= 0 && return 0.0
+    r = (sqrt(5.0) - 1) / 2
+    a, b = 0.0, float(η_max)
+    c = b - r * (b - a)
+    d = a + r * (b - a)
+    fc, fd = φ(c), φ(d)
+    for _ in 1:iters
+        if fc < fd
+            b, d, fd = d, c, fc
+            c = b - r * (b - a)
+            fc = φ(c)
+        else
+            a, c, fc = c, d, fd
+            d = a + r * (b - a)
+            fd = φ(d)
+        end
+        (b - a) < 1e-12 && break
+    end
+    η = (a + b) / 2
+    fη, f0, fM = φ(η), φ(0.0), φ(float(η_max))
+    best, fb = η, fη
+    f0 < fb && ((best, fb) = (0.0, f0))
+    fM < fb && (best = float(η_max))
+    return best
+end
 
-!!! note "Prefer `run_method_tracked_fwjl`"
-    This is a minimal hand-rolled FW loop kept for reference and for
-    cases where pulling in FrankWolfe.jl is undesirable. For production
-    use prefer `run_method_tracked_fwjl` (in
-    `third-party/wrapper_frankwolfe.jl`), which delegates to the
-    FrankWolfe.jl package and supports away-steps, line search, and
-    active-set bookkeeping that this manual loop does not.
+"""
+    run_method_tracked_fw(name, kwargs, Ξ_train, Ξ_test=nothing; verbosity=1)
+
+Hand-rolled away-step Frank–Wolfe runner for the Fisher surrogate-fitting master.
+Same return signature as `run_method_tracked`: `(fa, γ_ref, history)`.
+
+Maintains an explicit active set `(γ_t, params_t, class_t, w_t)` with FW steps,
+away steps, and weight-zeroing drops; the step size comes from `fw_line_search`
+(or the diminishing `2/(ℓ+2)` rule). Stopping is ours alone — tol_obj /
+tol_delta / max_iters / timelimit, never a duality gap. The best full-batch
+iterate is snapshotted and restored (FW is non-monotone under subsampling).
 
 `kwargs` entries:
-  :max_iters    (default 200)
-  :batch_size   (default 0 → full batch; otherwise the mini-batch size b ≤ K)
-  :tol_obj      (default 1e-3)        — stop when train loss < tol_obj
-  :tol_delta    (default 1e-5)        — stop when running improvement stalls
-  :step_rule    (default :diminishing)
-  :seed         (default 0)
+  :max_iters    (200)
+  :tol_obj      (1e-3)            stop when train loss < tol_obj   (nothing ⇒ off)
+  :tol_delta    (1e-5)            stop when the windowed mean drop stalls (nothing ⇒ off)
+  :step_rule    (:linesearch)     :linesearch | :diminishing
+  :away_steps   (true)            enable away steps + drops
+  :classes      ([:ces])          LMO class menu (find_cut_single)
+  :sample_size  (0)               >0 ⇒ stochastic LMO (SFW); legacy alias :batch_size
+  :sample_hard  (false)           boosting-style residual-weighted subsample
+  :seed         (0)
+  :timelimit    (Inf)
+Any other key is forwarded to `find_cut_single` (e.g. ces_sigma_lower).
 """
 function run_method_tracked_fw(name::Symbol, kwargs::Dict,
     Ξ_train, Ξ_test=nothing; verbosity::Int=1)
 
-    # One-shot nudge toward the FrankWolfe.jl wrapper. `maxlog=1` so a
-    # batch sweep that calls this runner many times doesn't spam the log.
-    @warn """run_method_tracked_fw is a minimal hand-rolled FW loop \
-             (diminishing step only, no away-steps, no line search). \
-             For production runs prefer run_method_tracked_fwjl from \
-             third-party/wrapper_frankwolfe.jl, which delegates to the \
-             FrankWolfe.jl package.""" maxlog=1
-
-    # 0 = silent; ≥1 = per-iteration table. FW's inner separation call is
-    # already silent so the level-2 step adds no extra detail here.
     verbose = verbosity >= 1
+    verbose_separation = verbosity >= 2
 
-    max_iters = get(kwargs, :max_iters, 200)
-    batch_size = get(kwargs, :batch_size, 0)
-    tol_obj = get(kwargs, :tol_obj, 1e-3)
-    tol_delta = get(kwargs, :tol_delta, 1e-5)
-    step_rule = get(kwargs, :step_rule, :diminishing)
-    rng_seed = get(kwargs, :seed, 0)
-    timelimit = get(kwargs, :timelimit, Inf)        # wall-clock cap, seconds
+    max_iters  = get(kwargs, :max_iters, 200)
+    tol_obj    = get(kwargs, :tol_obj, 1e-3)
+    tol_delta  = get(kwargs, :tol_delta, 1e-5)
+    step_rule  = Symbol(get(kwargs, :step_rule, :linesearch))
+    away_steps = get(kwargs, :away_steps, true) === true
+    rng_seed   = get(kwargs, :seed, 0)
+    timelimit  = get(kwargs, :timelimit, Inf)
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
-    f_real = get(kwargs, :f_real, nothing)
-    interval_eval_excess = get(kwargs, :interval_eval_excess, 0)
+    classes    = Vector{Symbol}(get(kwargs, :classes, Symbol[:ces]))
+    # FW vs SFW is implied by subsampling alone (no separate path): sample_size>0
+    # makes the LMO stochastic. :batch_size is the legacy alias.
+    sample_size = Int(get(kwargs, :sample_size, get(kwargs, :batch_size, 0)))
+    sample_hard = get(kwargs, :sample_hard, false) === true
 
+    # Everything not consumed by the loop is forwarded to find_cut_single.
+    _control = (:max_iters, :tol_obj, :tol_delta, :tol_rc, :step_rule, :away_steps,
+        :seed, :timelimit, :interval_eval_test, :interval_eval_excess, :f_real,
+        :classes, :sample_size, :batch_size, :sample_hard, :drop, :interval_dropping,
+        :ad_delta, :ad_endow_mode, :ad_mask_size)
+    oracle_kw = Dict{Symbol,Any}(k => v for (k, v) in kwargs if !(k in _control))
+
+    K = length(Ξ_train)
     n = length(Ξ_train[1][1])
-    K_train = length(Ξ_train)
     has_test = !isnothing(Ξ_test)
-    rng = MersenneTwister(rng_seed)
-    bs = batch_size <= 0 ? K_train : min(batch_size, K_train)
+    Random.seed!(rng_seed)
 
-    # Initialize surrogate market with one random CES agent (mirror the CG code path).
-    ws = cpu_workspace(n)
-    add_ces!(ws, 1; ρ=rand(1), scale=30.0, sparsity=0.99)
-    fa = FisherMarket(ws)
-    fa.w[1] = 1.0
-    γ_ref = Ref(compute_gamma_from_market(fa, Ξ_train))
-    w_vec = Float64[1.0]                        # FW iterate weights (own copy)
+    targets = [Ξ_train[k][1] .* Ξ_train[k][2] for k in 1:K]
+    _t0 = time()
+    _remaining() = isfinite(timelimit) ? max(1.0, timelimit - (time() - _t0)) : nothing
 
-    # Track best iterate (FW objective is non-monotone; averaged iterate is theoretical,
-    # best-seen is the practical surrogate).
-    best_obj = Inf
-    best_w = copy(w_vec)
-    best_m = fa.m
+    # ---- active set + objective helpers ----------------------------------------
+    Γ = Matrix{Float64}[]      # γ_t over the training prices (K×n)
+    P = NamedTuple[]           # oracle params per atom (y, σ)
+    CL = Symbol[]              # class per atom
+    w = Float64[]              # convex weights, Σ = 1
+
+    f_obj = function (H)
+        s = 0.0
+        @inbounds for k in 1:K
+            mx = 0.0
+            for j in 1:n
+                dval = abs(targets[k][j] - H[k, j]); dval > mx && (mx = dval)
+            end
+            s += mx
+        end
+        return s / K
+    end
+    Hmat = function ()
+        H = zeros(Float64, K, n)
+        @inbounds for t in eachindex(w)
+            wt = w[t]; Γt = Γ[t]
+            for k in 1:K, j in 1:n
+                H[k, j] += wt * Γt[k, j]
+            end
+        end
+        return H
+    end
+    subgrad = function (H)
+        u = zeros(Float64, K, n)
+        @inbounds for k in 1:K
+            r = targets[k] .- @view H[k, :]
+            js = argmax(abs.(r))
+            u[k, js] = sign(r[js])
+        end
+        return u
+    end
+    lmo = function (u, spw)
+        return find_cut_single(Ξ_train, u, 0.0, classes;
+            sample_size=sample_size, sample_weights=spw,
+            verbose=verbose_separation, timelimit=_remaining(), oracle_kw...)
+    end
+
+    # Seed vertex: LMO best response to the all-zero predictor.
+    H0 = zeros(Float64, K, n)
+    c0 = lmo(subgrad(H0), nothing)
+    push!(Γ, Matrix{Float64}(c0.γ_new)); push!(P, c0.params)
+    push!(CL, c0.class); push!(w, 1.0)
 
     history = Dict(
         :primal_obj => Float64[],
@@ -185,18 +250,22 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
         :num_agents => Int[],
     )
     last_test_err = Ref(NaN)
-    last_excess = Ref(NaN)
-    has_excess = !isnothing(f_real) && interval_eval_excess > 0
+    best_f = Inf
+    best_P = copy(P); best_CL = copy(CL); best_w = copy(w)
 
-    _t0 = time()
     if verbose
         print_banner(FW_TABLE, BANNER_TITLE)
         print_config("method",          String(name))
-        print_config("alias",           "FW (manual)")
-        print_config("batch / K_train", @sprintf("%d / %d", bs, K_train))
+        print_config("alias",           "away-step FW (manual)")
+        print_config("classes",         join(String.(classes), ", "))
+        print_config("K (training samples)", K)
+        print_config("n (goods)",       n)
+        print_config("subsample (SFW)", sample_size > 0 ?
+            (sample_hard ? "$(sample_size), residual-weighted" : "$(sample_size), uniform") : "off (full batch)")
+        print_config("away_steps",      string(away_steps))
+        print_config("step_rule",       String(step_rule))
         print_config("max_iters",       max_iters)
         print_config("timelimit (s)",   @sprintf("%g", Float64(timelimit)))
-        print_config("step_rule",       String(step_rule))
         print_config("tol_obj",         isnothing(tol_obj)   ? "off" : @sprintf("%g", tol_obj))
         print_config("tol_delta",       isnothing(tol_delta) ? "off" : @sprintf("%g", tol_delta))
         println("-"^table_width(FW_TABLE))
@@ -209,138 +278,153 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
                 @sprintf("time limit reached (%.1fs > %.1fs)", time() - _t0, timelimit))
             break
         end
-        # ---- evaluate / record ---------------------------------------------------------
-        primal_obj = evaluate_train_loss(Ξ_train, γ_ref, w_vec)
-        # Sync fa.w to current FW iterate before evaluating test error.
-        if length(fa.w) != length(w_vec)
-            # Should not happen post-add_to_market! but stay defensive.
-            resize!(fa.w, length(w_vec))
-        end
-        fa.w .= w_vec
-        # test_err policy: N>0 ⇒ every N iters; N==-1 ⇒ only after the loop.
-        if has_test && interval_eval_test > 0 && (iter % interval_eval_test == 0)
-            last_test_err[] = evaluate_test_error(fa, Ξ_test)
-        end
-        te = last_test_err[]   # alias for the logging closure below
-        if has_excess && fa.m > 0 && (iter % interval_eval_excess == 0)
-            try
-                v = validate_surrogate(fa, f_real; verbose=false)
-                last_excess[] = v.excess_surrogate_linf
-            catch err
-                @warn "[$name iter $iter] validate_surrogate failed" err
-            end
-        end
-        push!(history[:primal_obj], primal_obj)
-        push!(history[:test_err], te)
-        push!(history[:excess], last_excess[])
-        push!(history[:num_agents], fa.m)
 
-        if primal_obj < best_obj
-            best_obj = primal_obj
-            best_w = copy(w_vec)
-            best_m = fa.m
+        H = Hmat()
+        fcur = f_obj(H)
+        # Test error on the CURRENT iterate (build a market from the active set).
+        if has_test && interval_eval_test > 0 && (iter % interval_eval_test == 0)
+            last_test_err[] = evaluate_test_error(_build_fa(P, CL, w, n), Ξ_test)
+        end
+        te = last_test_err[]
+        push!(history[:primal_obj], fcur)
+        push!(history[:test_err], te)
+        push!(history[:excess], NaN)
+        push!(history[:num_agents], length(w))
+
+        if fcur < best_f
+            best_f = fcur
+            best_P = copy(P); best_CL = copy(CL); best_w = copy(w)
         end
 
         improvement = length(history[:primal_obj]) >= 2 ?
-                      history[:primal_obj][end-1] - primal_obj : NaN
+                      history[:primal_obj][end-1] - fcur : NaN
+        _log_row(η_val, kind) = verbose && print_row(FW_TABLE,
+            Any[iter, fcur, te, η_val, isnan(improvement) ? 0.0 : improvement,
+                length(w), kind, time() - _t0])
 
-        function _log_row(η_val=NaN)
-            verbose || return
-            print_row(FW_TABLE, Any[iter, primal_obj, te, η_val,
-                                    isnan(improvement) ? 0.0 : improvement,
-                                    fa.m, time() - _t0])
-        end
-
-        # ---- convergence checks --------------------------------------------------------
-        # FW iterates are non-monotone under stochastic / subgradient updates; we only
-        # check absolute tolerance and the running mean of the last `window` iterates.
-        # `nothing` on either tolerance disables the corresponding check.
-        if !isnothing(tol_obj) && primal_obj < tol_obj
-            _log_row()
+        if !isnothing(tol_obj) && fcur < tol_obj
+            _log_row(0.0, "-")
             verbose && print_continuation(FW_TABLE,
-                @sprintf("converged (obj/K = %.2e < tol_obj=%g)", primal_obj, tol_obj))
+                @sprintf("converged (obj/K = %.2e < tol_obj=%g)", fcur, tol_obj))
             break
         end
         window = 10
         if !isnothing(tol_delta) && length(history[:primal_obj]) >= 2 * window
-            recent = history[:primal_obj][end-window+1:end]
-            prior = history[:primal_obj][end-2*window+1:end-window]
+            recent = @view history[:primal_obj][end-window+1:end]
+            prior = @view history[:primal_obj][end-2*window+1:end-window]
             mean_drop = sum(prior) / window - sum(recent) / window
             if mean_drop < tol_delta
-                _log_row()
+                _log_row(0.0, "-")
                 verbose && print_continuation(FW_TABLE,
                     @sprintf("stalled (mean drop over last %d iters = %.2e < tol_delta=%g)",
                              window, mean_drop, tol_delta))
-                # break
+                break
             end
         end
 
-        # ---- mini-batch + subgradient --------------------------------------------------
-        batch = bs == K_train ? collect(1:K_train) :
-                sort!(randperm(rng, K_train)[1:bs])
-        u = compute_residual_subgrad(Ξ_train, γ_ref, w_vec, batch)
+        # ---- LMO + away vertex ------------------------------------------------
+        u = subgrad(H)
+        spw = (sample_hard && sample_size > 0) ?
+              [norm(targets[k] .- @view(H[k, :]), Inf) for k in 1:K] : nothing
+        cand = lmo(u, spw)
+        if isnothing(cand)
+            _log_row(0.0, "-")
+            verbose && print_continuation(FW_TABLE, "LMO returned no cut; terminating")
+            break
+        end
+        s = cand.γ_new
+        g_fw = 0.0
+        @inbounds for k in 1:K, j in 1:n
+            g_fw += u[k, j] * (s[k, j] - H[k, j])
+        end
 
-        # ---- LMO ≡ separation oracle ------------------------------------------------------
-        y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(Ξ_train, u)
-        y_opt, σ_opt, γ_new, _ = solve_separation_lbfgs_ces(Ξ_train, u; y_init=y_lp, σ_init=σ_lp)
-        c_new, ρ_new = recover_ces_params(y_opt, σ_opt)
+        use_away = false
+        a_idx = 0
+        if away_steps && length(w) >= 2
+            a_idx = 1; a_val = Inf
+            for t in eachindex(w)
+                v = 0.0
+                Γt = Γ[t]
+                @inbounds for k in 1:K, j in 1:n
+                    v += u[k, j] * Γt[k, j]
+                end
+                v < a_val && (a_val = v; a_idx = t)
+            end
+            g_away = 0.0
+            Γa = Γ[a_idx]
+            @inbounds for k in 1:K, j in 1:n
+                g_away += u[k, j] * (H[k, j] - Γa[k, j])
+            end
+            use_away = g_away > g_fw
+        end
 
-        # ---- FW update -----------------------------------------------------------------
-        η = fw_step_size(iter; rule=step_rule)
-        w_vec .*= (1 - η)
-        push!(w_vec, η)
+        if use_away
+            Γa = Γ[a_idx]
+            D = H .- Γa
+            wa = w[a_idx]
+            η_max = wa < 1.0 ? wa / (1 - wa) : 1.0
+            kind = "away"
+        else
+            D = s .- H
+            η_max = 1.0
+            kind = "FW"
+        end
 
-        add_to_gamma!(γ_ref, γ_new)
-        add_to_market!(fa, c_new, ρ_new, η)
-        # add_to_market! appended weight η to fa.w but didn't scale older entries.
-        fa.w .= w_vec
+        if step_rule === :linesearch
+            η = fw_line_search(η -> f_obj(H .+ η .* D), η_max)
+        else
+            η = min(fw_step_size(iter), η_max)
+        end
 
-        _log_row(η)
+        if use_away
+            w .*= (1 + η)
+            w[a_idx] -= η
+            if w[a_idx] <= 1e-10
+                deleteat!(Γ, a_idx); deleteat!(P, a_idx)
+                deleteat!(CL, a_idx); deleteat!(w, a_idx)
+                kind = "drop"
+            end
+        else
+            w .*= (1 - η)
+            push!(Γ, Matrix{Float64}(s)); push!(P, cand.params)
+            push!(CL, cand.class); push!(w, η)
+        end
+        sw = sum(w); sw > 0 && (w ./= sw)   # defensive renormalization
+
+        _log_row(η, kind)
     end
 
-    # Restore best iterate before returning (matches CG's "drop then return" practice).
-    if best_m == length(best_w) <= fa.m
-        # Truncate γ_ref and fa to the best iterate size, restore best weights.
-        m_cur = fa.m
-        if best_m < m_cur
-            γ_ref[] = γ_ref[][1:best_m, :, :]
-            fa.m = best_m
-            fa.c = fa.c[:, 1:best_m]
-            fa.ρ = fa.ρ[1:best_m]
-            fa.σ = fa.σ[1:best_m]
-            fa.x = fa.x[:, 1:best_m]
-            fa.g = fa.g[:, 1:best_m]
-            fa.s = fa.s[:, 1:best_m]
-            if length(fa.val_u) >= best_m
-                fa.val_u = fa.val_u[1:best_m]
-            end
-            if length(fa.ε_br_play) >= best_m
-                fa.ε_br_play = fa.ε_br_play[1:best_m]
-            end
-        end
-        if length(fa.w) != best_m
-            resize!(fa.w, best_m)
-        end
-        fa.w .= best_w
-    end
+    # ---- build the returned market from the best-seen iterate ------------------
+    isempty(best_w) && (best_P = copy(P); best_CL = copy(CL); best_w = copy(w))
+    fa = _build_fa(best_P, best_CL, best_w, n)
+    γ_ref = Ref(compute_gamma_from_market(fa, Ξ_train))
 
-    _elapsed = time() - _t0
-    # Final test_err evaluation always overwrites the trailing slot, so the
-    # last entry reflects the converged surrogate regardless of `interval_eval_test`.
     if has_test && !isempty(history[:test_err])
         history[:test_err][end] = evaluate_test_error(fa, Ξ_test)
     end
-    if has_excess && fa.m > 0 && !isempty(history[:excess])
-        try
-            v = validate_surrogate(fa, f_real; verbose=false)
-            history[:excess][end] = v.excess_surrogate_linf
-        catch err
-            @warn "[$name final] validate_surrogate failed" err
-        end
-    end
+    _elapsed = time() - _t0
     if verbose
-        @printf("--- done: %d agents, best obj/K=%.3e, t=%.4fs ---\n",
-            fa.m, best_obj, _elapsed)
+        @printf("--- done: %d atoms, best obj/K=%.3e, t=%.4fs ---\n",
+            fa.m, best_f, _elapsed)
     end
     return fa, γ_ref, history
+end
+
+"""
+    _build_fa(params, classes, w, n) -> FisherMarket
+
+Construct a FisherMarket from an active set: one column per atom with its
+(y, σ) params, class, and convex weight. Mirrors the active-set reconstruction
+in wrapper_frankwolfe.jl.
+"""
+function _build_fa(params::AbstractVector, classes::AbstractVector, w::AbstractVector, n::Int)
+    fa = FisherMarket(cpu_workspace(n, 0))
+    for (p, cl, wt) in zip(params, classes, w)
+        wt <= 0 && continue
+        add_column_to_market!(fa, p, cl, Float64(wt))
+    end
+    if fa.m == 0   # everything zero-weight (degenerate): seed one uniform CES atom
+        add_column_to_market!(fa, (y=zeros(n), σ=0.5), :ces, 1.0)
+    end
+    return fa
 end

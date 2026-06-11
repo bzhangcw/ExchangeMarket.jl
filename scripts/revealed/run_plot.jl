@@ -113,11 +113,10 @@ function build_plot_ctx(;
         method_names=method_names,
         interval_marker=interval_marker,
         # Optional per-series styling, keyed by the same Symbols as `agg`.
-        # Each value is a NamedTuple `(color, marker, label)`. When empty (the
-        # default, e.g. run_test.jl contexts), the plotter falls back to the
-        # global `colors` / `marker_style` / `display_name` tables. Lets a
-        # producer (e.g. run_one_method_ablation.jl) describe pseudo-methods
-        # the global tables don't know, so run_plot.jl renders them unchanged.
+        # Each value is a NamedTuple `(color, marker, label)`. When empty, the
+        # plotter falls back to the global `colors` / `marker_style` /
+        # `display_name` tables. run_test.jl's per-variant context fills this so
+        # variant `sym`s the global tables don't know render unchanged.
         style=style,
     )
 end

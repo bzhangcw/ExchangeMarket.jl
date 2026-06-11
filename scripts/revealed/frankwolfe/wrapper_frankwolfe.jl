@@ -64,6 +64,30 @@ function FrankWolfe.compute_extreme_point(lmo::CESSeparationLMO{T},
 end
 
 """
+    warn_fwjl_inexact_lmo(method; subsampled)
+
+Shared early-stop warning for the FrankWolfe.jl runners (`fwjl`, `adfwjl`).
+
+FrankWolfe's only stopping rule is the Frank–Wolfe duality gap, which is a valid
+optimality certificate ONLY when the LMO returns the exact minimizer of
+`⟨∇f(x), v⟩`. Both runners use an INEXACT LMO — the CES separation is an
+LBFGS-local (non-global) solve — so the reported gap can under-estimate the true
+gap and trip `STATUS_OPTIMAL` early, before `max_iters`. Same root cause and same
+message for both. `subsampled=true` (the adfwjl `--sample-size` case, where the
+oracle is also stochastic) appends that extra clause; the Fisher `fwjl` LMO never
+subsamples, so it passes `false`.
+"""
+function warn_fwjl_inexact_lmo(method; subsampled::Bool)
+    @warn "$method: FrankWolfe's gap-based stop may terminate the run early " *
+          "(before max_iters) — its only stop criterion is the duality gap, " *
+          "which is reliable only with an exact LMO. The CES separation is " *
+          "LBFGS-local (non-global)" *
+          (subsampled ? ", and --sample-size subsamples it (stochastic)" : "") *
+          ", so the gap can under-estimate and trip STATUS_OPTIMAL short of the " *
+          "optimum. This is expected."
+end
+
+"""
     run_method_tracked_fwjl(name, kwargs, Ξ_train, Ξ_test=nothing; verbosity=1)
 
 Drive the FW iteration with FrankWolfe.jl's `away_frank_wolfe`, which
@@ -92,6 +116,12 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
     timelimit = get(kwargs, :timelimit, Inf)
     rng_seed  = get(kwargs, :seed, 0)
     line_search = get(kwargs, :line_search, FrankWolfe.Agnostic())
+
+    # The CES separation LMO is LBFGS-local (non-global), so FrankWolfe's
+    # gap-based stop can terminate early — same false-stop as adfwjl. --sample-size
+    # does NOT reach this LMO (CESSeparationLMO always uses the full batch), hence
+    # subsampled=false.
+    warn_fwjl_inexact_lmo(String(name); subsampled=false)
 
     K = length(Ξ_train)
     n = length(Ξ_train[1][1])
@@ -198,9 +228,10 @@ function run_method_tracked_fwjl(name::Symbol, kwargs::Dict,
         return (time() - _t0) ≤ timelimit
     end
 
-    # `tol_obj === nothing` ⇒ disable FW.jl's epsilon stop by passing a
-    # vanishingly small value (the package expects a real number).
-    epsilon_eff = isnothing(tol_obj) ? eps(Float64) : tol_obj
+    # `tol_obj === nothing` (--tol-obj 0.0) ⇒ disable FW.jl's dual-gap stop by
+    # setting epsilon = 0.0, so the run continues to max_iteration / the time
+    # limit. (Only `nothing` is rejected by the package; 0.0 is a valid real.)
+    epsilon_eff = isnothing(tol_obj) ? 0.0 : tol_obj
     if verbose
         print_banner(FWJL_TABLE, BANNER_TITLE)
         print_config("method",        String(name))

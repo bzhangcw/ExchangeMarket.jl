@@ -164,6 +164,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     # `f_real::Union{FisherMarket,Nothing}` — pass via kwargs from test_real.jl.
     # `interval_eval_excess`: 0 or -1 disables, >0 evaluates every N iters.
     f_real = get(kwargs, :f_real, nothing)
+    wealth_fn = get(kwargs, :wealth_fn, nothing)   # ground-truth wealth model for real demand
     interval_eval_excess = get(kwargs, :interval_eval_excess, 0)
     @assert !isempty(classes) "method kwargs :classes must be non-empty"
 
@@ -277,7 +278,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         print_config("tol_|∇|", isnothing(tol_rc) ? "off" : @sprintf("%g", tol_rc))
         print_config("sample_size", sample_size)
         sample_size > 0 && print_config("mini-batch", sample_hard ?
-            "residual-weighted (--sample-hard)" : "uniform")
+                                                      "residual-weighted (--sample-hard)" : "uniform")
         print_config("interval_dropping", interval_dropping)
         println("-"^table_width(CPM_TABLE))
         print_header(CPM_TABLE)
@@ -297,7 +298,8 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # numerical issues early — and stay silent afterward.
         w, s_slack, model_primal, balance, budget = solve_wealth_redist_primal(
             Ξ_train, γ_ref[];
-            verbose=(iter == 1) && verbose,
+            # verbose=(iter == 1) && verbose,
+            verbose=false,
             timelimit=_remaining,
             pinned_idx=_pinned_idx(),
             pinned_w=nonh_w,
@@ -342,7 +344,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # Market-excess (same forward-fill cadence as test).
         if has_excess && fa.m > 0 && (iter % interval_eval_excess == 0)
             try
-                v = validate_surrogate(fa, f_real; verbose=false)
+                v = validate_surrogate(fa, f_real; wealth_fn=wealth_fn, verbose=false)
                 last_excess[] = v.excess_surrogate_linf
             catch err
                 @warn "[$name iter $iter] validate_surrogate failed" err
@@ -534,7 +536,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     end
     if has_excess && fa.m > 0 && !isempty(history[:excess])
         try
-            v = validate_surrogate(fa, f_real; verbose=false)
+            v = validate_surrogate(fa, f_real; wealth_fn=wealth_fn, verbose=false)
             history[:excess][end] = v.excess_surrogate_linf
         catch err
             @warn "[$name final] validate_surrogate failed" err

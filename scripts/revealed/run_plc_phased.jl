@@ -84,9 +84,9 @@ function _base_kwargs()
         :timelimit => Inf,
         :interval_eval_test => cfg.interval_eval_test,
     )
-    # AD ground truth (--budget-type ad): per-iter excess validation not wired.
+    # First-order wealth (--wealth-function 1): per-iter excess validation not wired.
     if cfg.do_validate && !isnothing(rd.f_real) && cfg.interval_eval_excess > 0 &&
-       cfg.budget_type !== :ad
+       cfg.wealth_function == 0 && !cfg.lift
         kw[:f_real] = rd.f_real
         kw[:interval_eval_excess] = cfg.interval_eval_excess
     end

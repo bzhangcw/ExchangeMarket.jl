@@ -61,7 +61,12 @@ function __analytic_response(;
     kwargs...
 ) where {T}
     av = isnothing(agent) ? market.agents[i] : agent
-    w = market.w[av.i]
+    # Budget: Fisher agents have a fixed budget in `market.w`; Arrow–Debreu
+    # agents carry an endowment view, so the budget is its value `⟨p, b⟩`.
+    # Write it back so downstream grad!/eval!/hess! see the fresh budget
+    # (removes the need for a separate update_budget! before play!).
+    w = av.b === nothing ? market.w[av.i] : dot(p, av.b)
+    av.b === nothing || (market.w[av.i] = w)
     if av.atype isa LinearAgent
         # linear: bang-per-buck — concentrate on best c_j/p_j
         j₊ = sparse_argmax(av.c) do j, cj

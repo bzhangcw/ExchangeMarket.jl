@@ -192,3 +192,86 @@ function is_plc_optimal_demand(plc::PLCAgent, x::AbstractVector, p::AbstractVect
     return max(g.feas_neg, g.feas_budget, g.util_gap) <= tol
 end
 
+
+# -----------------------------------------------------------------------
+# PLC market excess at a candidate price (single all-in-one LP from
+# `eq.plc.we.check.lp` in `read-econ/choice-ump-plc.tex`). Used by the PLC
+# branch of `validate_surrogate` (validate.jl) to score a surrogate's
+# equilibrium price against a PLC ground-truth market.
+#
+# Given a price `p` and PLC agents `(agents[i], w[i])` with unit supply
+# q = 1, this solves the joint LP
+#
+#     min τ
+#     s.t. UMP primal-dual + strong duality for every agent i,
+#          -τ 1 ≤ diag(p) (1 − Σ_i x_i) ≤ τ 1, τ ≥ 0.
+#
+# Returns (tau=τ*, x=selection, status=termination_status, time=wall).
+# τ* == 0 iff p is a Walrasian equilibrium of the PLC market.
+# -----------------------------------------------------------------------
+function solve_plc_excess(p::AbstractVector, agents::Vector{<:PLCAgent},
+    w::AbstractVector; verbose::Bool=false, timelimit::Union{Real,Nothing}=nothing)
+    m = length(agents)
+    n = length(p)
+    @assert length(w) == m "budget vector length mismatch"
+    @assert all(a -> size(a.a, 2) == n, agents) "agent gradient widths must equal n"
+    # NaN/Inf in the surrogate equilibrium price would make the LP coefficients
+    # invalid; fail soft so the run produces a row instead of crashing.
+    if any(!isfinite, p) || any(p .<= 0)
+        @warn "solve_plc_excess: non-finite or non-positive price; skipping LP" p_minmax = extrema(p)
+        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=:bad_price, time=0.0)
+    end
+
+    model = Model(Mosek.Optimizer)
+    verbose || set_silent(model)
+    if !isnothing(timelimit) && timelimit > 0
+        set_time_limit_sec(model, Float64(timelimit))
+    end
+
+    # Per-agent decision variables.
+    x = [@variable(model, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    t = [@variable(model, base_name = "t_$(i)") for i in 1:m]
+    U = [@variable(model, [1:agents[i].L], lower_bound = 0.0, base_name = "U_$(i)") for i in 1:m]
+    ν = [@variable(model, [1:n], lower_bound = 0.0, base_name = "nu_$(i)") for i in 1:m]
+    μ = [@variable(model, lower_bound = 0.0, base_name = "mu_$(i)") for i in 1:m]
+    @variable(model, τ >= 0.0)
+
+    for i in 1:m
+        ai = agents[i]
+        A_i = ai.a               # L × n
+        b_i = ai.b               # L
+        L_i = ai.L
+        # UMP primal: A_i x_i + b_i .≥ t_i 1, ⟨p, x_i⟩ = w_i.
+        @constraint(model, A_i * x[i] .+ b_i .>= t[i] .* ones(L_i))
+        @constraint(model, dot(p, x[i]) == w[i])
+        # UMP dual: A_i' U_i + ν_i = μ_i p, ⟨1, U_i⟩ = 1.
+        @constraint(model, A_i' * U[i] .+ ν[i] .== μ[i] .* p)
+        @constraint(model, sum(U[i]) == 1.0)
+        # Strong duality: t_i = ⟨b_i, U_i⟩ + w_i μ_i.
+        @constraint(model, t[i] == dot(b_i, U[i]) + w[i] * μ[i])
+    end
+
+    # Market clearing: -τ 1 ≤ diag(p) (1 - Σ x_i) ≤ τ 1.
+    aggregate = sum(x[i] for i in 1:m)
+    for j in 1:n
+        @constraint(model, p[j] * (1.0 - aggregate[j]) <= τ)
+        @constraint(model, p[j] * (1.0 - aggregate[j]) >= -τ)
+    end
+
+    @objective(model, Min, τ)
+    t_start = time()
+    optimize!(model)
+    elapsed = time() - t_start
+
+    status = termination_status(model)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.TIME_LIMIT)
+        @warn "PLC excess LP terminated abnormally" status
+        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=status, time=elapsed)
+    end
+    return (
+        tau=value(τ),
+        x=[value.(x[i]) for i in 1:m],
+        status=status,
+        time=elapsed,
+    )
+end

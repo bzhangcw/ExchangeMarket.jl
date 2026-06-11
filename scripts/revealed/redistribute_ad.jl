@@ -131,6 +131,11 @@ Keyword arguments:
   reused. The caller wipes the Ref to force a rebuild (e.g. after
   `drop_zero_atoms_ad` reshuffles γ rows). The δ spec must not change across
   cached solves (asserted).
+- `timelimit::Union{Real,Nothing}` — accepted for API compatibility but
+  intentionally NOT applied to the master solve. Gurobi's barrier (Method=2,
+  no crossover) returns no solution if cut off before convergence, which makes
+  the downstream `value(...)` reads crash; the CG loop enforces the wall-clock
+  budget between iterations instead, so the master always runs to completion.
 
 Returns `(B, s, model, balance, supply, δ_val)`:
 - B: m×n endowment matrix (zeros outside each atom's mask).
@@ -214,9 +219,13 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
                 end
             end
             cache_hit = true
-            if !isnothing(timelimit) && timelimit > 0
-                set_time_limit_sec(model, Float64(timelimit))
-            end
+            # NOTE: `timelimit` is intentionally NOT applied to the master
+            # solve. Gurobi's barrier (Method=2, no crossover) returns *no*
+            # solution if it is cut off before converging, and the downstream
+            # `value(...)` reads then crash ("0 solution(s) in the model").
+            # The CG loop (run_ad_tracked) already enforces the wall-clock
+            # budget by checking the elapsed time before each iteration, so the
+            # master is left to run to completion and always returns a point.
         end
     end
 
@@ -226,9 +235,7 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         # near-optimal interior (u, ν) is all the separation oracle consumes,
         # and the smoother dual trajectory yields more diverse columns.
         set_attribute(model, "Method", 2)
-        if !isnothing(timelimit) && timelimit > 0
-            set_time_limit_sec(model, Float64(timelimit))
-        end
+        # See the note above: no per-solve time limit on the master.
 
         # Masked endowment variables: atom t owns only goods in _owned(t).
         b_vars = Vector{Dict{Int,VariableRef}}()
@@ -304,6 +311,16 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     if !isnothing(cache)
         cache[] = (model=model, b_vars=b_vars, s=s_var, balance=balance,
             supply=supply, δ_var=δ_var, delta=delta, last_m=m, K=K, n=n)
+    end
+
+    # No primal point available (e.g. barrier numerical failure or
+    # infeasibility): reading `value(...)` would throw the cryptic MOI
+    # "0 solution(s) in the model". Return a sentinel `B = nothing` instead and
+    # let the caller decide whether to fall back to the last good surrogate or
+    # error. `model`/`balance`/`supply` are still returned so the caller can
+    # inspect `termination_status(model)` for the message.
+    if !has_values(model)
+        return nothing, nothing, model, balance, supply, NaN
     end
 
     # Assemble B (m×n) from the per-atom variable dicts (zeros off-mask).

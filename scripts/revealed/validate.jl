@@ -76,148 +76,167 @@ function aggregate_ces_demand(fa::FisherMarket, p::AbstractVector)
 end
 
 # -----------------------------------------------------------------------
-# End-to-end validation: solve surrogate equilibrium, evaluate real
-# market's aggregate demand at that price, return ‖p(q-g)‖.
+# Real-market aggregate demand at price p with a price-dependent wealth
+# function: g(p) = Σ_i wealth_fn(p)[i] γ_i(p) / p. For constant wealth
+# (wealth_fn(p) = w0) this equals aggregate_ces_demand; for first-order
+# (Arrow–Debreu) wealth (wealth_fn(p) = Bᵀp) it is the endowment-valued
+# demand. Used by validate_surrogate so the real market's demand at the
+# surrogate's equilibrium price honors the ground-truth wealth model.
+# -----------------------------------------------------------------------
+function real_demand_at(fa::FisherMarket, wealth_fn, p::AbstractVector)
+    w = wealth_fn(p)
+    g = zeros(length(p))
+    for i in 1:fa.m
+        γ_i = compute_gamma(p, Vector(fa.c[:, i]), fa.σ[i])
+        g .+= w[i] .* γ_i ./ p
+    end
+    return g
+end
+
+# -----------------------------------------------------------------------
+# Project the surrogate's equilibrium price onto the real market's good
+# space. When the surrogate was fit on money-lifted data it has n+1 goods
+# (the extra one is money); the original n-good price is q = p/π = the
+# goods prices in units of money (lem.lift). For an un-lifted surrogate
+# (same n as the real market) this is the identity.
+# -----------------------------------------------------------------------
+function _project_to_real(p_s::AbstractVector, n_real::Int)
+    if length(p_s) == n_real + 1
+        π = p_s[end]
+        q = p_s[1:n_real] ./ π                 # q* = p*/π*
+        @printf("  [lift] money-lifted surrogate (%d goods): projecting q*=p*/π* onto %d goods (π*=%.4g, goods scale ⟨1,q*⟩=%.4g)\n",
+            length(p_s), n_real, π, sum(q))
+        return q
+    else
+        return p_s
+    end
+end
+
+# -----------------------------------------------------------------------
+# Price-scaled excess of the real market at the surrogate's equilibrium price.
+# `d_oracle(p) -> ℝ^{n_real}` is the real market's goods demand at price p.
+# Returns `(orig, lift)`:
+#
+# * `orig` — the ORIGINAL n-good excess `q ⊙ (1 − d(q))`, where `q` is the
+#   surrogate price projected onto the real goods (`q = p̄[1:n]/π` if lifted,
+#   else `q = p`). This is the "does the (projected) price clear the original
+#   market" check (prop.lift.equilibrium).
+#
+# * `lift` — the LIFTED (n+1)-good excess when the surrogate is money-lifted,
+#   else `nothing`. It scores against the lifted real demand
+#   `d̄(p̄) = (d(q), M + ⟨q,1⟩ − W(q))` and supply `(1,…,1,M)`:
+#   `z̄ = p̄ ⊙ ((1,…,1,M) − d̄)`. The money supply `M` cancels, leaving
+#   goods `p̄_{1:n} ⊙ (1 − d(q))` and money `π (W(q) − ⟨q,1⟩)`, `W(q)=⟨q,d(q)⟩`.
+# -----------------------------------------------------------------------
+function _real_excess(d_oracle, p_s::AbstractVector, n_real::Int)
+    if length(p_s) == n_real + 1
+        π = p_s[end]
+        q = p_s[1:n_real] ./ π
+        d = d_oracle(q)
+        orig = q .* (1.0 .- d)
+        lift = vcat(p_s[1:n_real] .* (1.0 .- d), π * (dot(q, d) - sum(q)))
+        return (orig=orig, lift=lift)
+    else
+        d = d_oracle(p_s)
+        return (orig=p_s .* (1.0 .- d), lift=nothing)
+    end
+end
+
+# Build the validation result NamedTuple from the (orig, lift) excess.
+_vresult(p_surr, ex; iters::Int=0) = (
+    p_surrogate=p_surr,
+    excess_surrogate_linf=norm(ex.orig, Inf),
+    excess_surrogate_l1=norm(ex.orig, 1),
+    excess_lift_linf=isnothing(ex.lift) ? NaN : norm(ex.lift, Inf),
+    excess_lift_l1=isnothing(ex.lift) ? NaN : norm(ex.lift, 1),
+    iters_surrogate=iters,
+)
+
+# -----------------------------------------------------------------------
+# End-to-end validation: solve surrogate equilibrium, project to the real
+# market's good space if the surrogate is money-lifted, evaluate the real
+# market's aggregate demand there (honoring the ground-truth wealth model
+# via `wealth_fn`), and return ‖q(1 − g)‖.
 #
 # Fields:
-#   p_surrogate           : simplex-normalized surrogate equilibrium price
-#   excess_surrogate_linf : ‖p_s · (q − g_real(p_s))‖_∞   ← main metric
-#   excess_surrogate_l1   : ‖p_s · (q − g_real(p_s))‖_1
+#   p_surrogate           : (projected) price on the real market's goods
+#   excess_surrogate_linf : ‖q · (1 − g_real(q))‖_∞   ← main metric
+#   excess_surrogate_l1   : ‖q · (1 − g_real(q))‖_1
 #   iters_surrogate       : Mirror Descent iterations used
 # -----------------------------------------------------------------------
 function validate_surrogate(
     fa_surrogate::FisherMarket, f_real::FisherMarket;
-    verbose::Bool=false, kwargs...
+    wealth_fn=nothing, verbose::Bool=false, kwargs...
 )
-    @assert fa_surrogate.n == f_real.n
-    "surrogate and real must have the same number of goods"
+    @assert fa_surrogate.n == f_real.n || fa_surrogate.n == f_real.n + 1 "surrogate must match the real market's good count, or have one extra (money-lifted)"
     # MirrorDec / CESAnalytic only support CES agents. If the surrogate
     # carries any non-CES (gen) agents (QL, ...), the equilibrium solve
     # is undefined here; warn once and return a NaN-shaped result so
     # callers don't have to wrap every call in try/catch.
     if fa_surrogate.storage.gen.m > 0
         @warn "validate_surrogate: surrogate has $(fa_surrogate.storage.gen.m) non-CES (gen) agent(s); equilibrium ops are CES-only and not supported for mixed surrogates. Returning NaN excess." maxlog = 1
-        n = fa_surrogate.n
-        return (
-            p_surrogate=fill(NaN, n),
-            excess_surrogate_linf=NaN,
-            excess_surrogate_l1=NaN,
-            iters_surrogate=0,
-        )
+        return _vresult(fill(NaN, f_real.n), (orig=[NaN], lift=nothing))
     end
     res_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...)
-    p_s = res_s.p
-    q = Vector(f_real.q)
-    g_at_s = aggregate_ces_demand(f_real, p_s)
-    z_s = p_s .* (q .- g_at_s)
-    return (
-        p_surrogate=p_s,
-        excess_surrogate_linf=norm(z_s, Inf),
-        excess_surrogate_l1=norm(z_s, 1),
-        iters_surrogate=res_s.iters,
-    )
+    oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
+             (p -> real_demand_at(f_real, wealth_fn, p))
+    ex = _real_excess(oracle, res_s.p, f_real.n)
+    return _vresult(_project_to_real(res_s.p, f_real.n), ex; iters=res_s.iters)
 end
 
-# -----------------------------------------------------------------------
-# PLC market excess at a candidate price (single all-in-one LP from
-# `eq.plc.we.check.lp` in `read-econ/choice-ump-plc.tex`).
-#
-# Given a price `p` and PLC agents `(agents[i], w[i])` with unit supply
-# q = 1, this solves the joint LP
-#
-#     min τ
-#     s.t. UMP primal-dual + strong duality for every agent i,
-#          -τ 1 ≤ diag(p) (1 − Σ_i x_i) ≤ τ 1, τ ≥ 0.
-#
-# Returns (tau=τ*, x=selection, status=termination_status, time=wall).
-# τ* == 0 iff p is a Walrasian equilibrium of the PLC market.
-# -----------------------------------------------------------------------
-function solve_plc_excess(p::AbstractVector, agents::Vector{<:PLCAgent},
-    w::AbstractVector; verbose::Bool=false, timelimit::Union{Real,Nothing}=nothing)
-    m = length(agents)
-    n = length(p)
-    @assert length(w) == m "budget vector length mismatch"
-    @assert all(a -> size(a.a, 2) == n, agents) "agent gradient widths must equal n"
-    # NaN/Inf in the surrogate equilibrium price would make the LP coefficients
-    # invalid; fail soft so the run produces a row instead of crashing.
-    if any(!isfinite, p) || any(p .<= 0)
-        @warn "solve_plc_excess: non-finite or non-positive price; skipping LP" p_minmax = extrema(p)
-        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=:bad_price, time=0.0)
-    end
-
-    model = Model(Mosek.Optimizer)
-    verbose || set_silent(model)
-    if !isnothing(timelimit) && timelimit > 0
-        set_time_limit_sec(model, Float64(timelimit))
-    end
-
-    # Per-agent decision variables.
-    x = [@variable(model, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
-    t = [@variable(model, base_name = "t_$(i)") for i in 1:m]
-    U = [@variable(model, [1:agents[i].L], lower_bound = 0.0, base_name = "U_$(i)") for i in 1:m]
-    ν = [@variable(model, [1:n], lower_bound = 0.0, base_name = "nu_$(i)") for i in 1:m]
-    μ = [@variable(model, lower_bound = 0.0, base_name = "mu_$(i)") for i in 1:m]
-    @variable(model, τ >= 0.0)
-
-    for i in 1:m
-        ai = agents[i]
-        A_i = ai.a               # L × n
-        b_i = ai.b               # L
-        L_i = ai.L
-        # UMP primal: A_i x_i + b_i .≥ t_i 1, ⟨p, x_i⟩ = w_i.
-        @constraint(model, A_i * x[i] .+ b_i .>= t[i] .* ones(L_i))
-        @constraint(model, dot(p, x[i]) == w[i])
-        # UMP dual: A_i' U_i + ν_i = μ_i p, ⟨1, U_i⟩ = 1.
-        @constraint(model, A_i' * U[i] .+ ν[i] .== μ[i] .* p)
-        @constraint(model, sum(U[i]) == 1.0)
-        # Strong duality: t_i = ⟨b_i, U_i⟩ + w_i μ_i.
-        @constraint(model, t[i] == dot(b_i, U[i]) + w[i] * μ[i])
-    end
-
-    # Market clearing: -τ 1 ≤ diag(p) (1 - Σ x_i) ≤ τ 1.
-    aggregate = sum(x[i] for i in 1:m)
-    for j in 1:n
-        @constraint(model, p[j] * (1.0 - aggregate[j]) <= τ)
-        @constraint(model, p[j] * (1.0 - aggregate[j]) >= -τ)
-    end
-
-    @objective(model, Min, τ)
-    t_start = time()
-    optimize!(model)
-    elapsed = time() - t_start
-
-    status = termination_status(model)
-    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.TIME_LIMIT)
-        @warn "PLC excess LP terminated abnormally" status
-        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=status, time=elapsed)
-    end
-    return (
-        tau=value(τ),
-        x=[value.(x[i]) for i in 1:m],
-        status=status,
-        time=elapsed,
-    )
-end
+# `solve_plc_excess` (the PLC joint-LP equilibrium check used by the PLC branch
+# of `validate_surrogate`) lives in `androids/plc.jl` with the rest of the PLC
+# machinery; it is loaded by the drivers before this file.
 
 # -----------------------------------------------------------------------
-# Dispatch on PLC ground truth. The `real_plc` argument is the NamedTuple
-# `(agents=..., w=...)` produced by `build_rep_data` for `--market-type plc`.
-# Solves the surrogate CES equilibrium, then plugs that price into the
-# real PLC market's joint LP.
+# Generic real-market validation for the non-CES ground-truth families,
+# given as the NamedTuple `(agents=..., w=...)` / `(agents=..., b=...)` that
+# build_rep_data produces (PLC, GES, SPLC, NGES). The recipe is uniform:
+# solve the surrogate's equilibrium price (Fisher via Mirror Descent, AD via
+# potred), project it back to the real goods if the surrogate is money-lifted,
+# and plug it into the real market's aggregate demand. Demand is
+# `aggregate_real_demand` (share / closed-form per class) for the single-valued
+# families; PLC keeps its set-valued joint-LP `τ` check.
 # -----------------------------------------------------------------------
 function validate_surrogate(
-    fa_surrogate::FisherMarket, real_plc::NamedTuple{(:agents, :w)};
-    verbose::Bool=false, kwargs...
+    fa_surrogate, real::NamedTuple;
+    wealth_fn=nothing, verbose::Bool=false, kwargs...
 )
-    res_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...)
-    p_s = res_s.p
-    plc_res = solve_plc_excess(p_s, real_plc.agents, real_plc.w; verbose=verbose)
-    return (
-        p_surrogate=p_s,
-        excess_surrogate_linf=plc_res.tau,        # τ* from the joint LP
-        excess_surrogate_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
-        iters_surrogate=res_s.iters,
-        lp_status=plc_res.status,
-        lp_time=plc_res.time,
-    )
+    # --- surrogate equilibrium price (dispatch on surrogate type) ---
+    nan_result(n) = _vresult(fill(NaN, n), (orig=[NaN], lift=nothing))
+    if fa_surrogate isa FisherMarket
+        if fa_surrogate.storage.gen.m > 0
+            @warn "validate_surrogate: mixed (non-CES) surrogate; equilibrium ops are CES-only. Returning NaN." maxlog = 1
+            return nan_result(first(real.agents).n)
+        end
+        p_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...).p
+    else  # ArrowDebreuMarket — potred Newton needs a finite Hessian
+        if any(!isfinite, fa_surrogate.σ)
+            @warn "validate_surrogate(AD): linear atom(s) (σ=∞); potred solve undefined. Returning NaN." maxlog = 1
+            return nan_result(first(real.agents).n)
+        end
+        p_s = afscaled_newton_equilibrium(fa_surrogate; verbose=verbose).p
+    end
+
+    # --- PLC ground truth: set-valued demand → joint-LP τ check ---
+    if eltype(real.agents) <: PLCAgent
+        @assert haskey(real, :w) "PLC validation expects Fisher budgets (agents, w)"
+        plc_res = solve_plc_excess(p_s, real.agents, real.w; verbose=verbose)
+        return (
+            p_surrogate=p_s,
+            excess_surrogate_linf=plc_res.tau,
+            excess_surrogate_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
+            excess_lift_linf=NaN, excess_lift_l1=NaN,   # PLC is never lifted
+            iters_surrogate=0,
+            lp_status=plc_res.status,
+            lp_time=plc_res.time,
+        )
+    end
+
+    # --- single-valued families (GES/SPLC/NGES): both the original n-good and
+    #     the lifted (n+1)-good excess (the latter only when money-lifted) ---
+    budgets = haskey(real, :w) ? real.w : real.b
+    n_real = first(real.agents).n
+    ex = _real_excess(p -> aggregate_real_demand(real.agents, budgets, p), p_s, n_real)
+    return _vresult(_project_to_real(p_s, n_real), ex)
 end

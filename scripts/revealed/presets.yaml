@@ -117,6 +117,7 @@ method:
       step_rule: linesearch   # linesearch | diminishing
       away_steps: true
       seed: 0
+      log_interval: 50        # print the iteration row every 20 iters
 
   # Arrow–Debreu via our hand-rolled away-step FW (δ = 1). Same AD problem as
   # ADFWjl but driven by our own loop instead of FrankWolfe.jl — stopping is
@@ -135,6 +136,7 @@ method:
       away_steps: true
       seed: 0
       classes: [ces]
+      log_interval: 30        # print the iteration row every 20 iters
 
   - name: ACCPM
     separation_kind: accpm

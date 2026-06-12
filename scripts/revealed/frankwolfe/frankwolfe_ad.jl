@@ -94,6 +94,7 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     rng_seed   = get(kwargs, :seed, 0)
     timelimit  = get(kwargs, :timelimit, Inf)
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
+    log_interval = Int(get(kwargs, :log_interval, 1))   # print the iter row every N iters
     classes    = Vector{Symbol}(get(kwargs, :classes, Symbol[:ces]))
     :leontief in classes &&
         error("run_ad_tracked_fw: :leontief atoms cannot be stored in an " *
@@ -104,8 +105,8 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
 
     _control = (:max_iters, :tol_obj, :tol_delta, :tol_rc, :step_rule, :away_steps,
         :seed, :timelimit, :interval_eval_test, :interval_eval_excess, :f_real,
-        :classes, :sample_size, :batch_size, :sample_hard, :drop, :interval_dropping,
-        :ad_delta, :ad_endow_mode, :ad_mask_size)
+        :log_interval, :classes, :sample_size, :batch_size, :sample_hard, :drop,
+        :interval_dropping, :ad_delta, :ad_endow_mode, :ad_mask_size)
     oracle_kw = Dict{Symbol,Any}(k => v for (k, v) in kwargs if !(k in _control))
 
     K = length(Ξ_train)
@@ -329,7 +330,7 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
         end
         sw = sum(w); sw > 0 && (w ./= sw)
 
-        _log_row(g_fw, kind)
+        (log_interval <= 1 || iter % log_interval == 0) && _log_row(g_fw, kind)
     end
 
     # ---- build the returned market from the best-seen iterate ------------------

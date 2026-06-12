@@ -91,35 +91,36 @@ end
 rd = build_rep_data(cfg, 1, cfg.seed)
 
 results = Vector{NamedTuple}(undef, length(variants))
-for (i, v) in enumerate(variants)
-    println()
-    println("="^100)
+
+# Fit one variant. Each call reseeds the (task-local) RNG to cfg.seed so the
+# bootstrap atom is identical across variants — the method/knobs become the only
+# difference. Under threading every Task carries its own default RNG, so seeding
+# inside the task keeps each fit reproducible AND race-free.
+function _fit_variant(i, v)
     ov = isempty(v.cli) ? "" :
          "  [" * join(["$k=$val" for (k, val) in v.cli], ", ") * "]"
-    @printf("VARIANT %d/%d: %s  (method=%s)%s\n",
-        i, length(variants), v.label, v.method, ov)
+    println("\n" * "="^100)
+    @printf("VARIANT %d/%d: %s  (method=%s)%s\n", i, length(variants), v.label, v.method, ov)
     println("="^100)
 
     # Look up this variant's base method spec (separation_kind + base kwargs).
     (_, separation_kind, base_kwargs) = first(s for s in method_kwargs if s[1] == v.method)
 
-    # Per-variant CLI: copy the parsed flags, then apply this variant's
-    # overrides (e.g. "sample_hard", "ad_delta_free"). No-ops for methods that
-    # don't read them. A shallow copy suffices — only top-level scalar keys change.
+    # Per-variant CLI: copy the parsed flags, then apply this variant's overrides
+    # (e.g. "sample_hard", "ad_delta_free"). No-ops for methods that don't read
+    # them. A shallow copy suffices — only top-level scalar keys change.
     cli_v = copy(cli)
     for (k, val) in v.cli
         cli_v[k] = val
     end
 
-    # Reseed so the bootstrap atom (and any sampling randomness) starts
-    # identically across variants — the method/knobs become the only difference.
     Random.seed!(cfg.seed)
     res = run_one_method(cfg, cli_v, 1, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real,
         v.method, separation_kind, base_kwargs; wealth_fn=rd.wealth_fn)
 
     δ_final = haskey(res.hist, :delta) && !isempty(res.hist[:delta]) ?
               res.hist[:delta][end] : NaN
-    results[i] = (
+    return (
         variant=v,
         fa=res.fa,
         iters=length(res.hist[:primal_obj]),
@@ -130,6 +131,22 @@ for (i, v) in enumerate(variants)
         t=res.t,
         hist=res.hist,
     )
+end
+
+# Fit the selected variants on separate threads when Julia has >1 thread (pass
+# `julia --threads=N`). Distinct `results[i]` writes are independent; the dataset
+# `rd`, `cfg`, and `cli` are read-only. Per-variant progress logs interleave when
+# threaded; the SUMMARY tables below are rebuilt from `results` in order.
+set_parallel_variants!(Threads.nthreads() > 1 && length(variants) > 1)
+if parallel_variants()
+    @info "fitting $(length(variants)) variants concurrently across $(Threads.nthreads()) threads (per-variant logs interleave)"
+    @sync for (i, v) in enumerate(variants)
+        Threads.@spawn (results[i] = _fit_variant(i, v))
+    end
+else
+    for (i, v) in enumerate(variants)
+        results[i] = _fit_variant(i, v)
+    end
 end
 
 # -----------------------------------------------------------------------

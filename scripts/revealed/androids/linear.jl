@@ -304,8 +304,10 @@ function solve_separation_linear(
     md = nothing
     y = nothing
     γ = nothing
+    # Bypass the shared model cache when variants are fit concurrently: one
+    # cached Gurobi model cannot back two fits at once (see engine.jl).
     cache_hit = false
-    if !isnothing(linear_model_cache) && !isnothing(linear_model_cache[])
+    if !parallel_variants() && !isnothing(linear_model_cache) && !isnothing(linear_model_cache[])
         c = linear_model_cache[]
         if c.K == K && c.n == n && c.use_indicators == use_indicators &&
            size(c.log_p) == size(log_p) && c.log_p == log_p
@@ -389,15 +391,18 @@ function solve_separation_linear(
     obj_val = has_incumbent ? T(JuMP.objective_value(md)) : T(NaN)
 
     # Persist (or refresh) the cache entry so the next call hits the warm path.
-    linear_model_cache[] = (md=md, y=y, γ=γ, K=K, n=n,
-        log_p=copy(log_p),
-        use_indicators=use_indicators)
+    # Skipped under concurrent fitting (the cache is not shareable across fits).
+    if !parallel_variants()
+        linear_model_cache[] = (md=md, y=y, γ=γ, K=K, n=n,
+            log_p=copy(log_p),
+            use_indicators=use_indicators)
 
-    # Stash the winning incumbent for the next call's MIPstart. Skip when
-    # the solver returned NaNs (no feasible point) so we don't poison the
-    # warm-start with garbage.
-    if has_incumbent && all(isfinite, y_opt)
-        _linear_warm[] = (y=Vector{Float64}(y_opt), γ=Matrix{Float64}(γ_new))
+        # Stash the winning incumbent for the next call's MIPstart. Skip when
+        # the solver returned NaNs (no feasible point) so we don't poison the
+        # warm-start with garbage.
+        if has_incumbent && all(isfinite, y_opt)
+            _linear_warm[] = (y=Vector{Float64}(y_opt), γ=Matrix{Float64}(γ_new))
+        end
     end
 
     verbose && println("Linear separation MIP: obj=$obj_val (cache_hit=$cache_hit, status=$status, primal=$primal)")

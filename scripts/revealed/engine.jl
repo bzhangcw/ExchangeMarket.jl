@@ -99,3 +99,14 @@ Force the interior-point (barrier) LP solver. This is a Gurobi-only attribute
 interior-point method for LPs.
 """
 set_lp_barrier!(model) = lp_engine() === :gurobi && set_attribute(model, "Method", 2)
+
+# --- Parallel-mode flag -----------------------------------------------------
+# Set by run_test.jl when it fits the selected variants concurrently
+# (`Threads.@spawn` per variant). Per-method inner threading (the AD good-scan)
+# and the module-level linear-separation model cache consult this so they stay
+# correct under outer parallelism: inner threading is suppressed (avoid
+# oversubscription / nesting) and the shared linear model cache is bypassed
+# (each call rebuilds, since one cached Gurobi model cannot back concurrent fits).
+const _PARALLEL_VARIANTS = Ref(false)
+parallel_variants() = _PARALLEL_VARIANTS[]
+set_parallel_variants!(b::Bool) = (_PARALLEL_VARIANTS[] = b)

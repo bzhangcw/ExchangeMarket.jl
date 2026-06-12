@@ -416,7 +416,10 @@ function find_cut_single_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     order = isnothing(scan_order) ? randperm(n) : scan_order
     @assert length(order) == n "scan_order must be a permutation of 1:n"
 
-    use_threads = Threads.nthreads() > 1 && !(:linear in classes)
+    # Suppress the inner good-scan threading when run_test.jl is already fitting
+    # variants concurrently (one thread per method), to avoid nested @threads and
+    # oversubscription.
+    use_threads = Threads.nthreads() > 1 && !(:linear in classes) && !parallel_variants()
 
     if !use_threads
         # Serial scan with early exit.

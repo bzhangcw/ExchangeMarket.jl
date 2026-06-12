@@ -6,7 +6,9 @@
 # -----------------------------------------------------------------------
 
 using LinearAlgebra, Random
-using JuMP, MosekTools, Gurobi
+using JuMP, MosekTools   # Gurobi (for the big-M MIP in solve_separation_linear) is
+                         # loaded conditionally by engine.jl; this oracle only runs
+                         # when the :linear android is active, which requires Gurobi.
 using ArgParse
 import MathOptInterface as MOI
 using ExchangeMarket
@@ -98,7 +100,7 @@ function linear_config_summary(kwargs::Dict)
            @sprintf(", MIPGap=%g", relgap)
 end
 
-# `_gurobi_env()` (shared Gurobi env singleton) lives in gurobi_env.jl,
+# `_gurobi_env()` (shared Gurobi env singleton) lives in engine.jl,
 # loaded before this file from setup.jl. Reused here for the linear
 # separation MILP and by redistribute.jl for the master LP.
 

@@ -16,6 +16,8 @@
 using Plots, LaTeXStrings, Printf
 using Serialization, ArgParse
 
+skip_variants(x) = !(x ∈ ["cg", "adcg_hard_vardelta"])
+
 # `setup.jl` exposes `colors`, `marker_style`, `display_name`; the plot
 # library leans on those tables but doesn't redefine them.
 isdefined(Main, :colors) || include(joinpath(@__DIR__, "setup.jl"))
@@ -62,7 +64,7 @@ function _make_figure(ylabel_str, title_str; ylims=(5e-4, 1e0), xlims=(1, 200))
         xlabel=L"\textrm{iteration}",
         title=title_str,
         legendbackgroundcolor=RGBA(1.0, 1.0, 1.0, 0.8),
-        yticks=10.0 .^ (-8:1:4),
+        # yticks=10.0 .^ (-8:1:4),
         yscale=:log10,
         xtickfont=font(18),
         ytickfont=font(18),
@@ -173,6 +175,7 @@ function plot_risk_curves(ctx;
 
     for name in method_names
         haskey(agg, name) || continue
+        skip_variants(String(name)) && continue   # plot only the kept variants
         a = agg[name]
         iters = 1:a.Lmax
         st = get(style, name, nothing)
@@ -181,7 +184,10 @@ function plot_risk_curves(ctx;
         m_end = round(Int, a.finals.nag_mean)
         pretty = isnothing(st) ? get(display_name, name, String(name)) : st.label
         lbl = L"($T=%$m_end$)~\texttt{%$pretty}"
-        mk_idx = 1:max(interval_marker, 1):length(iters)
+        # fw / adfw run many (thousands of) iterations, so space their markers
+        # out more than the default to avoid an overcrowded curve.
+        im = name in (:fw, :adfw) ? 20 : interval_marker
+        mk_idx = 1:max(im, 1):length(iters)
 
         # Pre-smooth all curves; ribbon bounds get smoothed too so the
         # band stays consistent with the mean.
@@ -207,8 +213,8 @@ function plot_risk_curves(ctx;
         # masking just the mean is sufficient.
         if a.has_excess
             ex_mean = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mean]
-            ex_mn   = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mn]
-            ex_mx   = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mx]
+            ex_mn = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mn]
+            ex_mx = [(isnan(x) || x <= 1e-8) ? NaN : x for x in ex_mx]
         end
 
         if rep > 1

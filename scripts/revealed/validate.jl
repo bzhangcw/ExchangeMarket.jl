@@ -127,6 +127,13 @@ end
 #   `d̄(p̄) = (d(q), M + ⟨q,1⟩ − W(q))` and supply `(1,…,1,M)`:
 #   `z̄ = p̄ ⊙ ((1,…,1,M) − d̄)`. The money supply `M` cancels, leaving
 #   goods `p̄_{1:n} ⊙ (1 − d(q))` and money `π (W(q) − ⟨q,1⟩)`, `W(q)=⟨q,d(q)⟩`.
+#
+# * `norm` — the ORIGINAL n-good excess evaluated at the projected price put
+#   back on the simplex, `q̃ ⊙ (1 − d(q̃))` with `q̃ = q/⟨1,q⟩`. The bare `orig`
+#   carries price units (`q = p̄[1:n]/π` is off-simplex, scale `⟨1,q⟩ ≠ 1`),
+#   so its magnitude is not comparable across lift/no-lift; `norm` strips that
+#   `1/π` re-scaling by fixing `⟨1,q̃⟩ = 1`, making the lifted and un-lifted
+#   clearing residuals directly comparable.
 # -----------------------------------------------------------------------
 function _real_excess(d_oracle, p_s::AbstractVector, n_real::Int)
     if length(p_s) == n_real + 1
@@ -135,22 +142,42 @@ function _real_excess(d_oracle, p_s::AbstractVector, n_real::Int)
         d = d_oracle(q)
         orig = q .* (1.0 .- d)
         lift = vcat(p_s[1:n_real] .* (1.0 .- d), π * (dot(q, d) - sum(q)))
-        return (orig=orig, lift=lift)
+        q̃ = q ./ sum(q)
+        d̃ = d_oracle(q̃)
+        nrm = q̃ .* (1.0 .- d̃)
+        return (orig=orig, lift=lift, norm=nrm)
     else
         d = d_oracle(p_s)
-        return (orig=p_s .* (1.0 .- d), lift=nothing)
+        q̃ = p_s ./ sum(p_s)
+        d̃ = d_oracle(q̃)
+        nrm = q̃ .* (1.0 .- d̃)
+        return (orig=p_s .* (1.0 .- d), lift=nothing, norm=nrm)
     end
 end
 
-# Build the validation result NamedTuple from the (orig, lift) excess.
-_vresult(p_surr, ex; iters::Int=0) = (
-    p_surrogate=p_surr,
-    excess_surrogate_linf=norm(ex.orig, Inf),
-    excess_surrogate_l1=norm(ex.orig, 1),
-    excess_lift_linf=isnothing(ex.lift) ? NaN : norm(ex.lift, Inf),
-    excess_lift_l1=isnothing(ex.lift) ? NaN : norm(ex.lift, 1),
-    iters_surrogate=iters,
-)
+# Surrogate self-excess: the price-scaled residual of the SURROGATE market at
+# its own equilibrium price `p` (the solver's convergence residual). ≈0 confirms
+# the equilibrium was actually reached, so a large real-market excess is model
+# misspecification rather than an unsolved equilibrium. For a Fisher (CES)
+# surrogate it is ‖p ⊙ (1 − d_surr(p))‖∞; for an AD surrogate the solver returns
+# it directly (passed in via `surr_excess`).
+_surr_self_excess(fa::FisherMarket, p) = norm(p .* (1.0 .- aggregate_ces_demand(fa, p)), Inf)
+
+# Build the validation result NamedTuple from the (orig, lift, norm) excess.
+function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN)
+    nrm = (hasproperty(ex, :norm) && !isnothing(ex.norm)) ? ex.norm : ex.orig
+    return (
+        p_surrogate=p_surr,
+        excess_surrogate_linf=norm(ex.orig, Inf),
+        excess_surrogate_l1=norm(ex.orig, 1),
+        excess_lift_linf=isnothing(ex.lift) ? NaN : norm(ex.lift, Inf),
+        excess_lift_l1=isnothing(ex.lift) ? NaN : norm(ex.lift, 1),
+        excess_norm_linf=norm(nrm, Inf),
+        excess_norm_l1=norm(nrm, 1),
+        excess_surr_self_linf=surr_excess,
+        iters_surrogate=iters,
+    )
+end
 
 # -----------------------------------------------------------------------
 # End-to-end validation: solve surrogate equilibrium, project to the real
@@ -181,7 +208,8 @@ function validate_surrogate(
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    return _vresult(_project_to_real(res_s.p, f_real.n), ex; iters=res_s.iters)
+    return _vresult(_project_to_real(res_s.p, f_real.n), ex; iters=res_s.iters,
+        surr_excess=_surr_self_excess(fa_surrogate, res_s.p))
 end
 
 # `solve_plc_excess` (the PLC joint-LP equilibrium check used by the PLC branch
@@ -210,23 +238,32 @@ function validate_surrogate(
             return nan_result(first(real.agents).n)
         end
         p_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...).p
+        surr_excess = _surr_self_excess(fa_surrogate, p_s)
     else  # ArrowDebreuMarket — potred Newton needs a finite Hessian
         if any(!isfinite, fa_surrogate.σ)
             @warn "validate_surrogate(AD): linear atom(s) (σ=∞); potred solve undefined. Returning NaN." maxlog = 1
             return nan_result(first(real.agents).n)
         end
-        p_s = afscaled_newton_equilibrium(fa_surrogate; verbose=verbose).p
+        res_s = afscaled_newton_equilibrium(fa_surrogate; verbose=verbose)
+        p_s = res_s.p
+        surr_excess = res_s.resid     # solver's own market-clearing residual
     end
 
     # --- PLC ground truth: set-valued demand → joint-LP τ check ---
     if eltype(real.agents) <: PLCAgent
-        @assert haskey(real, :w) "PLC validation expects Fisher budgets (agents, w)"
-        plc_res = solve_plc_excess(p_s, real.agents, real.w; verbose=verbose)
+        @assert haskey(real, :w) "PLC validation expects Fisher budgets or a wealth function (agents, w)"
+        # `w` may be fixed budgets or a price-dependent wealth function
+        # (--wealth-function 2); resolve it at the surrogate equilibrium price.
+        w_eval = wealth_at(real.w, p_s)
+        plc_res = solve_plc_excess(p_s, real.agents, w_eval; verbose=verbose)
         return (
             p_surrogate=p_s,
             excess_surrogate_linf=plc_res.tau,
             excess_surrogate_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
             excess_lift_linf=NaN, excess_lift_l1=NaN,   # PLC is never lifted
+            excess_norm_linf=plc_res.tau,               # never lifted ⇒ norm ≡ orig (τ)
+            excess_norm_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
+            excess_surr_self_linf=surr_excess,
             iters_surrogate=0,
             lp_status=plc_res.status,
             lp_time=plc_res.time,
@@ -238,5 +275,5 @@ function validate_surrogate(
     budgets = haskey(real, :w) ? real.w : real.b
     n_real = first(real.agents).n
     ex = _real_excess(p -> aggregate_real_demand(real.agents, budgets, p), p_s, n_real)
-    return _vresult(_project_to_real(p_s, n_real), ex)
+    return _vresult(_project_to_real(p_s, n_real), ex; surr_excess=surr_excess)
 end

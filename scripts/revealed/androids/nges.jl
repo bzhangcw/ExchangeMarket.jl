@@ -67,7 +67,7 @@ function nges_share_by_opt(c::AbstractVector, r::AbstractVector, A::AbstractMatr
     @assert all(A .> 0) "NGES requires a strictly positive A"
     @assert w > 0
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     verbose || set_attribute(model, "print_level", MadNLP.ERROR)
     if !isnothing(timelimit) && timelimit > 0
         set_attribute(model, "max_wall_time", Float64(timelimit))
@@ -105,7 +105,7 @@ budgets, or an n×m Matrix of Arrow–Debreu endowments (budget per sample is
 """
 function produce_revealed_preferences_nges(
     agents::Vector{NGESAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     seed=nothing
@@ -118,12 +118,11 @@ function produce_revealed_preferences_nges(
     for k in 1:K
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            γ_i = share(agents[i], p_k, w_i)
-            g_k .+= w_i .* γ_i ./ p_k
+            γ_i = share(agents[i], p_k, w[i])
+            g_k .+= w[i] .* γ_i ./ p_k
         end
         Ξ[k] = (copy(p_k), copy(g_k))
     end

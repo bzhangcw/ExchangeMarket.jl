@@ -33,5 +33,5 @@ function validate_surrogate(
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    return _vresult(_project_to_real(res_s.p, f_real.n), ex)
+    return _vresult(_project_to_real(res_s.p, f_real.n), ex; surr_excess=res_s.resid)
 end

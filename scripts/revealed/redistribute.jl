@@ -11,10 +11,9 @@ using JuMP
 using LinearAlgebra
 using ArgParse
 using ExchangeMarket
-using Gurobi
-# Shared Gurobi env from gurobi_env.jl — same singleton used by the
-# linear MILP separation oracle. One env across all calls prints the
-# license banner exactly once at script load.
+# Master LP models are built via `new_model()` from engine.jl, which picks
+# Gurobi (when available) or Mosek; `set_lp_barrier!` applies the Gurobi-only
+# barrier attribute and no-ops on Mosek.
 
 """
     solve_wealth_redist_primal(Ξ, γ; pinned_idx=Int[], pinned_w=0.0, verbose=false)
@@ -120,7 +119,7 @@ function solve_wealth_redist_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     if !cache_hit
-        model = Model(() -> Gurobi.Optimizer(_gurobi_env()))
+        model = new_model()
         # Interior-point (barrier) without simplex crossover. Method=2
         # forces the barrier solver (Gurobi's default would auto-pick
         # between primal simplex, dual simplex, and barrier); Crossover=0
@@ -137,7 +136,7 @@ function solve_wealth_redist_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         #        the Mosek-AC + simplex path).
         # Crossover is also the dominant cost on warm-started LPs at
         # scale, so skipping it shortens each master solve.
-        set_attribute(model, "Method", 2)
+        set_lp_barrier!(model)
         # set_attribute(model, "Crossover", 0)
         if !isnothing(timelimit) && timelimit > 0
             set_time_limit_sec(model, Float64(timelimit))
@@ -191,21 +190,12 @@ function solve_wealth_redist_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         @objective(model, Min, sum(t_var))
     end
 
-    # Apply the per-call verbose toggle on every solve (rebuild OR cache
-    # hit). The shared `_gurobi_env()` singleton sets OutputFlag=0 at the
-    # env level so per-model logs don't spam mid-CG; we re-enable both
-    # OutputFlag and LogToConsole on the model whenever the caller asks
-    # for a verbose solve, and force them OFF otherwise — without this,
-    # the cached model retains whatever flags were set on its last call,
-    # so iter-1's `verbose=true` would leak into iter-2, 3, … under the
-    # cache.
-    if verbose
-        set_attribute(model, "OutputFlag", 1)
-        set_attribute(model, "LogToConsole", 1)
-    else
-        set_attribute(model, "OutputFlag", 0)
-        set_attribute(model, "LogToConsole", 0)
-    end
+    # Apply the per-call verbose toggle on every solve (rebuild OR cache hit),
+    # via the solver-portable `set_silent` / `unset_silent` (Gurobi-specific
+    # "OutputFlag"/"LogToConsole" would not exist on Mosek). Without this, a
+    # cached model retains the last call's flags, so iter-1's `verbose=true`
+    # would leak into later iterations under the cache.
+    verbose ? unset_silent(model) : set_silent(model)
     optimize!(model)
 
     if !isnothing(cache)
@@ -263,11 +253,10 @@ function solve_wealth_redist_dual(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 ) where T
     m, K, n = size(γ)
 
-    # Create model — same Gurobi env as the primal master.
-    model = Model(() -> Gurobi.Optimizer(_gurobi_env()))
-    if !verbose
-        set_attribute(model, "LogToConsole", 0)
-    end
+    # Create model on the selected engine (Gurobi/Mosek). `set_silent` is the
+    # solver-portable silencer (Gurobi's "LogToConsole" would not exist on Mosek).
+    model = new_model()
+    verbose || set_silent(model)
 
     # Variables
     @variable(model, u[1:K, 1:n])

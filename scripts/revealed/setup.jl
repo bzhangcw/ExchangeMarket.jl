@@ -1,7 +1,8 @@
 # Methods and tracking utilities for revealed-preference CES surrogate fitting.
 # File map (in include order):
-#   - gurobi_env.jl                : shared Gurobi env singleton (_gurobi_env);
-#                                    loaded first so redistribute.jl + androids/linear.jl share it
+#   - engine.jl                    : solver-engine wrapper (new_model, set_engine!,
+#                                    gurobi_available, _gurobi_env); loaded first so every
+#                                    later solver site can pick Gurobi/Mosek/MadNLP
 #   - redistribute.jl              : wealth-redistribution primal / dual LPs
 #                                    (solve_wealth_redist_{primal,dual},
 #                                     eq.cg.master / eq.cg.dual)
@@ -42,7 +43,7 @@ using ExchangeMarket
 # Shared Gurobi env (used by master LP and the linear MILP pricer).
 # Loaded first so the license banner fires once at script load.
 # -----------------------------------------------------------------------
-include("./gurobi_env.jl")
+include("./engine.jl")
 
 # -----------------------------------------------------------------------
 # SPLC ground-truth market (separable PLC; greedy closed-form demand).
@@ -91,6 +92,27 @@ function wealth_quadratic(Q::AbstractArray{<:Real,3})
     n, _, m = size(Q)
     Qm = reshape(Q, n * n, m)                 # column i = vec(Q[:,:,i])
     return p -> (v = Qm' * vec(p * p'); v ./ sum(v))
+end
+
+"""
+    random_wealth_quad_tensor(n, m, sparsity) -> Q  (n×n×m)
+
+Random PSD forms `Q[:,:,i] = AᵀA`, with `A` an n×n Gaussian masked to density
+`sparsity` (controls how concentrated the resulting budget shares are). Each
+agent is guaranteed at least one nonzero entry, so `pᵀQ_ip = ‖Ap‖² > 0` at any
+strictly positive price and the normalized share `w_i(p)` is never zero (the
+`< 0.01` sparsity regime would otherwise leave most `A_i` all-zero, giving a
+zero-wealth agent that breaks the per-agent UMP solvers).
+"""
+function random_wealth_quad_tensor(n::Int, m::Int, sparsity::Real)
+    Q = Array{Float64,3}(undef, n, n, m)
+    for i in 1:m
+        mask = rand(n, n) .< sparsity
+        any(mask) || (mask[rand(1:n), rand(1:n)] = true)   # ≥1 nonzero ⇒ w_i(p)>0
+        A = randn(n, n) .* mask
+        Q[:, :, i] = A' * A
+    end
+    return Q
 end
 
 """
@@ -168,17 +190,33 @@ agent_demand(a::NGESAgent, p::AbstractVector, w::Real) = w .* share(a, p, w) ./ 
 agent_demand(a::SPLCAgent, p::AbstractVector, w::Real) = first(solve_splc_demand(a, p, w))
 
 """
+    wealth_at(budgets, p) -> w
+
+Resolve a ground-truth budget object into the per-agent wealth vector at price
+`p`. Three representations, one per `--wealth-function` code:
+
+* `Vector`   → fixed Fisher budgets `w_i` (code 0).
+* `Matrix`   → n×m endowments, `w_i(p) = ⟨p, b_i⟩` (code 1, Arrow–Debreu).
+* callable   → price-dependent wealth function `p ↦ w` (code 2, e.g. the
+  normalized quadratic shares `w_i(p) = pᵀQ_ip / Σ_j pᵀQ_jp`).
+"""
+wealth_at(budgets::AbstractVector, p::AbstractVector) = budgets
+wealth_at(budgets::AbstractMatrix, p::AbstractVector) = budgets' * p
+wealth_at(budgets, p::AbstractVector) = budgets(p)
+
+"""
     aggregate_real_demand(agents, budgets, p) -> d(p)
 
 Aggregate demand `d(p) = Σ_i x_i(p, w_i)` of a real market given as `agents`
-plus `budgets` (a Vector of fixed Fisher budgets, or an n×m endowment Matrix
-with `w_i(p) = ⟨p, b_i⟩`), via `agent_demand`. Valid at any positive price.
+plus `budgets` (resolved per agent by `wealth_at`: a Vector of fixed Fisher
+budgets, an n×m endowment Matrix, or a price-dependent wealth function), via
+`agent_demand`. Valid at any positive price.
 """
 function aggregate_real_demand(agents, budgets, p::AbstractVector)
+    w = wealth_at(budgets, p)
     g = zeros(length(p))
     for (i, ag) in enumerate(agents)
-        w_i = budgets isa AbstractMatrix ? dot(p, view(budgets, :, i)) : budgets[i]
-        g .+= agent_demand(ag, p, w_i)
+        g .+= agent_demand(ag, p, w[i])
     end
     return g
 end
@@ -194,16 +232,35 @@ thing is the oracle (CES: `play!`; GES/SPLC/NGES: `aggregate_real_demand`);
 PLC has no single-valued oracle and is unsupported. `M` is the money supply.
 """
 function produce_revealed_preferences_lifted(d_oracle, K::Int, n::Int;
-    M::Real, seed=nothing)
+    M::Real, seed=nothing, q_lo::Real=1e-4, q_hi::Real=1e4, max_tries::Int=1000)
     !isnothing(seed) && Random.seed!(seed)
     Ξ = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, K)
     for k in 1:K
-        ē = -log.(rand(n + 1))
-        p̄ = ē ./ sum(ē)
-        q = p̄[1:n] ./ p̄[n+1]
-        d = d_oracle(q)
-        money = M + sum(q) - dot(q, d)
-        Ξ[k] = (copy(p̄), vcat(d, money))
+        tries = 0
+        while true
+            tries += 1
+            ē = -log.(rand(n + 1))
+            p̄ = ē ./ sum(ē)
+            q = p̄[1:n] ./ p̄[n+1]
+            # Reject pathological price ratios. A tiny π = p̄[n+1] sends q → ∞;
+            # the GES/SPLC demand solvers (pⱼ^{-σⱼ} etc.) then overflow to Inf
+            # and the money demand M+⟨q,1⟩−⟨q,d⟩ collapses to Inf−Inf = NaN, which
+            # poisons the downstream fitting LP. Keep q within [q_lo, q_hi] and
+            # require the oracle to return finite values (CES is log-space safe;
+            # this guard matters for the share/demand families).
+            if all(q_lo .≤ q .≤ q_hi)
+                d = d_oracle(q)
+                money = M + sum(q) - dot(q, d)
+                if all(isfinite, d) && isfinite(money)
+                    Ξ[k] = (copy(p̄), vcat(d, money))
+                    break
+                end
+            end
+            tries ≥ max_tries && error(
+                "produce_revealed_preferences_lifted: no finite in-range sample " *
+                "in $max_tries tries (q∈[$q_lo, $q_hi]); the market/wealth model " *
+                "may be degenerate at extreme prices.")
+        end
     end
     return Ξ
 end
@@ -390,7 +447,7 @@ function parse_args_for_test_real(argv=ARGS)
         default = "ces"
         range_tester = x -> x in ("ces", "plc", "ges", "splc", "nges")
         "--wealth-function"
-        help = "Per-agent wealth model w(p): 0 = constant (Fisher, fixed budgets w_i, default); 1 = first-order (Arrow–Debreu, endowments b_i with w_i(p)=⟨p,b_i⟩); 2 = second-order (quadratic form w_i(p)=pᵀQ_ip, CES only). Replaces the old --budget-type. Codes 0/1 work for all market families; code 2 is CES-only."
+        help = "Per-agent wealth model w(p): 0 = constant (Fisher, fixed budgets w_i, default); 1 = first-order (Arrow–Debreu, endowments b_i with w_i(p)=⟨p,b_i⟩); 2 = second-order (normalized quadratic shares w_i(p)=pᵀQ_ip / Σ_j pᵀQ_jp). Replaces the old --budget-type. All three codes work for every market family (ces, plc, ges, splc, nges)."
         arg_type = Int
         default = 0
         range_tester = x -> x in (0, 1, 2)
@@ -424,6 +481,10 @@ function parse_args_for_test_real(argv=ARGS)
         help = "Comma-separated function classes for android classes in separation (any of ces,linear,leontief,ql,nn)"
         arg_type = String
         default = "ces,linear,leontief"
+        "--engine"
+        help = "LP/MIP master backend: gurobi (default when available), mosek, or auto. NLP separations always use MadNLP. If Gurobi is unavailable the backend falls back to Mosek and the linear android is disabled."
+        arg_type = String
+        default = "auto"
     end
     # Each method owns its CLI surface in its own runner file
     # (cpm.jl::register_cli_cpm!, accpm.jl::register_cli_accpm!).
@@ -708,8 +769,18 @@ function build_run_config(cli)
         joinpath(out_dir, "real_$(String(market_type)).jls")
     end
 
+    # Select the LP/MIP backend (engine.jl). :auto picks Gurobi when usable,
+    # else Mosek; the linear android needs Gurobi's big-M MIP, so it is dropped
+    # when Gurobi is unavailable.
+    engine = cli["engine"]
+    set_engine!(engine)
+
     method_names = _resolve_method.(split(cli["methods"], ","))
     allowed_classes = Symbol.(lowercase.(strip.(split(cli["classes"], ","))))
+    if :linear in allowed_classes && !gurobi_available()
+        @warn "Gurobi unavailable: dropping the :linear android (its big-M MIP separation needs Gurobi)."
+        allowed_classes = filter(!=(:linear), allowed_classes)
+    end
     opt_plc = plc_opt_from_cli(cli)
     opt_splc = splc_opt_from_cli(cli)
     ces_rho_range = ces_rho_range_from_cli(cli)
@@ -720,7 +791,32 @@ function build_run_config(cli)
         iterlimit_override, tol_obj_override, tol_delta_override,
         interval_eval_test, interval_eval_excess, do_validate, csv_path,
         verbosity, out_dir, data_file_path, method_names, allowed_classes,
-        opt_plc, opt_splc, ces_rho_range, sparsity, wealth_quad_sparsity)
+        opt_plc, opt_splc, ces_rho_range, sparsity, wealth_quad_sparsity, engine)
+end
+
+# -----------------------------------------------------------------------
+# Ground-truth budget object for the share/demand families (GES/SPLC/NGES/PLC),
+# the analogue of the CES wealth-function switch. Returns the object that
+# `wealth_at` / the per-class producer consume, plus bookkeeping:
+#   0 → fixed Fisher budget Vector w (Σw = 1)
+#   1 → n×m endowment Matrix B (w_i(p) = ⟨p, b_i⟩, Arrow–Debreu), unit supply
+#   2 → normalized quadratic wealth fn p ↦ pᵀQ_ip / Σ_j pᵀQ_jp (Σw = 1), Q_i⪰0
+# `fkey` is the f_real NamedTuple key (:b for endowments, :w otherwise);
+# `M_lift` the lift money supply; `tag` the print-tree label suffix.
+# -----------------------------------------------------------------------
+function real_budget(wealth_function::Int, n::Int, m::Int, quad_sparsity::Real)
+    if wealth_function == 1
+        B = rand(n, m)
+        B ./= sum(B; dims=2)                 # unit supply per good
+        return (B, :b, 1.0, "Arrow–Debreu")
+    elseif wealth_function == 2
+        Q = random_wealth_quad_tensor(n, m, quad_sparsity)
+        return (make_wealth_function(2; Q=Q), :w, 1.0, "second-order quadratic")
+    else
+        w = rand(m)
+        w ./= sum(w)
+        return (w, :w, sum(w), "Fisher")
+    end
 end
 
 # -----------------------------------------------------------------------
@@ -736,13 +832,10 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
     #   emit (n+1)-dim money-lifted data.
     # For PLC/GES/SPLC: f_real is the NamedTuple `(agents=..., w=...)` /
     #   `(agents=..., b=...)` that the joint-LP equilibrium check in validate.jl
-    #   dispatches on; wealth-function 1 selects the endowment-matrix branch.
-    is_first_order = wealth_function == 1
+    #   dispatches on; the budget object per --wealth-function is built by
+    #   `real_budget` (fixed Vector / endowment Matrix / quadratic wealth fn).
     if lift && market_type === :plc
         @warn "--lift is not implemented for --market-type plc (no single-valued demand); ignoring"
-    end
-    if wealth_function == 2 && market_type !== :ces
-        error("--wealth-function 2 (second-order) is only implemented for --market-type ces")
     end
     # Generic Ξ generator for the share/demand-based families (GES/SPLC/NGES):
     # `--lift` routes through the shared money-lifted producer with the
@@ -752,7 +845,9 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
     _lift_announced = Ref(false)
     function _gen(producer, agents, budgets, Kn, seed)
         if lift && market_type !== :plc
-            M = budgets isa AbstractMatrix ? 1.0 : sum(budgets)
+            # Total money supply = total ground-truth spending: Σw for fixed
+            # Fisher budgets, 1 for endowments / normalized quadratic shares.
+            M = budgets isa AbstractVector ? sum(budgets) : 1.0
             _lift_announced[] || (_announce_lift(n, M); _lift_announced[] = true)
             return produce_revealed_preferences_lifted(
                 q -> aggregate_real_demand(agents, budgets, q), Kn, n; M=M, seed=seed)
@@ -781,16 +876,11 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
             wealth_fn = make_wealth_function(1; B=B)
             M_lift = 1.0
         elseif wealth_function == 2              # second-order: normalized quadratic shares
-            # n×n×m tensor of PSD forms Q[:,:,i] = AᵀA, A masked to
-            # `--wealth-quad-sparsity` density (controls how concentrated the
-            # per-agent shares are; magnitude is irrelevant since wealth_quadratic
-            # normalizes Σ_i w_i(p) = 1). Total spending is 1, so the lift's money
-            # demand is M+⟨q,1⟩−1 = ⟨q,1⟩ ≥ 0 with M=1 (no blow-up).
-            Q = Array{Float64,3}(undef, n, n, m)
-            for i in 1:m
-                A = randn(n, n) .* (rand(n, n) .< wealth_quad_sparsity)
-                Q[:, :, i] = A' * A
-            end
+            # n×n×m PSD tensor masked to `--wealth-quad-sparsity` density (how
+            # concentrated the per-agent shares are; magnitude is irrelevant since
+            # wealth_quadratic normalizes Σ_i w_i(p) = 1). Total spending is 1, so
+            # the lift's money demand is M+⟨q,1⟩−1 = ⟨q,1⟩ ≥ 0 with M=1 (no blow-up).
+            Q = random_wealth_quad_tensor(n, m, wealth_quad_sparsity)
             wealth_fn = make_wealth_function(2; Q=Q)
             M_lift = 1.0
         else                                     # constant (Fisher): fixed budgets
@@ -816,59 +906,32 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
     elseif market_type === :plc
         L = opt_plc.L
         plc_agents = [random_plc_agent(n, L; sparsity=sparsity, intercept=opt_plc.intercept) for _ in 1:m]
-        if is_first_order
-            # Arrow–Debreu: each agent owns an endowment column b_i (n×m),
-            # normalized so each good's total endowment is 1 (unit supply).
-            # The producer evaluates budgets per sample as w_i(p_k) = ⟨p_k, b_i⟩.
-            B = rand(n, m)
-            B ./= sum(B; dims=2)
-            print_tree("ground-truth: PLC Arrow–Debreu", [
-                "dimensions" => ["n" => n, "m" => m, "L" => L, "K" => K, "K_test" => K_test],
-                "intercept" => opt_plc.intercept,
-                "seed" => rep_seed,
-            ])
-            Ξ_train = produce_revealed_preferences_plc(plc_agents, B, K, n; seed=rep_seed)
-            Ξ_test = produce_revealed_preferences_plc(plc_agents, B, K_test, n; seed=rep_seed + 1)
-            f_real = (agents=plc_agents, b=B)
-        else
-            w_vec = rand(m)
-            w_vec ./= sum(w_vec)
-            print_tree("ground-truth: PLC (Fisher)", [
-                "dimensions" => ["n" => n, "m" => m, "L" => L, "K" => K, "K_test" => K_test],
-                "intercept" => opt_plc.intercept,
-                "seed" => rep_seed,
-            ])
-            Ξ_train = produce_revealed_preferences_plc(plc_agents, w_vec, K, n; seed=rep_seed)
-            Ξ_test = produce_revealed_preferences_plc(plc_agents, w_vec, K_test, n; seed=rep_seed + 1)
-            f_real = (agents=plc_agents, w=w_vec)
-        end
+        # Budget per `--wealth-function`: fixed Fisher budgets, Arrow–Debreu
+        # endowments (w_i(p_k)=⟨p_k,b_i⟩), or a price-dependent wealth function;
+        # the producer resolves it per sample via `wealth_at`.
+        budgets, fkey, _M, tag = real_budget(wealth_function, n, m, wealth_quad_sparsity)
+        print_tree("ground-truth: PLC ($tag)", [
+            "dimensions" => ["n" => n, "m" => m, "L" => L, "K" => K, "K_test" => K_test],
+            "intercept" => opt_plc.intercept,
+            "seed" => rep_seed,
+        ])
+        Ξ_train = produce_revealed_preferences_plc(plc_agents, budgets, K, n; seed=rep_seed)
+        Ξ_test = produce_revealed_preferences_plc(plc_agents, budgets, K_test, n; seed=rep_seed + 1)
+        f_real = merge((agents=plc_agents,), NamedTuple{(fkey,)}((budgets,)))
     elseif market_type === :ges
         # Non-homothetic polynomial-utility market (cf. sec.ges). Like PLC,
         # f_real is the NamedTuple `(agents=..., w=...)` (Fisher) or
         # `(agents=..., b=...)` (Arrow–Debreu endowments); demand depends on
         # the budget via `share(::GESAgent, p, w)`.
         ges_agents = [random_ges_agent(n) for _ in 1:m]
-        if is_first_order
-            B = rand(n, m)
-            B ./= sum(B; dims=2)
-            print_tree("ground-truth: GES Arrow–Debreu", [
-                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_ges, ges_agents, B, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_ges, ges_agents, B, K_test, rep_seed + 1)
-            f_real = (agents=ges_agents, b=B)
-        else
-            w_vec = rand(m)
-            w_vec ./= sum(w_vec)
-            print_tree("ground-truth: GES (Fisher)", [
-                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_ges, ges_agents, w_vec, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_ges, ges_agents, w_vec, K_test, rep_seed + 1)
-            f_real = (agents=ges_agents, w=w_vec)
-        end
+        budgets, fkey, _M, tag = real_budget(wealth_function, n, m, wealth_quad_sparsity)
+        print_tree("ground-truth: GES ($tag)", [
+            "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+            "seed" => rep_seed,
+        ])
+        Ξ_train = _gen(produce_revealed_preferences_ges, ges_agents, budgets, K, rep_seed)
+        Ξ_test = _gen(produce_revealed_preferences_ges, ges_agents, budgets, K_test, rep_seed + 1)
+        f_real = merge((agents=ges_agents,), NamedTuple{(fkey,)}((budgets,)))
     elseif market_type === :splc
         # Separable PLC market (cf. sec.splc in choice-ump-utility.tex):
         # u_i(x) = Σ_j f_ij(x_j), each f_ij concave piecewise-linear
@@ -888,29 +951,15 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
                   "fit this market to ≈0 error."
         end
         splc_agents = [random_splc_agent(n, L_splc; intercept=opt_splc.intercept) for _ in 1:m]
-        if is_first_order
-            B = rand(n, m)
-            B ./= sum(B; dims=2)
-            print_tree("ground-truth: SPLC Arrow–Debreu", [
-                "dimensions" => ["n" => n, "m" => m, "L" => L_splc, "K" => K, "K_test" => K_test],
-                "intercept" => opt_splc.intercept,
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_splc, splc_agents, B, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_splc, splc_agents, B, K_test, rep_seed + 1)
-            f_real = (agents=splc_agents, b=B)
-        else
-            w_vec = rand(m)
-            w_vec ./= sum(w_vec)
-            print_tree("ground-truth: SPLC (Fisher)", [
-                "dimensions" => ["n" => n, "m" => m, "L" => L_splc, "K" => K, "K_test" => K_test],
-                "intercept" => opt_splc.intercept,
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_splc, splc_agents, w_vec, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_splc, splc_agents, w_vec, K_test, rep_seed + 1)
-            f_real = (agents=splc_agents, w=w_vec)
-        end
+        budgets, fkey, _M, tag = real_budget(wealth_function, n, m, wealth_quad_sparsity)
+        print_tree("ground-truth: SPLC ($tag)", [
+            "dimensions" => ["n" => n, "m" => m, "L" => L_splc, "K" => K, "K_test" => K_test],
+            "intercept" => opt_splc.intercept,
+            "seed" => rep_seed,
+        ])
+        Ξ_train = _gen(produce_revealed_preferences_splc, splc_agents, budgets, K, rep_seed)
+        Ξ_test = _gen(produce_revealed_preferences_splc, splc_agents, budgets, K_test, rep_seed + 1)
+        f_real = merge((agents=splc_agents,), NamedTuple{(fkey,)}((budgets,)))
     elseif market_type === :nges
         # Non-additive GES real market (REAL-MARKET ONLY; eq.gnae.utility).
         # u(x) = Σ_j c_j (A_i x)_j^{r_j} with strictly positive A_i. Like GES,
@@ -918,27 +967,14 @@ function build_rep_data(cfg, rep_idx::Int, rep_seed::Int)
         # demand depends on the budget via share(::NGESAgent, p, w). There is
         # no NGES surrogate or separation oracle.
         nges_agents = [random_nges_agent(n) for _ in 1:m]
-        if is_first_order
-            B = rand(n, m)
-            B ./= sum(B; dims=2)
-            print_tree("ground-truth: NGES Arrow–Debreu", [
-                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_nges, nges_agents, B, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_nges, nges_agents, B, K_test, rep_seed + 1)
-            f_real = (agents=nges_agents, b=B)
-        else
-            w_vec = rand(m)
-            w_vec ./= sum(w_vec)
-            print_tree("ground-truth: NGES (Fisher)", [
-                "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
-                "seed" => rep_seed,
-            ])
-            Ξ_train = _gen(produce_revealed_preferences_nges, nges_agents, w_vec, K, rep_seed)
-            Ξ_test = _gen(produce_revealed_preferences_nges, nges_agents, w_vec, K_test, rep_seed + 1)
-            f_real = (agents=nges_agents, w=w_vec)
-        end
+        budgets, fkey, _M, tag = real_budget(wealth_function, n, m, wealth_quad_sparsity)
+        print_tree("ground-truth: NGES ($tag)", [
+            "dimensions" => ["n" => n, "m" => m, "K" => K, "K_test" => K_test],
+            "seed" => rep_seed,
+        ])
+        Ξ_train = _gen(produce_revealed_preferences_nges, nges_agents, budgets, K, rep_seed)
+        Ξ_test = _gen(produce_revealed_preferences_nges, nges_agents, budgets, K_test, rep_seed + 1)
+        f_real = merge((agents=nges_agents,), NamedTuple{(fkey,)}((budgets,)))
     else
         error("Unknown market_type: $market_type")
     end

@@ -1,4 +1,5 @@
-using JuMP, MosekTools, Gurobi
+using JuMP, MosekTools   # Gurobi (for the CES MIP in solve_separation_mip) is loaded
+                         # conditionally by engine.jl; that MIP path is off the default run.
 using LinearAlgebra
 using Statistics: mean
 using Printf

@@ -49,10 +49,11 @@ ALL_VARIANTS = [
 #   const SKIP_VARIANTS = ["cg", "cgma", "adcg_hard_vardelta", "fw", "fwjl", "adfwjl"]
 # (set to String[] to run every variant).
 # SKIP_VARIANTS = String[]
-# SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x !== "cg", ALL_VARIANTS)
+# SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
+SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)
-SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)
+# SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
 
 const cli = parse_args_for_test_real()
 cfg = build_run_config(cli)
@@ -73,6 +74,7 @@ print_tree("configuration", [
     "lift" => cfg.lift,
     "dimensions" => ["n" => cfg.n, "m" => cfg.m, "K" => cfg.K, "K_test" => cfg.K_test],
     "classes" => cfg.allowed_classes,
+    "engine" => "$(cfg.engine) (LP→$(lp_engine()), gurobi=$(gurobi_available()))",
     "sample_size" => cli["sample_size"],
     "variants" => [string(i) => v.label for (i, v) in enumerate(variants)],
     "skipped" => isempty(SKIP_VARIANTS) ? "(none)" : join(string.(SKIP_VARIANTS), ", "),
@@ -151,16 +153,17 @@ end
 if do_validate_effective && rd.f_real !== nothing
     println()
     println("=== Validation: real-market clearing at surrogate equilibrium price ===")
-    println("    orig = ‖q(1−d(q))‖∞ on the n real goods; lift = ‖p̄(supply−d̄)‖∞ on the n+1 lifted goods (− if not lifted)")
-    @printf("%-22s | %14s | %14s\n", "variant", "orig ‖p(q-g)‖∞", "lift ‖p̄(q̄-d̄)‖∞")
-    @printf("%-22s-+-%14s-+-%14s\n", "-"^22, "-"^14, "-"^14)
+    println("    orig = ‖q(1−d(q))‖∞ on the n real goods; norm = same at the simplex-normalized price q̃=q/⟨1,q⟩ (scale-invariant, comparable across lift/no-lift); lift = ‖p̄(supply−d̄)‖∞ on the n+1 lifted goods (− if not lifted); surr = surrogate's OWN clearing residual at p* (≈0 ⇒ equilibrium reached ⇒ real excess is model misspecification)")
+    @printf("%-22s | %14s | %14s | %14s | %14s\n", "variant", "orig ‖p(q-g)‖∞", "norm ‖q̃(1-d)‖∞", "lift ‖p̄(q̄-d̄)‖∞", "surr ‖p(1-d̂)‖∞")
+    @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%14s\n", "-"^22, "-"^14, "-"^14, "-"^14, "-"^14)
     for r in results
         println("--- solving $(r.variant.label) surrogate equilibrium ---")
         vres = validate_surrogate(r.fa, rd.f_real; wealth_fn=rd.wealth_fn, verbose=true)
         validation[r.variant.sym] = vres
         liftstr = isnan(vres.excess_lift_linf) ? "-" : @sprintf("%.3e", vres.excess_lift_linf)
-        @printf("%-22s | %14.3e | %14s\n",
-            r.variant.label, vres.excess_surrogate_linf, liftstr)
+        surrstr = isnan(vres.excess_surr_self_linf) ? "-" : @sprintf("%.3e", vres.excess_surr_self_linf)
+        @printf("%-22s | %14.3e | %14.3e | %14s | %14s\n",
+            r.variant.label, vres.excess_surrogate_linf, vres.excess_norm_linf, liftstr, surrstr)
     end
 end
 
@@ -171,17 +174,21 @@ println()
 println("="^100)
 println("SUMMARY  (market=$(cfg.market_type), wealth=$(cfg.wealth_function), lift=$(cfg.lift), n=$(cfg.n), m=$(cfg.m), K=$(cfg.K), sample_size=$(cli["sample_size"]))")
 println("="^100)
-@printf("%-22s | %5s | %5s | %11s | %11s | %8s | %8s | %11s | %11s\n",
-    "variant", "iters", "atoms", "train_obj", "test_err", "δ*", "time(s)", "‖p(q-g)‖∞", "lift‖∞")
-@printf("%-22s-+-%5s-+-%5s-+-%11s-+-%11s-+-%8s-+-%8s-+-%11s-+-%11s\n",
-    "-"^22, "-"^5, "-"^5, "-"^11, "-"^11, "-"^8, "-"^8, "-"^11, "-"^11)
+@printf("%-22s | %5s | %5s | %11s | %11s | %8s | %8s | %9s | %11s | %11s | %11s | %11s\n",
+    "variant", "iters", "atoms", "train_obj", "test_err", "δ*", "time(s)", "t/it(ms)", "‖p(q-g)‖∞", "norm‖∞", "lift‖∞", "surr‖∞")
+@printf("%-22s-+-%5s-+-%5s-+-%11s-+-%11s-+-%8s-+-%8s-+-%9s-+-%11s-+-%11s-+-%11s-+-%11s\n",
+    "-"^22, "-"^5, "-"^5, "-"^11, "-"^11, "-"^8, "-"^8, "-"^9, "-"^11, "-"^11, "-"^11, "-"^11)
 for r in results
     vres = get(validation, r.variant.sym, nothing)
     valstr = isnothing(vres) ? "          -" : @sprintf("%11.3e", vres.excess_surrogate_linf)
+    normstr = isnothing(vres) ? "          -" : @sprintf("%11.3e", vres.excess_norm_linf)
     liftstr = (isnothing(vres) || isnan(vres.excess_lift_linf)) ? "          -" :
               @sprintf("%11.3e", vres.excess_lift_linf)
-    @printf("%-22s | %5d | %5d | %11.3e | %11.3e | %8.4f | %8.2f | %s | %s\n",
-        r.variant.label, r.iters, r.atoms, r.train, r.test, r.delta, r.t, valstr, liftstr)
+    surrstr = (isnothing(vres) || isnan(vres.excess_surr_self_linf)) ? "          -" :
+              @sprintf("%11.3e", vres.excess_surr_self_linf)
+    t_per_it = r.iters > 0 ? 1000 * r.t / r.iters : NaN   # mean wall-clock per iteration (ms)
+    @printf("%-22s | %5d | %5d | %11.3e | %11.3e | %8.4f | %8.2f | %9.3f | %s | %s | %s | %s\n",
+        r.variant.label, r.iters, r.atoms, r.train, r.test, r.delta, r.t, t_per_it, valstr, normstr, liftstr, surrstr)
 end
 
 best_train = argmin(r -> r.train, results)
@@ -255,4 +262,33 @@ if !isempty(cfg.data_file_path)
     println(stderr, "  (add --smooth N for a moving-average window, --no-tex to skip pgfplots .tex)")
     println(stderr, "─"^60)
     flush(stdout)
+end
+
+# -----------------------------------------------------------------------
+# Serialize the ground-truth real market and every fitted surrogate, so a run
+# can be re-validated / inspected without refitting. The saved NamedTuple holds
+# the real market (`f_real`) and its wealth model (`wealth_fn`), the train/test
+# revealed-preference datasets, the validation results, and one entry per
+# variant carrying the fitted surrogate market (`fa`) plus its labels. Reload
+# with `Serialization.deserialize` (ExchangeMarket must be loaded for the market
+# types). Suppressed by `--no-data-file`.
+# -----------------------------------------------------------------------
+if !cli["no_data_file"]
+    surr_path = joinpath(cfg.out_dir, "surrogates_$(String(cfg.market_type)).jls")
+    saved = (
+        market_type=cfg.market_type,
+        wealth_function=cfg.wealth_function,
+        lift=cfg.lift,
+        n=cfg.n, m=cfg.m, K=cfg.K, seed=cfg.seed,
+        f_real=rd.f_real,
+        wealth_fn=rd.wealth_fn,
+        Xi_train=rd.Ξ_train,
+        Xi_test=rd.Ξ_test,
+        validation=validation,
+        surrogates=[(sym=r.variant.sym, label=r.variant.label,
+            method=r.variant.method, fa=r.fa) for r in results],
+    )
+    mkpath(cfg.out_dir)
+    open(io -> serialize(io, saved), surr_path, "w")
+    @info "saved real market + fitted surrogates" surr_path n_variants = length(results)
 end

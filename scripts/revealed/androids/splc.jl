@@ -215,7 +215,7 @@ sample is w_i(p_k) = ⟨p_k, b_i⟩).
 """
 function produce_revealed_preferences_splc(
     agents::Vector{SPLCAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     seed=nothing
@@ -228,12 +228,10 @@ function produce_revealed_preferences_splc(
     for k in 1:K
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            # Fisher: fixed budget. AD: endowment value at this sample's price.
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            x_i, _ = solve_splc_demand(agents[i], p_k, w_i)
+            x_i, _ = solve_splc_demand(agents[i], p_k, w[i])
             g_k .+= x_i
         end
         Ξ[k] = (copy(p_k), copy(g_k))

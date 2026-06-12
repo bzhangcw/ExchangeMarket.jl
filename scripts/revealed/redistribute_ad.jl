@@ -27,14 +27,14 @@
 # (separation.jl) and `_gamma_over_full_from_cand` are reused verbatim;
 # AD only swaps the master and runs the oracle n times (one per good).
 #
-# Depends on (in scope once setup.jl has included gurobi_env.jl and
-# separation.jl): `_gurobi_env`, `find_cut_single`,
+# Depends on (in scope once setup.jl has included engine.jl and
+# separation.jl): `new_model`, `set_lp_barrier!`, `find_cut_single`,
 # `_gamma_over_full_from_cand`.
 
 using JuMP
 using LinearAlgebra
-using Gurobi
 using Random   # randperm/shuffle — good-scan order + random masks (find_cut_single_ad / make_ad_mask)
+# Master models built via `new_model()` (engine.jl): Gurobi when available, else Mosek.
 using ArgParse # register_cli_ad! / apply_cli_ad!
 
 # The fitted AD surrogate is a first-class ExchangeMarket.ArrowDebreuMarket:
@@ -230,11 +230,12 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     end
 
     if !cache_hit
-        model = Model(() -> Gurobi.Optimizer(_gurobi_env()))
+        model = new_model()
         # Barrier without crossover, same rationale as the Fisher master: a
         # near-optimal interior (u, ν) is all the separation oracle consumes,
         # and the smoother dual trajectory yields more diverse columns.
-        set_attribute(model, "Method", 2)
+        # (Gurobi-only; no-op on Mosek, whose LP default is already IPM.)
+        set_lp_barrier!(model)
         # See the note above: no per-solve time limit on the master.
 
         # Masked endowment variables: atom t owns only goods in _owned(t).
@@ -299,13 +300,8 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     # Per-call verbose toggle on every solve (rebuild OR cache hit), so a
     # cached model doesn't leak iter-1's verbose flags into later iters.
-    if verbose
-        set_attribute(model, "OutputFlag", 1)
-        set_attribute(model, "LogToConsole", 1)
-    else
-        set_attribute(model, "OutputFlag", 0)
-        set_attribute(model, "LogToConsole", 0)
-    end
+    # Solver-portable (Gurobi "OutputFlag"/"LogToConsole" do not exist on Mosek).
+    verbose ? unset_silent(model) : set_silent(model)
     optimize!(model)
 
     if !isnothing(cache)

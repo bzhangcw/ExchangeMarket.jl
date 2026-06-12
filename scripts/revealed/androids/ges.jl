@@ -126,7 +126,7 @@ w_i(p_k) = ⟨p_k, b_i⟩).
 """
 function produce_revealed_preferences_ges(
     agents::Vector{GESAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     seed=nothing
@@ -139,13 +139,13 @@ function produce_revealed_preferences_ges(
     for k in 1:K
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
+        # Per-agent wealth at this sample's price (fixed budget / endowment
+        # value ⟨p_k,b_i⟩ / price-dependent wealth function), via `wealth_at`.
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            # Fisher: fixed budget. AD: endowment value at this sample's price.
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            γ_i = share(agents[i], p_k, w_i)   # GES spending share at (p_k, w_i)
-            g_k .+= w_i .* γ_i ./ p_k          # x_i = w_i γ_i / p
+            γ_i = share(agents[i], p_k, w[i])   # GES spending share at (p_k, w_i)
+            g_k .+= w[i] .* γ_i ./ p_k          # x_i = w_i γ_i / p
         end
         Ξ[k] = (copy(p_k), copy(g_k))
     end
@@ -273,7 +273,7 @@ function ges_share_by_opt(c::AbstractVector, r::AbstractVector,
     @assert all(c .> 0) "GES requires c_j > 0"
     @assert w > 0
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     if !verbose
         set_attribute(model, "print_level", MadNLP.ERROR)
     end
@@ -362,7 +362,7 @@ function solve_separation_ges(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     y_lo, y_hi = Float64(ges_y_lower), Float64(ges_y_upper)
     ϵ_λ = 1e-6                                    # strict-positive λ floor
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     if !verbose
         set_attribute(model, "print_level", MadNLP.ERROR)
     end

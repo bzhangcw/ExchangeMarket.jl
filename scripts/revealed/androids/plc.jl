@@ -104,7 +104,7 @@ Returns Ξ = [(p₁, g₁), ..., (p_K, g_K)].
 """
 function produce_revealed_preferences_plc(
     agents::Vector{PLCAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     price_range=(0.5, 2.0),
@@ -124,12 +124,12 @@ function produce_revealed_preferences_plc(
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
 
+        # Per-agent wealth at this sample's price (fixed budget / endowment
+        # value ⟨p_k,b_i⟩ / price-dependent wealth function), via `wealth_at`.
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            # Fisher: fixed budget. AD: endowment value at this sample's price.
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            x_i, _ = solve_plc_demand(agents[i], p_k, w_i)
+            x_i, _ = solve_plc_demand(agents[i], p_k, w[i])
             g_k .+= x_i
         end
         Ξ[k] = (copy(p_k), copy(g_k))

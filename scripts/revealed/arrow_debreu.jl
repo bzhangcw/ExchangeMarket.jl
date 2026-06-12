@@ -1,6 +1,10 @@
 # -----------------------------------------------------------------------
 # Standalone (frozen) Arrow–Debreu equilibrium solver.
 #
+# (c) 2026 Chuwen Zhang <chuwzhang@gmail.com>
+# @note: this version is under development and only yet for testing revealed preference methods.
+# @ref: 
+#
 # A self-contained copy of the affine-scaled Newton / potential-reduction
 # solver from scripts/arrow/func_new.jl (+ its SOCP trust-region subproblem
 # from scripts/arrow/func.jl), so that revealed/ does NOT depend on the arrow
@@ -13,7 +17,7 @@
 #     Solve an ArrowDebreuMarket's Walrasian equilibrium, returning a
 #     simplex-normalized price. Internally builds a HessianBar with a Σp=1
 #     constraint and runs `afscaled_newton`.
-#
+# 
 # `proj` (x<0 ? Inf : x) is reused from ExchangeMarket; `printto` is copied
 # here (it is not exported). update_budget!/play!/grad!/eval!/hess!,
 # LinearConstr and HessianBar come from ExchangeMarket.
@@ -253,5 +257,13 @@ function afscaled_newton_equilibrium(ad; K=400, η=10.0, ϵ=1e-9, verbose=false,
     verbose ? run() : redirect_stdout(run, devnull)
     p = copy(alg.p)
     p ./= sum(p)
-    return (p=p,)
+    # Surrogate self-excess at the simplex-normalized equilibrium price: the
+    # solver's own price-scaled market-clearing residual ‖p ⊙ z(p)‖∞ (≈0 iff
+    # the equilibrium was actually reached).
+    alg.p .= p
+    update_budget!(ad, alg.p)
+    play!(alg, ad)
+    grad!(alg, ad)
+    resid = norm(alg.p .* alg.∇, Inf)
+    return (p=p, resid=resid)
 end

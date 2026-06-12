@@ -44,6 +44,20 @@ method:
       drop: true
       classes: [ces, linear]
 
+  - name: cgma
+    separation_kind: cg_multicut
+    color: 2
+    marker: rect
+    label: "CG(MA)"
+    kwargs:
+      max_iters: 500
+      tol_obj: 1.0e-3
+      tol_rc: 1.0e-3
+      tol_delta: 1.0e-5
+      tol_stage_2: 5.0e-4   # demote stage 2 → 1 on this looser stall
+      drop: true
+      classes: [ces]
+
   # Arrow–Debreu column generation: same CG loop with the AD master
   # (endowments b_t ∈ ℝⁿ₊, Σ_t b_t = 1, price-dependent budget ⟨p,b_t⟩).
   # separation_kind cg_ad routes run_one_method to run_ad_tracked.
@@ -61,45 +75,14 @@ method:
       drop: true
       classes: [ces]
 
-  - name: cgma
-    separation_kind: cg_multicut
-    color: 2
-    marker: rect
-    label: "CG(MA)"
-    kwargs:
-      max_iters: 500
-      tol_obj: 1.0e-3
-      tol_rc: 1.0e-3
-      tol_delta: 1.0e-5
-      tol_stage_2: 5.0e-4   # demote stage 2 → 1 on this looser stall
-      drop: true
-      classes: [ces]
-
-  # Hand-rolled away-step FW (our own loop, no FrankWolfe.jl). There is no
-  # separate "SFW" method — stochastic FW is just this FW run with subsampling:
-  # pass --sample-size N (> 0) to make the LMO stochastic. sample_size: 0 here is
-  # full-batch FW.
-  - name: FW
-    separation_kind: fw
-    color: 4
-    marker: diamond
-    label: FW
-    kwargs:
-      max_iters: 2000
-      sample_size: 0          # 0 → full batch; --sample-size N overrides for SFW
-      tol_obj: 1.0e-3
-      tol_delta: 1.0e-5
-      step_rule: linesearch   # linesearch | diminishing
-      away_steps: true
-      seed: 0
-
+  # FrankWolfe.jl
   - name: FWjl
     separation_kind: fwjl
     color: 3
     marker: rect
     label: FW.jl
     kwargs:
-      max_iters: 50000
+      max_iters: 3000
       tol_obj: 1.0e-3
       seed: 0
 
@@ -112,10 +95,28 @@ method:
     marker: star6
     label: AD-FW.jl
     kwargs:
-      max_iters: 50000
+      max_iters: 3000
       tol_obj: 1.0e-3
       seed: 0
       classes: [ces]
+
+  # Hand-rolled away-step FW (our own loop, no FrankWolfe.jl). There is no
+  # separate "SFW" method — stochastic FW is just this FW run with subsampling:
+  # pass --sample-size N (> 0) to make the LMO stochastic. sample_size: 0 here is
+  # full-batch FW.
+  - name: FW
+    separation_kind: fw
+    color: 4
+    marker: diamond
+    label: FW
+    kwargs:
+      max_iters: 3000
+      sample_size: 0          # 0 → full batch; --sample-size N overrides for SFW
+      tol_obj: 1.0e-3
+      tol_delta: 1.0e-5
+      step_rule: linesearch   # linesearch | diminishing
+      away_steps: true
+      seed: 0
 
   # Arrow–Debreu via our hand-rolled away-step FW (δ = 1). Same AD problem as
   # ADFWjl but driven by our own loop instead of FrankWolfe.jl — stopping is
@@ -126,7 +127,7 @@ method:
     marker: diamond
     label: AD-FW
     kwargs:
-      max_iters: 2000
+      max_iters: 1000
       sample_size: 0          # > 0 ⇒ stochastic LMO (SFW-style)
       tol_obj: 1.0e-3
       tol_delta: 1.0e-5
@@ -141,7 +142,7 @@ method:
     marker: utriangle
     label: ACCPM
     kwargs:
-      max_iters: 500
+      max_iters: 200
       tol_obj: 1.0e-3
       tol_rc: 1.0e-3
       tol_delta: 1.0e-5
@@ -191,16 +192,6 @@ variant:
     cli:
       sample_hard: true
       ad_delta_free: true
-  
-  - label: FW
-    method: FW
-    sym: fw
-    color: royalblue
-    marker: diamond
-    plotlabel: FW
-    cli:
-      sample_hard: false
-      ad_delta_free: false
 
   - label: FW.jl
     method: FWjl
@@ -218,6 +209,16 @@ variant:
     color: darkgreen
     marker: star6
     plotlabel: AD-FW.jl
+    cli:
+      sample_hard: false
+      ad_delta_free: false
+
+  - label: FW
+    method: FW
+    sym: fw
+    color: royalblue
+    marker: diamond
+    plotlabel: FW
     cli:
       sample_hard: false
       ad_delta_free: false

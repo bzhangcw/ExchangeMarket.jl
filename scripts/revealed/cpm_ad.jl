@@ -170,6 +170,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     )
 
     _t0 = time()
+    reset_cg_timers!()   # per-android separation + redistribution accumulators
     if verbose
         print_banner(AD_TABLE, BANNER_TITLE)
         print_config("method", "cg (Arrow–Debreu)")
@@ -207,7 +208,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         end
         _remaining = isfinite(timelimit) ? max(1.0, timelimit - (time() - _t0)) : nothing
 
-        B, s_slack, model_primal, balance, supply, δ_val = solve_wealth_redist_primal_ad(
+        B, s_slack, model_primal, balance, supply, δ_val = @time_redist solve_wealth_redist_primal_ad(
             Ξ_train, γ_ref[]; masks=masks, delta=ad_delta,
             verbose=false, timelimit=_remaining,
             cache=master_cache)
@@ -349,7 +350,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
 
     # Final master solve with all columns, for the returned B / test error,
     # then a final prune so the returned surrogate is minimal.
-    B, _, _, model_final, _, δ_final = solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
+    B, _, _, model_final, _, δ_final = @time_redist solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
         masks=masks, delta=ad_delta, verbose=false, cache=master_cache)
     # The final solve is the first to see the column added in the last loop
     # iteration (the in-loop break paths solve before adding). If it yields no
@@ -363,7 +364,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
             pop!(masks)
             master_cache[] = nothing
         end
-        B, _, _, _, _, δ_final = solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
+        B, _, _, _, _, δ_final = @time_redist solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
             masks=masks, delta=ad_delta, verbose=false, cache=master_cache)
         isnothing(B) && error("AD master could not produce a solution even after " *
                               "dropping the last column; cannot return a surrogate.")
@@ -399,5 +400,6 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     # The fitted surrogate is a first-class ArrowDebreuMarket: atoms as CES
     # (c, ρ) columns, the master's endowments B as the market's b.
     fa = ad_market_from_atoms(cands, B)
+    print_cg_timing_summary()
     return fa, γ_ref, history
 end

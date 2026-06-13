@@ -49,9 +49,9 @@ ALL_VARIANTS = [
 #   const SKIP_VARIANTS = ["cg", "cgma", "adcg_hard_vardelta", "fw", "fwjl", "adfwjl"]
 # (set to String[] to run every variant).
 # SKIP_VARIANTS = String[]
-# SKIP_VARIANTS = filter(x -> x !== "cg", ALL_VARIANTS)
+SKIP_VARIANTS = filter(x -> x !== "cg", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
-SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
+# SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
 
@@ -156,6 +156,10 @@ end
 # method.
 # -----------------------------------------------------------------------
 validation = Dict{Symbol,Any}()
+# Real-market optimal Nash welfare W_real(p*); stays NaN unless the validation
+# block below solves it. Initialized at top level so the SUMMARY table's NSW%
+# column can reference it even when validation is skipped.
+welfare_real_opt = NaN
 # Validation works for ANY real-market family: solve the surrogate's
 # equilibrium (Fisher via Mirror Descent, AD via potred), project the price
 # back to the real goods if the surrogate is money-lifted, and evaluate the
@@ -170,9 +174,17 @@ end
 if do_validate_effective && rd.f_real !== nothing
     println()
     println("=== Validation: real-market clearing at surrogate equilibrium price ===")
-    println("    orig = ‖q(1−d(q))‖∞ on the n real goods; norm = same at the simplex-normalized price q̃=q/⟨1,q⟩ (scale-invariant, comparable across lift/no-lift); lift = ‖p̄(supply−d̄)‖∞ on the n+1 lifted goods (− if not lifted); surr = surrogate's OWN clearing residual at p* (≈0 ⇒ equilibrium reached ⇒ real excess is model misspecification)")
+    println(sprintlnlong("orig = ‖q(1−d(q))‖∞ on the n real goods; norm = same at the simplex-normalized price q̃=q/⟨1,q⟩ (scale-invariant, comparable across lift/no-lift); lift = ‖p̄(supply−d̄)‖∞ on the n+1 lifted goods (− if not lifted); surr = surrogate's OWN clearing residual at p* (≈0 ⇒ equilibrium reached ⇒ real excess is model misspecification)";
+        indent="    "))
     @printf("%-22s | %14s | %14s | %14s | %14s\n", "variant", "orig ‖p(q-g)‖∞", "norm ‖q̃(1-d)‖∞", "lift ‖p̄(q̄-d̄)‖∞", "surr ‖p(1-d̂)‖∞")
     @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%14s\n", "-"^22, "-"^14, "-"^14, "-"^14, "-"^14)
+    # Real-market optimal welfare Σ wᵢ log uᵢ(p*) (Eisenberg–Gale), solved once at
+    # the REAL equilibrium p*. Only the constant-budget CES Fisher market has an
+    # equilibrium we solve here; price-dependent wealth (AD/quadratic) stays NaN.
+    welfare_real_opt = NaN
+    if rd.f_real isa FisherMarket && cfg.wealth_function == 0
+        welfare_real_opt = ces_welfare(rd.f_real, solve_ces_equilibrium(rd.f_real).p, rd.f_real.w)
+    end
     for r in results
         println("--- solving $(r.variant.label) surrogate equilibrium ---")
         vres = validate_surrogate(r.fa, rd.f_real; wealth_fn=rd.wealth_fn, verbose=true)
@@ -181,6 +193,36 @@ if do_validate_effective && rd.f_real !== nothing
         surrstr = isnan(vres.excess_surr_self_linf) ? "-" : @sprintf("%.3e", vres.excess_surr_self_linf)
         @printf("%-22s | %14.3e | %14.3e | %14s | %14s\n",
             r.variant.label, vres.excess_surrogate_linf, vres.excess_norm_linf, liftstr, surrstr)
+    end
+
+    # --- Welfare table (Eisenberg–Gale  W = Σ wᵢ log uᵢ) ------------------------
+    # W_real(p*): real market at its OWN equilibrium (the optimum; a per-row
+    # column, identical across variants); W_real(p^s): real market at the
+    # surrogate's clearing price p^s; W_surr(p^s): the surrogate's own androids
+    # at p^s. "loss %" = 100·(W_real(p*) − W_real(p^s)) / |W_real(p*)| is the
+    # relative welfare the surrogate's price costs the real economy (smaller is
+    # better).
+    if any(haskey(validation, r.variant.sym) && !isnan(validation[r.variant.sym].welfare_real_ps) for r in results)
+        println()
+        println("--- Welfare:  W = Σ wᵢ log uᵢ  (Eisenberg–Gale / Nash social welfare) ---")
+        if isnan(welfare_real_opt)
+            @printf("    real optimum W_real(p*): not solved (price-dependent wealth, --wealth-function %d)\n", cfg.wealth_function)
+        end
+        @printf("%-22s | %14s | %14s | %14s | %10s\n",
+            "variant", "W_real(p*)", "W_real(p^s)", "W_surr(p^s)", "loss %")
+        @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%10s\n",
+            "-"^22, "-"^14, "-"^14, "-"^14, "-"^10)
+        for r in results
+            vres = get(validation, r.variant.sym, nothing)
+            (isnothing(vres) || isnan(vres.welfare_real_ps)) && continue
+            optstr = isnan(welfare_real_opt) ? "-" : @sprintf("%+.6e", welfare_real_opt)
+            # loss relative to the optimum welfare; "-" when the real optimum
+            # wasn't solved (no reference) or is exactly 0 (percentage undefined).
+            lossstr = (isnan(welfare_real_opt) || welfare_real_opt == 0) ? "-" :
+                      @sprintf("%+.3f%%", 100 * (welfare_real_opt - vres.welfare_real_ps) / abs(welfare_real_opt))
+            @printf("%-22s | %14s | %+14.6e | %+14.6e | %10s\n",
+                r.variant.label, optstr, vres.welfare_real_ps, vres.welfare_surr_ps, lossstr)
+        end
     end
 end
 
@@ -191,10 +233,10 @@ println()
 println("="^100)
 println("SUMMARY  (market=$(cfg.market_type), wealth=$(cfg.wealth_function), lift=$(cfg.lift), n=$(cfg.n), m=$(cfg.m), K=$(cfg.K), sample_size=$(cli["sample_size"]))")
 println("="^100)
-@printf("%-22s | %5s | %5s | %11s | %11s | %8s | %8s | %9s | %11s | %11s | %11s | %11s\n",
-    "variant", "iters", "atoms", "train_obj", "test_err", "δ*", "time(s)", "t/it(ms)", "‖p(q-g)‖∞", "norm‖∞", "lift‖∞", "surr‖∞")
-@printf("%-22s-+-%5s-+-%5s-+-%11s-+-%11s-+-%8s-+-%8s-+-%9s-+-%11s-+-%11s-+-%11s-+-%11s\n",
-    "-"^22, "-"^5, "-"^5, "-"^11, "-"^11, "-"^8, "-"^8, "-"^9, "-"^11, "-"^11, "-"^11, "-"^11)
+@printf("%-22s | %5s | %5s | %11s | %11s | %8s | %8s | %9s | %11s | %11s | %11s | %11s | %9s\n",
+    "variant", "iters", "atoms", "train", "test", "δ*", "time(s)", "t/it(ms)", "‖p(q-g)‖∞", "norm‖∞", "lift‖∞", "surr‖∞", "NSW %")
+@printf("%-22s-+-%5s-+-%5s-+-%11s-+-%11s-+-%8s-+-%8s-+-%9s-+-%11s-+-%11s-+-%11s-+-%11s-+-%9s\n",
+    "-"^22, "-"^5, "-"^5, "-"^11, "-"^11, "-"^8, "-"^8, "-"^9, "-"^11, "-"^11, "-"^11, "-"^11, "-"^9)
 for r in results
     vres = get(validation, r.variant.sym, nothing)
     valstr = isnothing(vres) ? "          -" : @sprintf("%11.3e", vres.excess_surrogate_linf)
@@ -203,9 +245,15 @@ for r in results
               @sprintf("%11.3e", vres.excess_lift_linf)
     surrstr = (isnothing(vres) || isnan(vres.excess_surr_self_linf)) ? "          -" :
               @sprintf("%11.3e", vres.excess_surr_self_linf)
+    # NSW %: Nash-social-welfare loss at the surrogate price, 100·(W_real(p*) −
+    # W_real(p^s))/|W_real(p*)| — same as the welfare table's "loss %". "-" when
+    # the real optimum or the surrogate's real welfare wasn't solved.
+    nswstr = (isnothing(vres) || isnan(welfare_real_opt) || welfare_real_opt == 0 ||
+              isnan(vres.welfare_real_ps)) ? "        -" :
+             @sprintf("%+8.3f%%", 100 * (welfare_real_opt - vres.welfare_real_ps) / abs(welfare_real_opt))
     t_per_it = r.iters > 0 ? 1000 * r.t / r.iters : NaN   # mean wall-clock per iteration (ms)
-    @printf("%-22s | %5d | %5d | %11.3e | %11.3e | %8.4f | %8.2f | %9.3f | %s | %s | %s | %s\n",
-        r.variant.label, r.iters, r.atoms, r.train, r.test, r.delta, r.t, t_per_it, valstr, normstr, liftstr, surrstr)
+    @printf("%-22s | %5d | %5d | %11.3e | %11.3e | %8.4f | %8.2f | %9.3f | %s | %s | %s | %s | %s\n",
+        r.variant.label, r.iters, r.atoms, r.train, r.test, r.delta, r.t, t_per_it, valstr, normstr, liftstr, surrstr, nswstr)
 end
 
 best_train = argmin(r -> r.train, results)

@@ -187,3 +187,36 @@ function print_config(key::AbstractString, value; keywidth::Int=30,
         @printf(io,  " %-*s := %s\n", keywidth, key, string(value))
     end
 end
+
+"""
+    sprintlnlong(text; width=80, indent="", hanging=indent) -> String
+
+Return `text` word-wrapped so that no line exceeds `width` characters, breaking
+only at whitespace; lines are joined by `\\n` with no trailing newline (so a
+caller does `println(sprintlnlong(...))`). `indent` prefixes the first line and
+`hanging` (defaults to `indent`) prefixes every continuation line; pass a longer
+`hanging` for a hanging indent. A single word longer than `width` is kept on its
+own (over-long) line rather than split. Width is counted in characters
+(`length`), so legends using Unicode glyphs (‖ ∞ ⇒) wrap on glyph count.
+
+For long printed legends/notes under scripts/revealed/, prefer this over a
+single giant `println` (which overflows the terminal) or a hand-wrapped block
+of `println`s (which drifts out of sync when edited).
+"""
+function sprintlnlong(text::AbstractString; width::Int=80,
+                      indent::AbstractString="", hanging::AbstractString=indent)
+    words = split(strip(text))
+    isempty(words) && return indent
+    lines = String[]
+    line = indent * first(words)
+    for w in @view words[2:end]
+        if length(line) + 1 + length(w) > width
+            push!(lines, line)
+            line = hanging * w
+        else
+            line *= " " * w
+        end
+    end
+    push!(lines, line)
+    return join(lines, "\n")
+end

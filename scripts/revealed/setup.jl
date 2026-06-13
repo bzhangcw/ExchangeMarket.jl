@@ -580,6 +580,7 @@ end
 # `add_column_to_market!`, etc., which both runners use. logging.jl
 # defines the shared IterTable / print_banner used by both runners.
 # -----------------------------------------------------------------------
+include("./timing.jl")        # @time_sep / @time_redist — must precede separation.jl
 include("./separation.jl")
 include("./logging.jl")
 include("./cpm.jl")

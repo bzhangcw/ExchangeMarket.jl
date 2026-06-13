@@ -194,6 +194,7 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
 
     targets = [Ξ_train[k][1] .* Ξ_train[k][2] for k in 1:K]
     _t0 = time()
+    reset_cg_timers!()   # per-android separation accumulators (FW has no LP master)
     _remaining() = isfinite(timelimit) ? max(1.0, timelimit - (time() - _t0)) : nothing
 
     # ---- active set + objective helpers ----------------------------------------
@@ -408,6 +409,7 @@ function run_method_tracked_fw(name::Symbol, kwargs::Dict,
         @printf("--- done: %d atoms, best obj/K=%.3e, t=%.4fs ---\n",
             fa.m, best_f, _elapsed)
     end
+    print_cg_timing_summary()
     return fa, γ_ref, history
 end
 

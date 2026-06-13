@@ -248,6 +248,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     has_excess = !isnothing(f_real) && interval_eval_excess > 0
 
     _t0 = time()
+    reset_cg_timers!()   # per-android separation + redistribution accumulators
     # `stage` is a small ordinal that selects the separation strategy:
     #   stage = 2 ⇒ multicut (K per-sample inversion candidates)
     #   stage = 1 ⇒ single-cut (one improving column from the per-class separation oracle)
@@ -296,7 +297,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # Show Gurobi's barrier log on the FIRST master solve only — useful
         # to confirm Method=2 / Crossover=0 are taking effect and to spot
         # numerical issues early — and stay silent afterward.
-        w, s_slack, model_primal, balance, budget = solve_wealth_redist_primal(
+        w, s_slack, model_primal, balance, budget = @time_redist solve_wealth_redist_primal(
             Ξ_train, γ_ref[];
             # verbose=(iter == 1) && verbose,
             verbose=false,
@@ -511,7 +512,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     end
 
     # final master solve with latest columns
-    w_final, _, _, _, _ = solve_wealth_redist_primal(
+    w_final, _, _, _, _ = @time_redist solve_wealth_redist_primal(
         Ξ_train, γ_ref[];
         verbose=false,
         pinned_idx=_pinned_idx(),
@@ -545,6 +546,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     if verbose
         @printf("--- done: %d agents, obj/K=%.3e, t=%.4fs ---\n", fa.m, history[:primal_obj][end], _elapsed)
     end
+    print_cg_timing_summary()
 
     return fa, γ_ref, history
 end

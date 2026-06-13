@@ -94,6 +94,35 @@ function real_demand_at(fa::FisherMarket, wealth_fn, p::AbstractVector)
 end
 
 # -----------------------------------------------------------------------
+# Eisenberg–Gale / Nash social welfare  Σ_i w_i log u_i  of a CES Fisher
+# market at price `p` with budget vector `w`: agent i spends w_i at price p,
+# demanding x_i = w_i γ_i(p) ⊘ p, and attains the CES utility
+#   u_i = (Σ_j c_{ij} x_{ij}^{ρ_i})^{1/ρ_i}    (⟨c_i, x_i⟩ for a linear atom).
+# The utility formula mirrors `utility(::CESAgent, c, x)` in the package
+# (safe-power `spow`), so the value matches the solver's `val_u` exactly.
+# `w` is passed explicitly because the ground-truth wealth may be price
+# dependent (w_i = wealth_fn(p)).
+# -----------------------------------------------------------------------
+function ces_welfare(fa::FisherMarket, p::AbstractVector, w::AbstractVector)
+    spow(x, y) = x > 0.0 ? x^y : 0.0
+    n = length(p)
+    W = 0.0
+    for i in 1:fa.m
+        c_i = Vector(fa.c[:, i])
+        γ_i = compute_gamma(p, c_i, fa.σ[i])
+        x_i = w[i] .* γ_i ./ p
+        ρ = isinf(fa.σ[i]) ? 1.0 : fa.ρ[i]   # linear atom (σ=∞) ⇒ ρ=1 ⇒ u=⟨c,x⟩
+        s = 0.0
+        @inbounds for j in 1:n
+            s += c_i[j] * spow(x_i[j], ρ)
+        end
+        u_i = spow(s, 1.0 / ρ)
+        W += w[i] * (u_i > 0.0 ? log(u_i) : 0.0)
+    end
+    return W
+end
+
+# -----------------------------------------------------------------------
 # Project the surrogate's equilibrium price onto the real market's good
 # space. When the surrogate was fit on money-lifted data it has n+1 goods
 # (the extra one is money); the original n-good price is q = p/π = the
@@ -164,7 +193,13 @@ end
 _surr_self_excess(fa::FisherMarket, p) = norm(p .* (1.0 .- aggregate_ces_demand(fa, p)), Inf)
 
 # Build the validation result NamedTuple from the (orig, lift, norm) excess.
-function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN)
+# `welfare_*` are the Eisenberg–Gale social welfares Σ w_i log u_i (NaN when
+# not computed, e.g. non-CES ground truth): `welfare_real_ps` for the real
+# market at the surrogate price p^s, `welfare_surr_ps` for the surrogate's own
+# androids at p^s. (The real optimum Σ w_i log u_i(p*) is solved once by the
+# driver, not per surrogate variant.)
+function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN,
+    welfare_real_ps::Real=NaN, welfare_surr_ps::Real=NaN)
     nrm = (hasproperty(ex, :norm) && !isnothing(ex.norm)) ? ex.norm : ex.orig
     return (
         p_surrogate=p_surr,
@@ -176,6 +211,8 @@ function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN)
         excess_norm_l1=norm(nrm, 1),
         excess_surr_self_linf=surr_excess,
         iters_surrogate=iters,
+        welfare_real_ps=welfare_real_ps,
+        welfare_surr_ps=welfare_surr_ps,
     )
 end
 
@@ -205,11 +242,19 @@ function validate_surrogate(
         return _vresult(fill(NaN, f_real.n), (orig=[NaN], lift=nothing))
     end
     res_s = solve_ces_equilibrium(fa_surrogate; verbose=verbose, kwargs...)
+    q = _project_to_real(res_s.p, f_real.n)         # surrogate price on the real goods
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    return _vresult(_project_to_real(res_s.p, f_real.n), ex; iters=res_s.iters,
-        surr_excess=_surr_self_excess(fa_surrogate, res_s.p))
+    # Eisenberg–Gale welfare Σ w_i log u_i at the surrogate equilibrium price:
+    #   * real market, with budgets honoring the ground-truth wealth model at q;
+    #   * surrogate's own androids, in the surrogate's good space (n+1 if lifted).
+    w_real_q = isnothing(wealth_fn) ? f_real.w : wealth_fn(q)
+    welfare_real_ps = ces_welfare(f_real, q, w_real_q)
+    welfare_surr_ps = ces_welfare(fa_surrogate, res_s.p, fa_surrogate.w)
+    return _vresult(q, ex; iters=res_s.iters,
+        surr_excess=_surr_self_excess(fa_surrogate, res_s.p),
+        welfare_real_ps=welfare_real_ps, welfare_surr_ps=welfare_surr_ps)
 end
 
 # `solve_plc_excess` (the PLC joint-LP equilibrium check used by the PLC branch
@@ -265,6 +310,8 @@ function validate_surrogate(
             excess_norm_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
             excess_surr_self_linf=surr_excess,
             iters_surrogate=0,
+            welfare_real_ps=NaN,    # welfare metric is CES-only
+            welfare_surr_ps=NaN,
             lp_status=plc_res.status,
             lp_time=plc_res.time,
         )

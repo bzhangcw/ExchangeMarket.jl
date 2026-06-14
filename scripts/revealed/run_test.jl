@@ -156,7 +156,7 @@ end
 # method.
 # -----------------------------------------------------------------------
 validation = Dict{Symbol,Any}()
-# Real-market optimal Nash welfare W_real(p*); stays NaN unless the validation
+# Real-market optimal Nash welfare W_real*; stays NaN unless the validation
 # block below solves it. Initialized at top level so the SUMMARY table's NSW%
 # column can reference it even when validation is skipped.
 welfare_real_opt = NaN
@@ -178,12 +178,18 @@ if do_validate_effective && rd.f_real !== nothing
         indent="    "))
     @printf("%-22s | %14s | %14s | %14s | %14s\n", "variant", "orig ‖p(q-g)‖∞", "norm ‖q̃(1-d)‖∞", "lift ‖p̄(q̄-d̄)‖∞", "surr ‖p(1-d̂)‖∞")
     @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%14s\n", "-"^22, "-"^14, "-"^14, "-"^14, "-"^14)
-    # Real-market optimal welfare Σ wᵢ log uᵢ(p*) (Eisenberg–Gale), solved once at
-    # the REAL equilibrium p*. Only the constant-budget CES Fisher market has an
-    # equilibrium we solve here; price-dependent wealth (AD/quadratic) stays NaN.
+    # Real-market optimal NSW (Nash social welfare) W_real* = max Σ wᵢ log uᵢ,
+    # obtained by maximizing welfare DIRECTLY via a Mosek convex program — never
+    # via the real equilibrium price p* (we compare welfares, not prices, so there
+    # is no need to solve for p*). CES and PLC Fisher markets are both supported;
+    # other families stay NaN. Requires constant budgets (--wealth-function 0).
     welfare_real_opt = NaN
-    if rd.f_real isa FisherMarket && cfg.wealth_function == 0
-        welfare_real_opt = ces_welfare(rd.f_real, solve_ces_equilibrium(rd.f_real).p, rd.f_real.w)
+    if cfg.wealth_function == 0
+        if rd.f_real isa FisherMarket
+            welfare_real_opt = solve_ces_welfare_opt(rd.f_real, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: PLCAgent
+            welfare_real_opt = solve_plc_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        end
     end
     for r in results
         println("--- solving $(r.variant.label) surrogate equilibrium ---")
@@ -195,21 +201,20 @@ if do_validate_effective && rd.f_real !== nothing
             r.variant.label, vres.excess_surrogate_linf, vres.excess_norm_linf, liftstr, surrstr)
     end
 
-    # --- Welfare table (Eisenberg–Gale  W = Σ wᵢ log uᵢ) ------------------------
-    # W_real(p*): real market at its OWN equilibrium (the optimum; a per-row
-    # column, identical across variants); W_real(p^s): real market at the
+    # --- Welfare table (NSW = Nash social welfare,  W = Σ wᵢ log uᵢ) -------------
+    # W_real*: real market's optimal NSW (max Σ wᵢ log uᵢ, solved directly; a
+    # per-row column, identical across variants); W_real(p^s): real market at the
     # surrogate's clearing price p^s; W_surr(p^s): the surrogate's own androids
-    # at p^s. "loss %" = 100·(W_real(p*) − W_real(p^s)) / |W_real(p*)| is the
-    # relative welfare the surrogate's price costs the real economy (smaller is
-    # better).
+    # at p^s. "loss %" = 100·(W_real* − W_real(p^s)) / |W_real*| is the relative
+    # welfare the surrogate's price costs the real economy (smaller is better).
     if any(haskey(validation, r.variant.sym) && !isnan(validation[r.variant.sym].welfare_real_ps) for r in results)
         println()
-        println("--- Welfare:  W = Σ wᵢ log uᵢ  (Eisenberg–Gale / Nash social welfare) ---")
+        println("--- NSW:  W = Σ wᵢ log uᵢ  (Nash social welfare) ---")
         if isnan(welfare_real_opt)
-            @printf("    real optimum W_real(p*): not solved (price-dependent wealth, --wealth-function %d)\n", cfg.wealth_function)
+            @printf("    optimal NSW W_real*: not solved for this market/wealth setting (only CES & PLC with --wealth-function 0)\n")
         end
         @printf("%-22s | %14s | %14s | %14s | %10s\n",
-            "variant", "W_real(p*)", "W_real(p^s)", "W_surr(p^s)", "loss %")
+            "variant", "W_real*", "W_real(p^s)", "W_surr(p^s)", "loss %")
         @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%10s\n",
             "-"^22, "-"^14, "-"^14, "-"^14, "-"^10)
         for r in results
@@ -245,8 +250,8 @@ for r in results
               @sprintf("%11.3e", vres.excess_lift_linf)
     surrstr = (isnothing(vres) || isnan(vres.excess_surr_self_linf)) ? "          -" :
               @sprintf("%11.3e", vres.excess_surr_self_linf)
-    # NSW %: Nash-social-welfare loss at the surrogate price, 100·(W_real(p*) −
-    # W_real(p^s))/|W_real(p*)| — same as the welfare table's "loss %". "-" when
+    # NSW %: Nash-social-welfare loss at the surrogate price, 100·(W_real* −
+    # W_real(p^s))/|W_real*| — same as the welfare table's "loss %". "-" when
     # the real optimum or the surrogate's real welfare wasn't solved.
     nswstr = (isnothing(vres) || isnan(welfare_real_opt) || welfare_real_opt == 0 ||
               isnan(vres.welfare_real_ps)) ? "        -" :

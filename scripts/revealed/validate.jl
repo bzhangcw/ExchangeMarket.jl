@@ -94,7 +94,7 @@ function real_demand_at(fa::FisherMarket, wealth_fn, p::AbstractVector)
 end
 
 # -----------------------------------------------------------------------
-# Eisenberg–Gale / Nash social welfare  Σ_i w_i log u_i  of a CES Fisher
+# Nash social welfare (NSW)  Σ_i w_i log u_i  of a CES Fisher
 # market at price `p` with budget vector `w`: agent i spends w_i at price p,
 # demanding x_i = w_i γ_i(p) ⊘ p, and attains the CES utility
 #   u_i = (Σ_j c_{ij} x_{ij}^{ρ_i})^{1/ρ_i}    (⟨c_i, x_i⟩ for a linear atom).
@@ -193,7 +193,7 @@ end
 _surr_self_excess(fa::FisherMarket, p) = norm(p .* (1.0 .- aggregate_ces_demand(fa, p)), Inf)
 
 # Build the validation result NamedTuple from the (orig, lift, norm) excess.
-# `welfare_*` are the Eisenberg–Gale social welfares Σ w_i log u_i (NaN when
+# `welfare_*` are the Nash social welfares (NSW) Σ w_i log u_i (NaN when
 # not computed, e.g. non-CES ground truth): `welfare_real_ps` for the real
 # market at the surrogate price p^s, `welfare_surr_ps` for the surrogate's own
 # androids at p^s. (The real optimum Σ w_i log u_i(p*) is solved once by the
@@ -246,7 +246,7 @@ function validate_surrogate(
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    # Eisenberg–Gale welfare Σ w_i log u_i at the surrogate equilibrium price:
+    # Nash social welfare (NSW) Σ w_i log u_i at the surrogate equilibrium price:
     #   * real market, with budgets honoring the ground-truth wealth model at q;
     #   * surrogate's own androids, in the surrogate's good space (n+1 if lifted).
     w_real_q = isnothing(wealth_fn) ? f_real.w : wealth_fn(q)
@@ -301,6 +301,14 @@ function validate_surrogate(
         # (--wealth-function 2); resolve it at the surrogate equilibrium price.
         w_eval = wealth_at(real.w, p_s)
         plc_res = solve_plc_excess(p_s, real.agents, w_eval; verbose=verbose)
+        # Nash welfare at the surrogate price p_s: plc_res.x are the real agents'
+        # UMP-optimal bundles at p_s (the joint LP enforces per-agent optimality),
+        # so plc_welfare gives W_real(p^s). W_surr(p^s) is the surrogate's own CES
+        # welfare; NaN for a non-CES / AD surrogate (no CES log-sum). The real
+        # optimum W_real(p*) is solved once by the driver (solve_plc_welfare_opt).
+        welfare_real_ps = plc_welfare(real.agents, w_eval, plc_res.x)
+        welfare_surr_ps = fa_surrogate isa FisherMarket ?
+                          ces_welfare(fa_surrogate, p_s, fa_surrogate.w) : NaN
         return (
             p_surrogate=p_s,
             excess_surrogate_linf=plc_res.tau,
@@ -310,8 +318,8 @@ function validate_surrogate(
             excess_norm_l1=sum(abs.(p_s .* (1.0 .- sum(plc_res.x)))),
             excess_surr_self_linf=surr_excess,
             iters_surrogate=0,
-            welfare_real_ps=NaN,    # welfare metric is CES-only
-            welfare_surr_ps=NaN,
+            welfare_real_ps=welfare_real_ps,
+            welfare_surr_ps=welfare_surr_ps,
             lp_status=plc_res.status,
             lp_time=plc_res.time,
         )

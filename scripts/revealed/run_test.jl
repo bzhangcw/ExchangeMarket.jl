@@ -213,10 +213,13 @@ if do_validate_effective && rd.f_real !== nothing
         if isnan(welfare_real_opt)
             @printf("    optimal NSW W_real*: not solved for this market/wealth setting (only CES & PLC with --wealth-function 0)\n")
         end
-        @printf("%-22s | %14s | %14s | %14s | %10s\n",
-            "variant", "W_real*", "W_real(p^s)", "W_surr(p^s)", "loss %")
-        @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%10s\n",
-            "-"^22, "-"^14, "-"^14, "-"^14, "-"^10)
+        # "Σx/s" = max_j Σ_i x_ij / s_j of the rationed allocation W_real(p^s) is
+        # scored on; ≤ 1 confirms the NSW is measured on a supply-feasible
+        # (clearing, non-oversubscribed) bundle.
+        @printf("%-22s | %14s | %14s | %14s | %10s | %8s\n",
+            "variant", "W_real*", "W_real(p^s)", "W_surr(p^s)", "loss %", "Σx/s")
+        @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%10s-+-%8s\n",
+            "-"^22, "-"^14, "-"^14, "-"^14, "-"^10, "-"^8)
         for r in results
             vres = get(validation, r.variant.sym, nothing)
             (isnothing(vres) || isnan(vres.welfare_real_ps)) && continue
@@ -225,8 +228,10 @@ if do_validate_effective && rd.f_real !== nothing
             # wasn't solved (no reference) or is exactly 0 (percentage undefined).
             lossstr = (isnan(welfare_real_opt) || welfare_real_opt == 0) ? "-" :
                       @sprintf("%+.3f%%", 100 * (welfare_real_opt - vres.welfare_real_ps) / abs(welfare_real_opt))
-            @printf("%-22s | %14s | %+14.6e | %+14.6e | %10s\n",
-                r.variant.label, optstr, vres.welfare_real_ps, vres.welfare_surr_ps, lossstr)
+            usev = hasproperty(vres, :nsw_supply_use) ? vres.nsw_supply_use : NaN
+            usestr = isnan(usev) ? "-" : @sprintf("%.4f", usev)
+            @printf("%-22s | %14s | %+14.6e | %+14.6e | %10s | %8s\n",
+                r.variant.label, optstr, vres.welfare_real_ps, vres.welfare_surr_ps, lossstr, usestr)
         end
     end
 end

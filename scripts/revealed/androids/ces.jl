@@ -579,20 +579,25 @@ end
 # -----------------------------------------------------------------------
 # Optimal Nash social welfare (NSW) of a CES Fisher market.
 #
-#   max_{x ≥ 0}  Σ_i w_i log u_i,  u_i = (Σ_j c_ij x_ij^{ρ_i})^{1/ρ_i},
+#   max_{x ≥ 0}  Σ_i w_i τ_i,  τ_i ≤ log u_i,  u_i = (Σ_j c_ij x_ij^{ρ_i})^{1/ρ_i},
 #   s.t.  Σ_i x_i ≤ supply   (unit supply 1 per good).
 #
-# The maximizer is the market's Walrasian-equilibrium allocation and the
-# optimal value is the real market's optimal NSW W_real* — obtained WITHOUT
-# solving for the equilibrium price p*. Modeled in Mosek with the homothetic
-# power-cone trick (Σ_j ξ_ij = u_i ⇒ u_i ≤ (Σ_j c_ij x_ij^ρ)^{1/ρ}) that the
-# package's CES UMP uses (response_ces_conic.jl), extended to ρ < 0 following
-# tools.jl's `powerp_to_cone` convention:
-#   ρ ∈ (0,1): [c_ij^{1/ρ} x_ij, u_i, ξ_ij] ∈ Pow(ρ)
-#   ρ = 1    : u_i ≤ Σ_j c_ij x_ij                       (linear, σ = ∞)
-#   ρ < 0    : [ξ_ij, x_ij, c_ij^{1/(1-ρ)} u_i] ∈ Pow(1/(1-ρ))
-# log u_i goes through the exponential cone. Returns (welfare, x, status);
-# welfare is NaN on solver failure.
+# The maximizer is the market's Walrasian-equilibrium allocation and the optimal
+# value is the real market's optimal NSW W_real* — obtained WITHOUT solving for
+# the equilibrium price p*. log u_i goes through the exponential cone; the CES
+# aggregator is modeled per ρ-regime to stay well-conditioned (the naïve
+# c^{1/ρ} homothetic trick from response_ces_conic.jl overflows for the real
+# market's large c and small ρ, e.g. 30^{1/0.05} ≈ 1e29, so Mosek returns junk):
+#
+#   ρ = 1     (σ = ∞, linear):  g_i ≤ Σ_j c_ij x_ij,  τ_i ≤ log g_i
+#   ρ ∈ (0,1):  per-term log route, keeps c LINEAR (no c^{1/ρ}):
+#               p_ij ≤ x_ij^ρ  ([x_ij,1,p_ij] ∈ Pow(ρ)),
+#               g_i ≤ Σ_j c_ij p_ij,  τ_i ≤ (1/ρ) log g_i  ([ρτ_i,1,g_i] ∈ ExpCone)
+#   ρ < 0:      homothetic trick (here c^{1/(1-ρ)} is an O(1) power, well-scaled):
+#               Σ_j ξ_ij = u_i,  [ξ_ij, x_ij, c_ij^{1/(1-ρ)} u_i] ∈ Pow(1/(1-ρ))
+#               ⇒ u_i ≤ (Σ_j c_ij x_ij^ρ)^{1/ρ},  τ_i ≤ log u_i
+#
+# Returns (welfare, x, status); welfare is NaN on solver failure.
 # -----------------------------------------------------------------------
 function solve_ces_welfare_opt(fa::FisherMarket, w::AbstractVector;
     supply::Union{Real,AbstractVector}=1.0, verbose::Bool=false)
@@ -603,31 +608,36 @@ function solve_ces_welfare_opt(fa::FisherMarket, w::AbstractVector;
 
     md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
     x = [@variable(md, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
-    @variable(md, u[1:m] >= 0.0)        # per-agent CES utility
-    @variable(md, logu[1:m])            # logu_i ≤ log u_i (exp cone)
+    @variable(md, τ[1:m])   # τ_i ≤ log u_i
     for i in 1:m
         c_i = Vector(fa.c[:, i])
         ρ = isinf(fa.σ[i]) ? 1.0 : fa.ρ[i]   # linear atom (σ = ∞) ⇒ ρ = 1
-        ξ = @variable(md, [1:n], lower_bound = 0.0, base_name = "xi_$(i)")
-        @constraint(md, sum(ξ) == u[i])
         if ρ == 1.0
-            @constraint(md, u[i] <= sum(c_i[j] * x[i][j] for j in 1:n))
+            g = @variable(md, lower_bound = 0.0)
+            @constraint(md, g <= sum(c_i[j] * x[i][j] for j in 1:n))
+            @constraint(md, [τ[i], 1.0, g] in MOI.ExponentialCone())
         elseif 0.0 < ρ < 1.0
-            cr = c_i .^ (1 / ρ)
-            @constraint(md, [j = 1:n],
-                [cr[j] * x[i][j], u[i], ξ[j]] in MOI.PowerCone(ρ))
+            p = @variable(md, [1:n], lower_bound = 0.0, base_name = "p_$(i)")
+            @constraint(md, [j = 1:n], [x[i][j], 1.0, p[j]] in MOI.PowerCone(ρ))
+            g = @variable(md, lower_bound = 0.0)
+            @constraint(md, g <= sum(c_i[j] * p[j] for j in 1:n))
+            # [ρτ_i, 1, g_i] ∈ ExpCone ⇔ g_i ≥ exp(ρτ_i) ⇔ τ_i ≤ (1/ρ) log g_i
+            @constraint(md, [ρ * τ[i], 1.0, g] in MOI.ExponentialCone())
         elseif ρ < 0.0
             α = 1 / (1 - ρ)
             cr = c_i .^ α
+            u = @variable(md, lower_bound = 0.0)
+            ξ = @variable(md, [1:n], lower_bound = 0.0, base_name = "xi_$(i)")
+            @constraint(md, sum(ξ) == u)
             @constraint(md, [j = 1:n],
-                [ξ[j], x[i][j], cr[j] * u[i]] in MOI.PowerCone(α))
+                [ξ[j], x[i][j], cr[j] * u] in MOI.PowerCone(α))
+            log_to_expcone!(u, τ[i], md)
         else
             error("solve_ces_welfare_opt: unsupported ρ = $ρ (need ρ < 1, ρ ≠ 0; ρ = 1 is the σ = ∞ linear case)")
         end
-        log_to_expcone!(u[i], logu[i], md)
     end
     @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
-    @objective(md, Max, sum(w[i] * logu[i] for i in 1:m))
+    @objective(md, Max, sum(w[i] * τ[i] for i in 1:m))
 
     JuMP.optimize!(md)
     status = termination_status(md)
@@ -635,6 +645,6 @@ function solve_ces_welfare_opt(fa::FisherMarket, w::AbstractVector;
         @warn "CES NSW (Nash social welfare) program terminated abnormally" status
         return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], status=status)
     end
-    # objective_value = Σ w_i logu_i = Σ w_i log u_i* at the optimum.
+    # objective_value = Σ w_i τ_i = Σ w_i log u_i* at the optimum.
     return (welfare=objective_value(md), x=[value.(x[i]) for i in 1:m], status=status)
 end

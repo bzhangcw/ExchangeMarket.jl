@@ -94,27 +94,60 @@ function real_demand_at(fa::FisherMarket, wealth_fn, p::AbstractVector)
 end
 
 # -----------------------------------------------------------------------
-# Nash social welfare (NSW)  Σ_i w_i log u_i  of a CES Fisher
-# market at price `p` with budget vector `w`: agent i spends w_i at price p,
-# demanding x_i = w_i γ_i(p) ⊘ p, and attains the CES utility
-#   u_i = (Σ_j c_{ij} x_{ij}^{ρ_i})^{1/ρ_i}    (⟨c_i, x_i⟩ for a linear atom).
-# The utility formula mirrors `utility(::CESAgent, c, x)` in the package
-# (safe-power `spow`), so the value matches the solver's `val_u` exactly.
-# `w` is passed explicitly because the ground-truth wealth may be price
-# dependent (w_i = wealth_fn(p)).
+# Proportional rationing of price-taking demands to supply, so the allocation
+# CLEARS (Σ_i x_ij = s_j) before welfare is measured. `D[i]` is agent i's demand
+# vector; x_ij = s_j · d_ij / Σ_i d_ij (0 where a good has no demand). Reduces to
+# the raw demand when it already clears (e.g. at equilibrium). This is what makes
+# the welfare-at-price W_real(p^s) a FEASIBLE-allocation value, comparable to the
+# optimum W_real*: at an off-equilibrium p the raw demand does not clear, and
+# scoring welfare on the unrationed (infeasible, oversupplied) bundle overstates
+# it. The clearance/excess metrics are computed from the raw demand elsewhere and
+# are deliberately left unchanged.
+# -----------------------------------------------------------------------
+function ration_to_clear(D::Vector{<:AbstractVector}, supply::AbstractVector)
+    m = length(D)
+    n = length(supply)
+    g = zeros(n)
+    for i in 1:m, j in 1:n
+        g[j] += D[i][j]
+    end
+    return [[g[j] > 0.0 ? supply[j] * D[i][j] / g[j] : 0.0 for j in 1:n] for i in 1:m]
+end
+
+# Clearance check for an allocation `x` (vector of per-agent bundles): the
+# largest fraction of any good's supply that the allocation uses,
+# max_j (Σ_i x_ij / s_j). ≤ 1 means no good is oversubscribed; a rationed
+# allocation hits exactly 1 on every demanded good. Surfaced in the NSW table so
+# one can confirm the welfare is scored on a supply-feasible (clearing) bundle.
+_supply_use(x::Vector{<:AbstractVector}, supply::AbstractVector) =
+    maximum(sum(x[i][j] for i in eachindex(x)) / supply[j] for j in eachindex(supply))
+
+# -----------------------------------------------------------------------
+# Nash social welfare (NSW)  Σ_i w_i log u_i  of a CES Fisher market at the
+# CLEARING allocation induced by price `p`: each agent's price-taking demand
+# x_i = w_i γ_i(p) ⊘ p is proportionally rationed to unit supply
+# (`ration_to_clear`) so the bundle is feasible before utilities are taken.
+# Each CES utility u_i = (Σ_j c_ij x_ij^{ρ_i})^{1/ρ_i} (⟨c_i,x_i⟩ for a linear
+# atom) mirrors `utility(::CESAgent, c, x)`. `w` is explicit because the
+# ground-truth wealth may be price dependent (w_i = wealth_fn(p)).
 # -----------------------------------------------------------------------
 function ces_welfare(fa::FisherMarket, p::AbstractVector, w::AbstractVector)
-    spow(x, y) = x > 0.0 ? x^y : 0.0
     n = length(p)
+    D = [w[i] .* compute_gamma(p, Vector(fa.c[:, i]), fa.σ[i]) ./ p for i in 1:fa.m]
+    return ces_welfare_at(fa, w, ration_to_clear(D, ones(n)))
+end
+
+# Σ_i w_i log u_i(x_i) for a CES market at an explicit allocation `x`
+# (vector of per-agent bundles), with safe-power / NaN-safe log.
+function ces_welfare_at(fa::FisherMarket, w::AbstractVector, x::Vector{<:AbstractVector})
+    spow(a, b) = a > 0.0 ? a^b : 0.0
     W = 0.0
     for i in 1:fa.m
         c_i = Vector(fa.c[:, i])
-        γ_i = compute_gamma(p, c_i, fa.σ[i])
-        x_i = w[i] .* γ_i ./ p
         ρ = isinf(fa.σ[i]) ? 1.0 : fa.ρ[i]   # linear atom (σ=∞) ⇒ ρ=1 ⇒ u=⟨c,x⟩
         s = 0.0
-        @inbounds for j in 1:n
-            s += c_i[j] * spow(x_i[j], ρ)
+        @inbounds for j in eachindex(x[i])
+            s += c_i[j] * spow(x[i][j], ρ)
         end
         u_i = spow(s, 1.0 / ρ)
         W += w[i] * (u_i > 0.0 ? log(u_i) : 0.0)
@@ -199,7 +232,7 @@ _surr_self_excess(fa::FisherMarket, p) = norm(p .* (1.0 .- aggregate_ces_demand(
 # androids at p^s. (The real optimum Σ w_i log u_i(p*) is solved once by the
 # driver, not per surrogate variant.)
 function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN,
-    welfare_real_ps::Real=NaN, welfare_surr_ps::Real=NaN)
+    welfare_real_ps::Real=NaN, welfare_surr_ps::Real=NaN, nsw_supply_use::Real=NaN)
     nrm = (hasproperty(ex, :norm) && !isnothing(ex.norm)) ? ex.norm : ex.orig
     return (
         p_surrogate=p_surr,
@@ -213,6 +246,9 @@ function _vresult(p_surr, ex; iters::Int=0, surr_excess::Real=NaN,
         iters_surrogate=iters,
         welfare_real_ps=welfare_real_ps,
         welfare_surr_ps=welfare_surr_ps,
+        # max_j Σ_i x_ij / s_j of the rationed real allocation NSW is scored on
+        # (≤ 1 ⇒ supply not exceeded). NaN when welfare isn't computed.
+        nsw_supply_use=nsw_supply_use,
     )
 end
 
@@ -246,15 +282,23 @@ function validate_surrogate(
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    # Nash social welfare (NSW) Σ w_i log u_i at the surrogate equilibrium price:
+    # Nash social welfare (NSW) Σ w_i log u_i at the surrogate equilibrium price,
+    # both evaluated on the CLEARING (supply-rationed) allocation via ces_welfare:
     #   * real market, with budgets honoring the ground-truth wealth model at q;
     #   * surrogate's own androids, in the surrogate's good space (n+1 if lifted).
     w_real_q = isnothing(wealth_fn) ? f_real.w : wealth_fn(q)
-    welfare_real_ps = ces_welfare(f_real, q, w_real_q)
+    # Real-market welfare on the CLEARING allocation: ration the price-taking
+    # demands to unit supply, then score. `nsw_supply_use` = max_j Σ_i x_ij is
+    # the clearance check (≤ 1 ⇒ supply not exceeded).
+    D_real = [w_real_q[i] .* compute_gamma(q, Vector(f_real.c[:, i]), f_real.σ[i]) ./ q
+              for i in 1:f_real.m]
+    X_real = ration_to_clear(D_real, ones(f_real.n))
+    welfare_real_ps = ces_welfare_at(f_real, w_real_q, X_real)
     welfare_surr_ps = ces_welfare(fa_surrogate, res_s.p, fa_surrogate.w)
     return _vresult(q, ex; iters=res_s.iters,
         surr_excess=_surr_self_excess(fa_surrogate, res_s.p),
-        welfare_real_ps=welfare_real_ps, welfare_surr_ps=welfare_surr_ps)
+        welfare_real_ps=welfare_real_ps, welfare_surr_ps=welfare_surr_ps,
+        nsw_supply_use=_supply_use(X_real, ones(f_real.n)))
 end
 
 # `solve_plc_excess` (the PLC joint-LP equilibrium check used by the PLC branch
@@ -302,11 +346,14 @@ function validate_surrogate(
         w_eval = wealth_at(real.w, p_s)
         plc_res = solve_plc_excess(p_s, real.agents, w_eval; verbose=verbose)
         # Nash welfare at the surrogate price p_s: plc_res.x are the real agents'
-        # UMP-optimal bundles at p_s (the joint LP enforces per-agent optimality),
-        # so plc_welfare gives W_real(p^s). W_surr(p^s) is the surrogate's own CES
-        # welfare; NaN for a non-CES / AD surrogate (no CES log-sum). The real
-        # optimum W_real(p*) is solved once by the driver (solve_plc_welfare_opt).
-        welfare_real_ps = plc_welfare(real.agents, w_eval, plc_res.x)
+        # UMP-optimal demands at p_s; proportionally rationed to unit supply so
+        # the allocation CLEARS before utilities are taken (W_real(p^s) must be a
+        # feasible value to compare against the optimum W_real*). W_surr(p^s) is
+        # the surrogate's own CES welfare (itself clearing-rationed); NaN for a
+        # non-CES / AD surrogate. The optimum W_real* is solved once by the driver
+        # (solve_plc_welfare_opt).
+        X_real = ration_to_clear(plc_res.x, ones(length(p_s)))
+        welfare_real_ps = plc_welfare(real.agents, w_eval, X_real)
         welfare_surr_ps = fa_surrogate isa FisherMarket ?
                           ces_welfare(fa_surrogate, p_s, fa_surrogate.w) : NaN
         return (
@@ -320,6 +367,7 @@ function validate_surrogate(
             iters_surrogate=0,
             welfare_real_ps=welfare_real_ps,
             welfare_surr_ps=welfare_surr_ps,
+            nsw_supply_use=_supply_use(X_real, ones(length(p_s))),
             lp_status=plc_res.status,
             lp_time=plc_res.time,
         )

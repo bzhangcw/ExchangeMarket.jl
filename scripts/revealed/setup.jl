@@ -494,6 +494,9 @@ function parse_args_for_test_real(argv=ARGS)
     register_cli_redist!(s)
     # AD master (redistribute_ad.jl) owns --ad-endow-mode and --ad-mask-size.
     register_cli_ad!(s)
+    # Frank–Wolfe (frankwolfe.jl) owns --step-rule, --no-away-steps,
+    # --interval-logging (shared by fw and adfw).
+    register_cli_fw!(s)
 
     # ---- (4) Separation oracle knobs ---------------------------------
     # Separation CLI surface lives in the per-android files so each
@@ -541,6 +544,10 @@ function parse_args_for_test_real(argv=ARGS)
         help = "Evaluate per-iteration market-excess ‖p(q-g)‖∞ every N iterations (CES, constant wealth only). Default 0 = OFF — per-iter tracking is opt-in even when --validate is on (it only controls the post-run table). Set N>0 to enable, or -1 to inherit --interval-eval-test."
         arg_type = Int
         default = 0
+        "--interval-logging"
+        help = "Print the per-iteration table row every N iterations. Shared across ALL methods (cg/cgma/adcg and fw/adfw). Default -1 keeps each method's default (every iter, or the preset's `log_interval` for fw/adfw)."
+        arg_type = Int
+        default = -1
         "--no-validate"
         help = "Skip the CES surrogate equilibrium validation (default ON for --market-type ces; PLC is default OFF)."
         action = :store_true
@@ -1027,6 +1034,11 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
     if iterlimit_override > 0
         local_extra[:max_iters] = iterlimit_override
     end
+    # --interval-logging: shared per-iteration log cadence (:log_interval), honored
+    # by every runner. > 0 overrides each method's default / preset; -1 keeps it.
+    if get(cli, "interval_logging", -1) > 0
+        local_extra[:log_interval] = cli["interval_logging"]
+    end
     # Per-class and per-method CLI forwarding lives next to each owner;
     # the keys each apply_*! writes are no-ops for unrelated methods.
     # Add more apply_cli_*! calls here when registering a new arg group.
@@ -1039,6 +1051,7 @@ function run_one_method(cfg, cli, rep_idx::Int, rep_seed::Int,
     apply_cli_accpm!(local_extra, cli)
     apply_cli_redist!(local_extra, cli)
     apply_cli_ad!(local_extra, cli)
+    apply_cli_fw!(local_extra, cli)
     if haskey(kwargs, :seed)
         local_extra[:seed] = rep_seed
     end

@@ -77,8 +77,10 @@ hull with the ℓ1 objective, and returns a fitted `ArrowDebreuMarket` — the s
 
 `kwargs`: as `run_method_tracked_fw`, plus `:classes` defaults to `[:ces]`
 (homothetic only; no :leontief — it cannot round-trip through the AD market's
-CES (c, ρ) storage). `:ad_delta` / `:ad_endow_mode` are ignored (δ ≡ 1; ownership
-is single-good).
+CES (c, ρ) storage). `:ad_delta` is ignored (δ ≡ 1). Ownership is single-good by
+construction (each good gets its own best-fit owner type), so `:ad_endow_mode`
+has no multi-good realization: `:full` (the CLI default) maps silently to
+`:single`, and `:random` (mask) warns that masking is ignored.
 """
 function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     Ξ_train, Ξ_test=nothing; verbosity::Int=1)
@@ -102,6 +104,18 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
               "Use --classes from {ces,linear}.")
     sample_size = Int(get(kwargs, :sample_size, get(kwargs, :batch_size, 0)))
     sample_hard = get(kwargs, :sample_hard, false) === true
+    # Endowment mode (--ad-endow-mode). adfw's δ=1 bundle-hull master already owns
+    # each good by its own best-fit type (= :single, the maximal per-good
+    # flexibility), so multi-good ownership has no realization here. `:full` (the
+    # global CLI default) is behaviorally identical to `:single` in adfw and stays
+    # silent; only `:random` (`mask`) — which a user must request explicitly —
+    # warns, since masking is silently ignored.
+    ad_endow_mode = Symbol(get(kwargs, :ad_endow_mode, :single))
+    if ad_endow_mode === :random
+        @warn "run_ad_tracked_fw: --ad-endow-mode=mask is not supported by adfw; the δ=1 " *
+              "bundle-hull master owns each good by its own best-fit type (single-good " *
+              "ownership), so masking has no effect. Using single-good ownership." maxlog = 1
+    end
 
     _control = (:max_iters, :tol_obj, :tol_delta, :tol_rc, :step_rule, :away_steps,
         :seed, :timelimit, :interval_eval_test, :interval_eval_excess, :f_real,
@@ -201,6 +215,8 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
         print_config("method",          String(name))
         print_config("alias",           "away-step FW (manual, Arrow–Debreu, δ=1)")
         print_config("classes",         join(String.(classes), ", "))
+        print_config("endow mode",       ad_endow_mode === :random ?
+            "single (mask requested → ignored; δ=1 bundle hull)" : "single (δ=1 bundle hull)")
         print_config("K (training samples)", K)
         print_config("n (goods)",       n)
         print_config("subsample (SFW)", sample_size > 0 ?

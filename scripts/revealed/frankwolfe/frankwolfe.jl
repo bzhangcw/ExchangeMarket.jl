@@ -25,8 +25,51 @@
 
 using LinearAlgebra
 using Random
+using ArgParse
 
 # separation.jl is included by setup.jl; this file is included after setup.jl.
+
+# ---- CLI surface (shared by fw and adfw) --------------------------------
+"""
+    register_cli_fw!(s::ArgParseSettings)
+
+Add the "Method: Frank–Wolfe (fw / adfw)" arg group: the FW step rule and the
+away-step toggle (the genuinely FW-specific knobs). These flow through
+`apply_cli_fw!` into the runner kwargs (run_method_tracked_fw / run_ad_tracked_fw
+read `:step_rule` / `:away_steps`). CLI defaults are sentinels (`""`) that leave
+each variant's preset / in-code default untouched unless the flag is explicitly
+given. (The per-iteration logging cadence `--interval-logging` is a shared,
+cross-method flag and lives in the "Evaluation" group, not here.)
+"""
+function register_cli_fw!(s::ArgParseSettings)
+    add_arg_group!(s, "Method: Frank–Wolfe (fw / adfw)")
+    @add_arg_table! s begin
+        "--step-rule"
+        help = "fw/adfw step-size rule: `linesearch` (golden-section on the convex 1-D restriction) or `diminishing` (2/(ℓ+2)). Empty (default) keeps each variant's preset."
+        arg_type = String
+        default = ""
+        range_tester = x -> x in ("", "linesearch", "diminishing")
+        "--no-away-steps"
+        help = "Disable away steps (and weight-zeroing drops) in the fw/adfw active-set updates — plain Frank–Wolfe steps only. Default: away steps ON (per preset)."
+        action = :store_true
+    end
+    return s
+end
+
+"""
+    apply_cli_fw!(local_extra::Dict, cli)
+
+Forward the Frank–Wolfe CLI values into the runner kwargs, only when explicitly
+set so presets win by default. `--step-rule` → `:step_rule`, `--no-away-steps` →
+`:away_steps => false`. (`--interval-logging` → `:log_interval` is applied
+generally in `run_one_method`, since it is shared across all methods.)
+"""
+function apply_cli_fw!(local_extra::Dict, cli)
+    sr = get(cli, "step_rule", "")
+    isempty(sr) || (local_extra[:step_rule] = Symbol(sr))
+    get(cli, "no_away_steps", false) === true && (local_extra[:away_steps] = false)
+    return local_extra
+end
 
 """
     compute_h_at_prices(γ_ref, w)

@@ -98,6 +98,9 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     # (it is NOT in _control); read here only to gate the weight computation.
     sample_size = Int(get(kwargs, :sample_size, 0))
     sample_hard = get(kwargs, :sample_hard, false) === true
+    # Per-iteration table cadence (--interval-logging): print the regular iter row
+    # every `log_interval` iters; convergence / termination rows always print.
+    log_interval = Int(get(kwargs, :log_interval, 1))
 
     K = length(Ξ_train)
     n = length(Ξ_train[1][1])
@@ -123,7 +126,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         :drop, :interval_dropping, :interval_eval_test, :interval_eval_excess,
         :f_real, :wealth_fn, :seed, :redist_use_nlp, :redist_nonh_w, :tol_stage_2,
         :initial_cands, :initial_γ_ref, :initial_fa, :initial_masks,
-        :ad_endow_mode, :ad_mask_size, :ad_delta, :sample_hard)
+        :ad_endow_mode, :ad_mask_size, :ad_delta, :sample_hard, :log_interval)
     oracle_kw = Dict{Symbol,Any}(k => v for (k, v) in kwargs if !(k in _control))
 
     # Warm restart (phased schedules, run_plc_phased.jl): resume from the
@@ -345,7 +348,8 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         # Endowment mask of the new atom: always contains the winning good
         # (so the atom can serve the cut it violates), padded per the mode.
         push!(masks, make_ad_mask(ad_endow_mode, n, best.good; mask_size=ad_mask_size))
-        _log_row(rc_val, class_str)
+        # throttled by --interval-logging; convergence rows above always print.
+        (log_interval <= 1 || iter % log_interval == 0) && _log_row(rc_val, class_str)
     end
 
     # Final master solve with all columns, for the returned B / test error,

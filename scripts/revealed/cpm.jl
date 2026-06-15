@@ -143,6 +143,10 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     end
     timelimit = get(kwargs, :timelimit, Inf)        # wall-clock cap, seconds
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
+    # Per-iteration table cadence (--interval-logging): print the regular iter row
+    # every `log_interval` iters. Convergence / termination rows always print.
+    # 1 (default) = every iter.
+    log_interval = Int(get(kwargs, :log_interval, 1))
     # Mini-batch / subsampling for the separation oracle. When 0 < sample_size < K,
     # each iteration draws a fresh random subset S ⊂ [K] of size sample_size
     # and runs the separation call on (Ξ_train[S], u[S, :]). For stage-1 single-cut
@@ -507,8 +511,8 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
             error("Unknown separation stage: $stage")
         end
 
-        # log after separation
-        _log_row(rc_val, class_str)
+        # log after separation (throttled by --interval-logging)
+        (log_interval <= 1 || iter % log_interval == 0) && _log_row(rc_val, class_str)
     end
 
     # final master solve with latest columns

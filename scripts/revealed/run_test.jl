@@ -49,7 +49,7 @@ ALL_VARIANTS = [
 #   const SKIP_VARIANTS = ["cg", "cgma", "adcg_hard_vardelta", "fw", "fwjl", "adfwjl"]
 # (set to String[] to run every variant).
 # SKIP_VARIANTS = String[]
-SKIP_VARIANTS = filter(x -> x !== "cg", ALL_VARIANTS)
+SKIP_VARIANTS = filter(x -> x !== "adfw", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)

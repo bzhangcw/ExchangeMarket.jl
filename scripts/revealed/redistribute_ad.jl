@@ -511,10 +511,12 @@ function register_cli_ad!(s::ArgParseSettings)
     add_arg_group!(s, "Master: Arrow–Debreu (adcg)")
     @add_arg_table! s begin
         "--ad-endow-mode"
-        help = "Endowment mask of each new AD atom (sec.wealth.ad.mask): " *
-               "single (default; atom owns only the good whose oracle generated it — master of Fisher size), " *
-               "full (atom may own all goods — the unmasked AD master), " *
-               "mask (atom owns the winning good + random others; size via --ad-mask-size)."
+        help = "Endowment mask of each new AD atom (sec.wealth.ad.mask), adcg only: " *
+               "single (atom owns only the good whose oracle generated it — master of Fisher size), " *
+               "full (default; atom may own all goods — the unmasked AD master), " *
+               "mask (atom owns the winning good + random others; size via --ad-mask-size). " *
+               "adfw / adfwjl ignore this — their δ=1 bundle-hull master is single-good by " *
+               "construction, so `mask` warns and falls back to single."
         arg_type = String
         default = "full"
         range_tester = x -> x in ("single", "full", "mask")

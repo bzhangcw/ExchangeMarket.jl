@@ -115,7 +115,9 @@ drivers expect from `run_ad_tracked` (`:cg_ad`).
 - `:classes`    ([:ces]) homothetic classes for the oracle (no :leontief)
 - `:line_search` (FrankWolfe.Agnostic())   2/(t+2) classical rule
 Any other key is forwarded to `find_cut_single` (e.g. `ces_sigma_lower`).
-`:ad_delta` / `:ad_endow_mode` are ignored (δ ≡ 1; ownership is single-good).
+`:ad_delta` is ignored (δ ≡ 1). Ownership is single-good by construction, so
+`:ad_endow_mode` has no multi-good realization: `:full` (the CLI default) maps
+silently to `:single`, and `:random` (mask) warns that masking is ignored.
 """
 function run_ad_tracked_fwjl(name::Symbol, kwargs::Dict,
     Ξ_train, Ξ_test=nothing; verbosity::Int=1)
@@ -132,6 +134,16 @@ function run_ad_tracked_fwjl(name::Symbol, kwargs::Dict,
         error("run_ad_tracked_fwjl: :leontief atoms cannot be stored in an " *
               "ArrowDebreuMarket (CES (c, ρ) form diverges at σ = -1). " *
               "Use --classes from {ces,linear}.")
+    # Endowment mode (--ad-endow-mode): like adfw, this δ=1 FW path owns each good
+    # by its own best-fit type (= :single), so multi-good ownership has no
+    # realization. `:full` (the CLI default) maps silently to `:single`; only
+    # `:random` (mask), which is always explicit, warns that masking is ignored.
+    ad_endow_mode = Symbol(get(kwargs, :ad_endow_mode, :single))
+    if ad_endow_mode === :random
+        @warn "run_ad_tracked_fwjl: --ad-endow-mode=mask is not supported by adfwjl; the δ=1 " *
+              "bundle-hull master owns each good by its own best-fit type (single-good " *
+              "ownership), so masking has no effect. Using single-good ownership." maxlog = 1
+    end
 
     # Oracle-only kwargs: everything not consumed by the FW loop itself is
     # forwarded to find_cut_single (mirrors run_ad_tracked's oracle_kw split).
@@ -213,6 +225,8 @@ function run_ad_tracked_fwjl(name::Symbol, kwargs::Dict,
         print_config("method",        String(name))
         print_config("alias",         "FrankWolfe.jl away_frank_wolfe (Arrow–Debreu, δ=1)")
         print_config("classes",       join(String.(classes), ", "))
+        print_config("endow mode",     ad_endow_mode === :random ?
+            "single (mask requested → ignored; δ=1 bundle hull)" : "single (δ=1 bundle hull)")
         print_config("K (training samples)", K)
         print_config("n (goods)",     n)
         print_config("max_iters",     max_iters)

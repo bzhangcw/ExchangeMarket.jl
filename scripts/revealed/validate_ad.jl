@@ -30,8 +30,19 @@ function validate_surrogate(
         return _vresult(fill(NaN, f_real.n), (orig=[NaN], lift=nothing))
     end
     res_s = afscaled_newton_equilibrium(fa_surrogate; verbose=verbose, kwargs...)
+    q = _project_to_real(res_s.p, f_real.n)        # surrogate price on the real goods
     oracle = isnothing(wealth_fn) ? (p -> aggregate_ces_demand(f_real, p)) :
              (p -> real_demand_at(f_real, wealth_fn, p))
     ex = _real_excess(oracle, res_s.p, f_real.n)
-    return _vresult(_project_to_real(res_s.p, f_real.n), ex; surr_excess=res_s.resid)
+    # Real-market NSW at the surrogate's clearing price, on the CLEARING
+    # (supply-rationed) allocation — same as the Fisher validate_surrogate, so the
+    # NSW table is populated for adcg / adfw too. The surrogate is an
+    # ArrowDebreuMarket (not a CES Fisher), so its own W_surr(p^s) is left NaN.
+    w_real_q = isnothing(wealth_fn) ? f_real.w : wealth_fn(q)
+    D_real = [w_real_q[i] .* compute_gamma(q, Vector(f_real.c[:, i]), f_real.σ[i]) ./ q
+              for i in 1:f_real.m]
+    X_real = ration_to_clear(D_real, ones(f_real.n))
+    return _vresult(q, ex; surr_excess=res_s.resid,
+        welfare_real_ps=ces_welfare_at(f_real, w_real_q, X_real),
+        nsw_supply_use=_supply_use(X_real, ones(f_real.n)))
 end

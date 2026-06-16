@@ -19,6 +19,7 @@
 
 using LinearAlgebra, Random
 using JuMP, MadNLP
+import MathOptInterface as MOI   # PowerCone/ExponentialCone for solve_nges_welfare_opt
 
 struct NGESAgent
     n::Int
@@ -127,4 +128,48 @@ function produce_revealed_preferences_nges(
         Ξ[k] = (copy(p_k), copy(g_k))
     end
     return Ξ
+end
+
+# -----------------------------------------------------------------------
+# Optimal Nash social welfare (NSW) of an NGES Fisher market.
+#
+#   max_{x ≥ 0}  Σ_i w_i log u_i,  u_i = Σ_j c_ij (A_i x_i)_j^{r_ij}  (r ∈ (0,1)),
+#   s.t.  Σ_i x_i ≤ supply  (unit supply 1 per good).
+#
+# Same clean power+exp-cone program as GES (solve_ges_welfare_opt), with the
+# nested aggregator z_i = A_i x_i (affine, ≥ 0 since A > 0, x ≥ 0) fed into the
+# power cones:
+#   p_ij ≤ (A_i x_i)_j^{r_ij}  ([z_ij,1,p_ij] ∈ Pow(r_ij)),  u_i ≤ Σ_j c_ij p_ij,
+#   τ_i ≤ log u_i  ([τ_i,1,u_i] ∈ ExpCone),  max Σ w_i τ_i.
+# Returns (welfare, x, status); welfare is NaN on solver failure.
+# -----------------------------------------------------------------------
+function solve_nges_welfare_opt(agents::Vector{<:NGESAgent}, w::AbstractVector;
+    supply::Union{Real,AbstractVector}=1.0, verbose::Bool=false)
+    m = length(agents)
+    n = agents[1].n
+    @assert length(w) == m "budget vector length mismatch"
+    s = supply isa AbstractVector ? collect(float.(supply)) : fill(float(supply), n)
+
+    md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
+    x = [@variable(md, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    @variable(md, τ[1:m])
+    for i in 1:m
+        a = agents[i]
+        z = a.A * x[i]   # nested aggregator (A x)_j, affine ≥ 0
+        p = @variable(md, [1:n], lower_bound = 0.0, base_name = "p_$(i)")
+        @constraint(md, [j = 1:n], [z[j], 1.0, p[j]] in MOI.PowerCone(a.r[j]))
+        u = @variable(md, lower_bound = 0.0)
+        @constraint(md, u <= sum(a.c[j] * p[j] for j in 1:n))
+        @constraint(md, [τ[i], 1.0, u] in MOI.ExponentialCone())   # τ_i ≤ log u_i
+    end
+    @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
+    @objective(md, Max, sum(w[i] * τ[i] for i in 1:m))
+
+    JuMP.optimize!(md)
+    status = termination_status(md)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS)
+        @warn "NGES NSW (Nash social welfare) program terminated abnormally" status
+        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], status=status)
+    end
+    return (welfare=objective_value(md), x=[value.(x[i]) for i in 1:m], status=status)
 end

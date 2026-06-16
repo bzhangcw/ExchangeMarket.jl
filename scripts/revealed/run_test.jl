@@ -49,11 +49,12 @@ ALL_VARIANTS = [
 #   const SKIP_VARIANTS = ["cg", "cgma", "adcg_hard_vardelta", "fw", "fwjl", "adfwjl"]
 # (set to String[] to run every variant).
 # SKIP_VARIANTS = String[]
-SKIP_VARIANTS = filter(x -> x !== "adfw", ALL_VARIANTS)
+# SKIP_VARIANTS = filter(x -> x !== "adfw", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)
 # SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
+SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
 
 const cli = parse_args_for_test_real()
 cfg = build_run_config(cli)
@@ -181,14 +182,19 @@ if do_validate_effective && rd.f_real !== nothing
     # Real-market optimal NSW (Nash social welfare) W_real* = max Σ wᵢ log uᵢ,
     # obtained by maximizing welfare DIRECTLY via a Mosek convex program — never
     # via the real equilibrium price p* (we compare welfares, not prices, so there
-    # is no need to solve for p*). CES and PLC Fisher markets are both supported;
-    # other families stay NaN. Requires constant budgets (--wealth-function 0).
+    # is no need to solve for p*). CES, PLC, GES and NGES Fisher markets are
+    # supported (each a concave welfare-max convex program); other families stay
+    # NaN. Requires constant budgets (--wealth-function 0).
     welfare_real_opt = NaN
     if cfg.wealth_function == 0
         if rd.f_real isa FisherMarket
             welfare_real_opt = solve_ces_welfare_opt(rd.f_real, rd.f_real.w).welfare
         elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: PLCAgent
             welfare_real_opt = solve_plc_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: GESAgent
+            welfare_real_opt = solve_ges_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: NGESAgent
+            welfare_real_opt = solve_nges_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
         end
     end
     for r in results

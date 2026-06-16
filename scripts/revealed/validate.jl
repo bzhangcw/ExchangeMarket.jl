@@ -137,6 +137,38 @@ function ces_welfare(fa::FisherMarket, p::AbstractVector, w::AbstractVector)
     return ces_welfare_at(fa, w, ration_to_clear(D, ones(n)))
 end
 
+# Cardinal utility of a GES / NGES agent at bundle `x` (concave additive, r_j ∈
+# (0,1)): GES u = Σ_j c_j x_j^{r_j}; NGES u = Σ_j c_j (A x)_j^{r_j}. Safe-power.
+function _real_agent_u(a::GESAgent, x::AbstractVector)
+    s = 0.0
+    @inbounds for j in 1:a.n
+        xj = x[j]
+        s += a.c[j] * (xj > 0.0 ? xj^a.r[j] : 0.0)
+    end
+    return s
+end
+function _real_agent_u(a::NGESAgent, x::AbstractVector)
+    z = a.A * x
+    s = 0.0
+    @inbounds for j in 1:a.n
+        zj = z[j]
+        s += a.c[j] * (zj > 0.0 ? zj^a.r[j] : 0.0)
+    end
+    return s
+end
+
+# Σ_i w_i log u_i(x_i) for a GES / NGES real market at an explicit allocation `x`,
+# NaN-safe (mirrors ces_welfare_at). Used for W_real(p^s) on the rationed bundle.
+function real_welfare_at(agents, w::AbstractVector, x::Vector{<:AbstractVector})
+    W = 0.0
+    for i in eachindex(agents)
+        u = _real_agent_u(agents[i], x[i])
+        isnan(u) && return NaN
+        W += w[i] * (u > 0.0 ? log(u) : 0.0)
+    end
+    return W
+end
+
 # Σ_i w_i log u_i(x_i) for a CES market at an explicit allocation `x`
 # (vector of per-agent bundles), with safe-power / NaN-safe log.
 function ces_welfare_at(fa::FisherMarket, w::AbstractVector, x::Vector{<:AbstractVector})
@@ -378,5 +410,18 @@ function validate_surrogate(
     budgets = haskey(real, :w) ? real.w : real.b
     n_real = first(real.agents).n
     ex = _real_excess(p -> aggregate_real_demand(real.agents, budgets, p), p_s, n_real)
-    return _vresult(_project_to_real(p_s, n_real), ex; surr_excess=surr_excess)
+    q = _project_to_real(p_s, n_real)
+    # GES / NGES NSW at the surrogate's clearing price: per-agent demand at q,
+    # rationed to unit supply, scored with the concave additive utility (W_real(p^s)
+    # must be a feasible/clearing value to compare against the optimum W_real*).
+    # SPLC has no closed-form cardinal utility wired here, so its welfare stays NaN.
+    if eltype(real.agents) <: GESAgent || eltype(real.agents) <: NGESAgent
+        w_eval = wealth_at(budgets, q)
+        D = [agent_demand(real.agents[i], q, w_eval[i]) for i in eachindex(real.agents)]
+        X = ration_to_clear(D, ones(n_real))
+        return _vresult(q, ex; surr_excess=surr_excess,
+            welfare_real_ps=real_welfare_at(real.agents, w_eval, X),
+            nsw_supply_use=_supply_use(X, ones(n_real)))
+    end
+    return _vresult(q, ex; surr_excess=surr_excess)
 end

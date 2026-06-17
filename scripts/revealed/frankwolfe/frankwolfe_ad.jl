@@ -27,9 +27,9 @@ using Random
 # Iteration table: iter, train (ℓ1/K), test, |gap| (diagnostic), Δ(F), T
 # (active bundles), step type, t(s).
 const FWAD_TABLE = IterTable(
-    ["iter", "train",  "test",   "gap",    "Δ(F)",   "T",   "step", "t(s)"],
-    ["%5d",  "%10.3e", "%10.3e", "%10.3e", "%10.3e", "%5d", "%6s",  "%10.4f"],
-    Any[1,   1.0e-3,   1.0e-3,   1.0e-3,   1.0e-3,   1,     "FW",   1.234],
+    ["iter", "train", "test", "gap", "Δ(F)", "T", "step", "t(s)"],
+    ["%5d", "%10.3e", "%10.3e", "%10.3e", "%10.3e", "%5d", "%6s", "%10.4f"],
+    Any[1, 1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3, 1, "FW", 1.234],
 )
 
 """
@@ -48,14 +48,16 @@ function _ad_expand_bundles(BC::AbstractVector, w::AbstractVector, n::Int)
         for l in 1:n
             c = bundle[l]
             push!(cands, (class=c.class, params=c.params))
-            row = zeros(Float64, n); row[l] = Float64(α)
+            row = zeros(Float64, n)
+            row[l] = Float64(α)
             push!(rows, row)
         end
     end
     if isempty(cands)   # degenerate: keep every good owned by one CES atom
         for l in 1:n
             push!(cands, (class=:ces, params=(y=zeros(n), σ=0.5)))
-            row = zeros(Float64, n); row[l] = 1.0
+            row = zeros(Float64, n)
+            row[l] = 1.0
             push!(rows, row)
         end
     end
@@ -88,16 +90,16 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     verbose = verbosity >= 1
     verbose_separation = verbosity >= 2
 
-    max_iters  = get(kwargs, :max_iters, 200)
-    tol_obj    = get(kwargs, :tol_obj, 1e-3)
-    tol_delta  = get(kwargs, :tol_delta, 1e-5)
-    step_rule  = Symbol(get(kwargs, :step_rule, :linesearch))
+    max_iters = get(kwargs, :max_iters, 200)
+    tol_obj = get(kwargs, :tol_obj, 1e-3)
+    tol_delta = get(kwargs, :tol_delta, 1e-5)
+    step_rule = Symbol(get(kwargs, :step_rule, :linesearch))
     away_steps = get(kwargs, :away_steps, true) === true
-    rng_seed   = get(kwargs, :seed, 0)
-    timelimit  = get(kwargs, :timelimit, Inf)
+    rng_seed = get(kwargs, :seed, 0)
+    timelimit = get(kwargs, :timelimit, Inf)
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
     log_interval = Int(get(kwargs, :log_interval, 1))   # print the iter row every N iters
-    classes    = Vector{Symbol}(get(kwargs, :classes, Symbol[:ces]))
+    classes = Vector{Symbol}(get(kwargs, :classes, Symbol[:ces]))
     :leontief in classes &&
         error("run_ad_tracked_fw: :leontief atoms cannot be stored in an " *
               "ArrowDebreuMarket (CES (c, ρ) form diverges at σ = -1). " *
@@ -148,7 +150,8 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     Xmat = function ()
         X = zeros(Float64, K, n)
         @inbounds for t in eachindex(w)
-            wt = w[t]; Mt = M[t]
+            wt = w[t]
+            Mt = M[t]
             for k in 1:K, j in 1:n
                 X[k, j] += wt * Mt[k, j]
             end
@@ -197,7 +200,9 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     X0 = zeros(Float64, K, n)
     Mv0, bundle0 = lmo(signs(X0), nothing)
     isnothing(Mv0) && error("run_ad_tracked_fw: seed LMO produced no cut.")
-    push!(M, Mv0); push!(BC, bundle0); push!(w, 1.0)
+    push!(M, Mv0)
+    push!(BC, bundle0)
+    push!(w, 1.0)
 
     history = Dict(
         :primal_obj => Float64[],
@@ -208,25 +213,26 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
     )
     last_test_err = Ref(NaN)
     best_f = Inf
-    best_BC = copy(BC); best_w = copy(w)
+    best_BC = copy(BC)
+    best_w = copy(w)
 
     if verbose
         print_banner(FWAD_TABLE, BANNER_TITLE)
-        print_config("method",          String(name))
-        print_config("alias",           "away-step FW (manual, Arrow–Debreu, δ=1)")
-        print_config("classes",         join(String.(classes), ", "))
-        print_config("endow mode",       ad_endow_mode === :random ?
-            "single (mask requested → ignored; δ=1 bundle hull)" : "single (δ=1 bundle hull)")
+        print_config("method", String(name))
+        print_config("alias", "away-step FW (manual, Arrow–Debreu, δ=1)")
+        print_config("classes", join(String.(classes), ", "))
+        print_config("endow mode", ad_endow_mode === :random ?
+                                   "single (mask requested → ignored; δ=1 bundle hull)" : "single (δ=1 bundle hull)")
         print_config("K (training samples)", K)
-        print_config("n (goods)",       n)
+        print_config("n (goods)", n)
         print_config("subsample (SFW)", sample_size > 0 ?
-            (sample_hard ? "$(sample_size), residual-weighted" : "$(sample_size), uniform") : "off (full batch)")
-        print_config("away_steps",      string(away_steps))
-        print_config("step_rule",       String(step_rule))
-        print_config("max_iters",       max_iters)
-        print_config("timelimit (s)",   @sprintf("%g", Float64(timelimit)))
-        print_config("tol_obj",         isnothing(tol_obj)   ? "off" : @sprintf("%g", tol_obj))
-        print_config("tol_delta",       isnothing(tol_delta) ? "off" : @sprintf("%g", tol_delta))
+                                        (sample_hard ? "$(sample_size), residual-weighted" : "$(sample_size), uniform") : "off (full batch)")
+        print_config("away_steps", string(away_steps))
+        print_config("step_rule", String(step_rule))
+        print_config("max_iters", max_iters)
+        print_config("timelimit (s)", @sprintf("%g", Float64(timelimit)))
+        print_config("tol_obj", isnothing(tol_obj) ? "off" : @sprintf("%g", tol_obj))
+        print_config("tol_delta", isnothing(tol_delta) ? "off" : @sprintf("%g", tol_delta))
         println("-"^table_width(FWAD_TABLE))
         print_header(FWAD_TABLE)
     end
@@ -253,14 +259,15 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
 
         if fcur < best_f
             best_f = fcur
-            best_BC = [copy(b) for b in BC]; best_w = copy(w)
+            best_BC = [copy(b) for b in BC]
+            best_w = copy(w)
         end
 
         improvement = length(history[:primal_obj]) >= 2 ?
                       history[:primal_obj][end-1] - fcur : NaN
         _log_row(gap, kind) = verbose && print_row(FWAD_TABLE,
             Any[iter, fcur, te, gap, isnan(improvement) ? 0.0 : improvement,
-                length(w), kind, time() - _t0])
+                length(w), kind, time()-_t0])
 
         if !isnothing(tol_obj) && fcur < tol_obj
             _log_row(0.0, "-")
@@ -277,7 +284,7 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
                 _log_row(0.0, "-")
                 verbose && print_continuation(FWAD_TABLE,
                     @sprintf("stalled (mean drop over last %d iters = %.2e < tol_delta=%g)",
-                             window, mean_drop, tol_delta))
+                        window, mean_drop, tol_delta))
                 break
             end
         end
@@ -300,15 +307,18 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
         use_away = false
         a_idx = 0
         if away_steps && length(w) >= 2
-            a_idx = 1; a_val = Inf
+            a_idx = 1
+            a_val = Inf
             for t in eachindex(w)
-                v = 0.0; Mt = M[t]
+                v = 0.0
+                Mt = M[t]
                 @inbounds for k in 1:K, j in 1:n
                     v += U[k, j] * Mt[k, j]
                 end
                 v < a_val && (a_val = v; a_idx = t)
             end
-            g_away = 0.0; Ma = M[a_idx]
+            g_away = 0.0
+            Ma = M[a_idx]
             @inbounds for k in 1:K, j in 1:n
                 g_away += U[k, j] * (X[k, j] - Ma[k, j])
             end
@@ -337,14 +347,19 @@ function run_ad_tracked_fw(name::Symbol, kwargs::Dict,
             w .*= (1 + η)
             w[a_idx] -= η
             if w[a_idx] <= 1e-10
-                deleteat!(M, a_idx); deleteat!(BC, a_idx); deleteat!(w, a_idx)
+                deleteat!(M, a_idx)
+                deleteat!(BC, a_idx)
+                deleteat!(w, a_idx)
                 kind = "drop"
             end
         else
             w .*= (1 - η)
-            push!(M, Mv); push!(BC, bundle); push!(w, η)
+            push!(M, Mv)
+            push!(BC, bundle)
+            push!(w, η)
         end
-        sw = sum(w); sw > 0 && (w ./= sw)
+        sw = sum(w)
+        sw > 0 && (w ./= sw)
 
         (log_interval <= 1 || iter % log_interval == 0) && _log_row(g_fw, kind)
     end

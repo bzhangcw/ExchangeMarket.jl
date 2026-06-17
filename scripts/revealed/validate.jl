@@ -24,40 +24,68 @@ using JuMP, MosekTools
 using ExchangeMarket
 
 # -----------------------------------------------------------------------
-# Solve a CES FisherMarket for its equilibrium price using Mirror Descent
-# (exponentiated-gradient step, Cole-Cheung '13 step size). Returns a
-# simplex-normalized price vector. We use MirrorDec rather than the
-# Newton-based HessianBar because the surrogate market can have very
-# few androids with extreme σ values, where the Hessian becomes singular;
-# MirrorDec is slower but globally robust.
+# Solve a CES FisherMarket for its equilibrium price. Primary solver is the
+# Hessian-barrier Newton method (affine-scaling step, normal μ, CESAnalytic
+# best-response) — fast, ~20 iterations to tol 1e-12. If the Newton solve errors
+# or returns a non-finite price (a surrogate with very few androids / extreme σ
+# can have a near-singular Hessian), it falls back to the Mosek convex program:
+# the CES Eisenberg–Gale / NSW solver (`solve_ces_welfare_opt`), whose
+# supply-constraint dual IS the Walrasian price. Returns a simplex-normalized
+# price vector.
 # -----------------------------------------------------------------------
 function solve_ces_equilibrium(
     fa::FisherMarket;
-    α::Float64=500.0,
-    maxiter::Int=10000,
+    maxiter::Int=20,
     maxtime::Float64=120.0,
-    tol::Float64=1e-10,
+    tol::Float64=1e-12,
     p₀::Union{Vector{Float64},Nothing}=nothing,
     verbose::Bool=false,
+    kwargs...,                      # absorb stray solver opts (e.g. legacy α)
 )
     n, m = fa.n, fa.m
     p_init = isnothing(p₀) ? ones(n) ./ n : copy(p₀)
-    alg = MirrorDec(
-        n, m, p_init;
-        α=α, maxiter=maxiter, maxtime=maxtime, tol=tol,
-        optimizer=CESAnalytic,
-        option_step=:eg, option_stepsize=:cc13,
-    )
-    if verbose
-        opt!(alg, fa; maxiter=maxiter, maxtime=maxtime, tol=tol, reset=true)
-    else
-        redirect_stdout(devnull) do
-            opt!(alg, fa; maxiter=maxiter, maxtime=maxtime, tol=tol, reset=true)
+    # Warm-start allocation: HessianBar.init! (Phase I) seeds the initial bids
+    # from `market.x`, so give it a uniform feasible split (Σ_i x_ij = 1 per good)
+    # rather than whatever stale allocation the surrogate carried in.
+    fa.x .= ones(n, m) ./ m
+    # Run `alg` to convergence and read off the normalized price (silencing the
+    # solver's iteration log unless verbose). Shared by both solvers.
+    _run(alg, mi, mt, tl) = begin
+        if verbose
+            opt!(alg, fa; maxiter=mi, maxtime=mt, tol=tl, reset=true)
+        else
+            redirect_stdout(devnull) do
+                opt!(alg, fa; maxiter=mi, maxtime=mt, tol=tl, reset=true)
+            end
         end
+        p = copy(alg.p)
+        p ./= sum(p)
+        return (p=p, iters=alg.k, dual=alg.φ, grad_norm=alg.gₙ)
     end
-    p = copy(alg.p)
-    p ./= sum(p)
-    return (p=p, iters=alg.k, dual=alg.φ, grad_norm=alg.gₙ)
+    # Primary: Hessian-barrier Newton.
+    try
+        hb = HessianBar(
+            n, m, p_init;
+            maxiter=maxiter, maxtime=maxtime, tol=tol,
+            optimizer=CESAnalytic,
+            option_mu=:normal,
+            option_step=:affinesc,
+            linsys=:DRq,
+        )
+        res = _run(hb, maxiter, maxtime, tol)
+        (all(isfinite, res.p) && sum(res.p) > 0) && return res
+        verbose && @warn "solve_ces_equilibrium: HessianBar gave a non-finite price; falling back to the Mosek EG program"
+    catch err
+        verbose && @warn "solve_ces_equilibrium: HessianBar failed; falling back to the Mosek EG program" err
+    end
+    # Fallback: the Mosek CES Eisenberg–Gale convex program (same solver as the
+    # optimal-NSW computation). Its supply-constraint dual is the Walrasian price,
+    # already simplex-normalized by solve_ces_welfare_opt.
+    eg = solve_ces_welfare_opt(fa, fa.w; verbose=verbose)
+    p = copy(eg.price)
+    sp = sum(p)
+    sp > 0 && (p ./= sp)
+    return (p=p, iters=0, dual=eg.welfare, grad_norm=NaN)
 end
 
 # -----------------------------------------------------------------------
@@ -301,10 +329,11 @@ function validate_surrogate(
     wealth_fn=nothing, verbose::Bool=false, kwargs...
 )
     @assert fa_surrogate.n == f_real.n || fa_surrogate.n == f_real.n + 1 "surrogate must match the real market's good count, or have one extra (money-lifted)"
-    # MirrorDec / CESAnalytic only support CES agents. If the surrogate
-    # carries any non-CES (gen) agents (QL, ...), the equilibrium solve
-    # is undefined here; warn once and return a NaN-shaped result so
-    # callers don't have to wrap every call in try/catch.
+    # The equilibrium solvers (HessianBar / CESAnalytic best-response, and the
+    # CES EG fallback) only support CES agents. If the surrogate carries any
+    # non-CES (gen) agents (QL, ...), the equilibrium solve is undefined here;
+    # warn once and return a NaN-shaped result so callers don't have to wrap
+    # every call in try/catch.
     if fa_surrogate.storage.gen.m > 0
         @warn "validate_surrogate: surrogate has $(fa_surrogate.storage.gen.m) non-CES (gen) agent(s); equilibrium ops are CES-only and not supported for mixed surrogates. Returning NaN excess." maxlog = 1
         return _vresult(fill(NaN, f_real.n), (orig=[NaN], lift=nothing))

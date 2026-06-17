@@ -7,8 +7,9 @@
 # run_one_method_ablation trio: the run set IS the variant list, and a plain
 # method is just a variant with an empty `cli:`.
 #
-# Selection is the variant list minus `SKIP_VARIANTS` below — edit that to drop
-# a few without touching the YAML. Use `--preset PATH` for a different catalog.
+# Selection is via `--method sym1,sym2,…` (preset `variant:` syms); empty runs
+# every variant. Use `--preset PATH` for a different catalog. Each variant's
+# fitted surrogate is serialized to `<out-dir>/fa_<market>_<sym>.jls`.
 #
 # The dataset is built ONCE and the global RNG is reseeded to --seed before each
 # fit, so the bootstrap atom is identical across variants and only the
@@ -36,37 +37,21 @@ include("../tools.jl")
 include("./androids/plc.jl")   # ground-truth PLC generator
 include("./setup.jl")
 
-# Variants to skip, by `sym` (the preset's variant names; presets.yaml
-# `variant:`). Plain strings — edit to drop a few from the run without touching
-# the YAML. Current syms: 
-ALL_VARIANTS = [
-    "cg", "cgma",
-    "adcg_hard_vardelta",
-    "fwjl", "adfwjl", # FW.jl
-    "fw", "adfw"
-]
-# E.g. to run only our own AD-FW:
-#   const SKIP_VARIANTS = ["cg", "cgma", "adcg_hard_vardelta", "fw", "fwjl", "adfwjl"]
-# (set to String[] to run every variant).
-# SKIP_VARIANTS = String[]
-# SKIP_VARIANTS = filter(x -> x !== "adfw", ALL_VARIANTS)
-# SKIP_VARIANTS = filter(x -> x !== "adcg_hard_vardelta", ALL_VARIANTS)
-# SKIP_VARIANTS = filter(x -> x ∈ ["cgma", "fwjl", "adfwjl"], ALL_VARIANTS)
-# SKIP_VARIANTS = filter(x -> x ∈ ["fwjl", "adfwjl"], ALL_VARIANTS)
-# SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
-SKIP_VARIANTS = filter(x -> !(x in ["adcg_hard_vardelta", "adfw"]), ALL_VARIANTS)
-
 const cli = parse_args_for_test_real()
 cfg = build_run_config(cli)
 
-# Available variant syms (for error / warning messages and skip validation).
+# Which preset variants to run, by `sym` (presets.yaml `variant:`): selected via
+# `--method` (comma-separated syms, e.g. `--method cg,adfw`). Empty (default)
+# runs every variant in the preset.
 const _ALL_SYMS = [String(v.sym) for v in method_variants]
-for s in SKIP_VARIANTS
-    s in _ALL_SYMS || @warn "SKIP_VARIANTS entry \"$s\" matches no variant sym" available = _ALL_SYMS
+const SELECTED_VARIANTS = filter(!isempty, strip.(split(cli["method"], ",")))
+for s in SELECTED_VARIANTS
+    s in _ALL_SYMS || @warn "--method entry \"$s\" matches no variant sym" available = _ALL_SYMS
 end
-variants = NamedTuple[v for v in method_variants if !(String(v.sym) in SKIP_VARIANTS)]
+variants = NamedTuple[v for v in method_variants
+                      if isempty(SELECTED_VARIANTS) || String(v.sym) in SELECTED_VARIANTS]
 isempty(variants) &&
-    error("no variants to run — all skipped? SKIP_VARIANTS = $(SKIP_VARIANTS), available = $(_ALL_SYMS)")
+    error("no variants to run — --method=\"$(cli["method"])\" matched none of $(_ALL_SYMS)")
 
 print_tree("configuration", [
     "market" => cfg.market_type,
@@ -78,7 +63,7 @@ print_tree("configuration", [
     "engine" => "$(cfg.engine) (LP→$(lp_engine()), gurobi=$(gurobi_available()))",
     "sample_size" => cli["sample_size"],
     "variants" => [string(i) => v.label for (i, v) in enumerate(variants)],
-    "skipped" => isempty(SKIP_VARIANTS) ? "(none)" : join(string.(SKIP_VARIANTS), ", "),
+    "--method filter" => isempty(SELECTED_VARIANTS) ? "(all)" : join(SELECTED_VARIANTS, ", "),
     "seed" => cfg.seed,
     "timelimit" => @sprintf("%g s", cfg.timelimit),
 ])
@@ -118,6 +103,12 @@ function _fit_variant(i, v)
     Random.seed!(cfg.seed)
     res = run_one_method(cfg, cli_v, 1, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real,
         v.method, separation_kind, base_kwargs; wealth_fn=rd.wealth_fn)
+
+    # Save this variant's fitted surrogate market (one file per variant sym, so
+    # the writes are race-free under threading). Reload with `deserialize(path)`.
+    fa_path = joinpath(cfg.out_dir, "fa_$(String(cfg.market_type))_$(String(v.sym)).jls")
+    serialize(fa_path, res.fa)
+    @info "saved fitted surrogate" variant = v.sym atoms = res.fa.m path = fa_path
 
     δ_final = haskey(res.hist, :delta) && !isempty(res.hist[:delta]) ?
               res.hist[:delta][end] : NaN

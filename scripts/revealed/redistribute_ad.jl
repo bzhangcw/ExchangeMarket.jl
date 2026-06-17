@@ -309,12 +309,18 @@ function solve_wealth_redist_primal_ad(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
             supply=supply, δ_var=δ_var, delta=delta, last_m=m, K=K, n=n)
     end
 
-    # No primal point available (e.g. barrier numerical failure or
-    # infeasibility): reading `value(...)` would throw the cryptic MOI
-    # "0 solution(s) in the model". Return a sentinel `B = nothing` instead and
-    # let the caller decide whether to fall back to the last good surrogate or
-    # error. `model`/`balance`/`supply` are still returned so the caller can
-    # inspect `termination_status(model)` for the message.
+    # If a time limit cut the solve off before any primal point, let the master
+    # LP FINISH (it is a feasible LP; the wall-clock budget is still enforced at
+    # the CG-loop level and on the pricing oracle) before falling back below.
+    if !has_values(model)
+        unset_time_limit_sec(model)
+        optimize!(model)
+    end
+    # Still no primal point (barrier numerical failure or infeasibility, not a
+    # time-out): reading `value(...)` would throw the cryptic MOI "0 solution(s)
+    # in the model". Return a sentinel `B = nothing` and let the caller decide
+    # whether to fall back to the last good surrogate or error. `model`/`balance`/
+    # `supply` are still returned so the caller can inspect `termination_status`.
     if !has_values(model)
         return nothing, nothing, model, balance, supply, NaN
     end

@@ -198,6 +198,24 @@ function solve_wealth_redist_primal(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     verbose ? unset_silent(model) : set_silent(model)
     optimize!(model)
 
+    # If a time limit cut the (warm-started barrier) solve off before producing
+    # any primal point, let the master LP FINISH: it is a feasible LP, so a solve
+    # without the cap yields a point. The per-method wall-clock budget is still
+    # enforced at the CG-loop level and on the separation oracle, so this only
+    # lets the *current* master solve complete instead of crashing on
+    # TIME_LIMIT / NO_SOLUTION. (Per the JuMP Solutions guide we query value()
+    # only once a solution exists.)
+    if !has_values(model)
+        unset_time_limit_sec(model)
+        optimize!(model)
+    end
+    if !has_values(model)
+        error("solve_wealth_redist_primal: master LP produced no primal solution even " *
+              "without a time limit — termination_status=$(termination_status(model)), " *
+              "primal_status=$(primal_status(model)), result_count=$(result_count(model)). " *
+              "Likely infeasible/numerical, not a time-out.")
+    end
+
     if !isnothing(cache)
         cache[] = (model=model, w_vars=w_vars, s=s_var, balance=balance,
             budget=budget, pinned=pinned, last_m=m, K=K, n=n,

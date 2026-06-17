@@ -477,6 +477,10 @@ function parse_args_for_test_real(argv=ARGS)
         help = """Comma-separated method names to run (any of cg,cgma,fw,sfw,fwjl), fw and sfw are implemented by myself. By default we don't include them yet, instead we compare to FrankWolfe.jl"""
         arg_type = String
         default = "cg,cgma,fwjl"
+        "--method"
+        help = "Comma-separated preset VARIANT syms for run_test.jl to run (the presets.yaml `variant:` names, e.g. cg,adfw,adcg_hard_vardelta). Empty (default) runs every variant. Distinct from --methods, which picks base method names."
+        arg_type = String
+        default = ""
         "--classes"
         help = "Comma-separated function classes for android classes in separation (any of ces,linear,leontief,ql,nn)"
         arg_type = String

@@ -636,15 +636,22 @@ function solve_ces_welfare_opt(fa::FisherMarket, w::AbstractVector;
             error("solve_ces_welfare_opt: unsupported ρ = $ρ (need ρ < 1, ρ ≠ 0; ρ = 1 is the σ = ∞ linear case)")
         end
     end
-    @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
+    supply = @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
     @objective(md, Max, sum(w[i] * τ[i] for i in 1:m))
 
     JuMP.optimize!(md)
     status = termination_status(md)
     if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS)
         @warn "CES NSW (Nash social welfare) program terminated abnormally" status
-        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], status=status)
+        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], price=fill(NaN, n), status=status)
     end
+    # The Walrasian price is the supply constraint's shadow price (the EG dual);
+    # |·| since the sign follows the Max/≤ convention. Normalized to a simplex so
+    # it doubles as the equilibrium-price solver behind solve_ces_equilibrium.
+    pr = abs.(dual.(supply))
+    sp = sum(pr)
+    price = sp > 0 ? pr ./ sp : fill(1.0 / n, n)
     # objective_value = Σ w_i τ_i = Σ w_i log u_i* at the optimum.
-    return (welfare=objective_value(md), x=[value.(x[i]) for i in 1:m], status=status)
+    return (welfare=objective_value(md), x=[value.(x[i]) for i in 1:m],
+        price=price, status=status)
 end

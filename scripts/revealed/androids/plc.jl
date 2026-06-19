@@ -104,7 +104,7 @@ Returns Ξ = [(p₁, g₁), ..., (p_K, g_K)].
 """
 function produce_revealed_preferences_plc(
     agents::Vector{PLCAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     price_range=(0.5, 2.0),
@@ -124,12 +124,12 @@ function produce_revealed_preferences_plc(
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
 
+        # Per-agent wealth at this sample's price (fixed budget / endowment
+        # value ⟨p_k,b_i⟩ / price-dependent wealth function), via `wealth_at`.
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            # Fisher: fixed budget. AD: endowment value at this sample's price.
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            x_i, _ = solve_plc_demand(agents[i], p_k, w_i)
+            x_i, _ = solve_plc_demand(agents[i], p_k, w[i])
             g_k .+= x_i
         end
         Ξ[k] = (copy(p_k), copy(g_k))
@@ -192,3 +192,151 @@ function is_plc_optimal_demand(plc::PLCAgent, x::AbstractVector, p::AbstractVect
     return max(g.feas_neg, g.feas_budget, g.util_gap) <= tol
 end
 
+
+# -----------------------------------------------------------------------
+# PLC market excess at a candidate price (single all-in-one LP from
+# `eq.plc.we.check.lp` in `read-econ/choice-ump-plc.tex`). Used by the PLC
+# branch of `validate_surrogate` (validate.jl) to score a surrogate's
+# equilibrium price against a PLC ground-truth market.
+#
+# Given a price `p` and PLC agents `(agents[i], w[i])` with unit supply
+# q = 1, this solves the joint LP
+#
+#     min τ
+#     s.t. UMP primal-dual + strong duality for every agent i,
+#          -τ 1 ≤ diag(p) (1 − Σ_i x_i) ≤ τ 1, τ ≥ 0.
+#
+# Returns (tau=τ*, x=selection, status=termination_status, time=wall).
+# τ* == 0 iff p is a Walrasian equilibrium of the PLC market.
+# -----------------------------------------------------------------------
+function solve_plc_excess(p::AbstractVector, agents::Vector{<:PLCAgent},
+    w::AbstractVector; verbose::Bool=false, timelimit::Union{Real,Nothing}=nothing)
+    m = length(agents)
+    n = length(p)
+    @assert length(w) == m "budget vector length mismatch"
+    @assert all(a -> size(a.a, 2) == n, agents) "agent gradient widths must equal n"
+    # NaN/Inf in the surrogate equilibrium price would make the LP coefficients
+    # invalid; fail soft so the run produces a row instead of crashing.
+    if any(!isfinite, p) || any(p .<= 0)
+        @warn "solve_plc_excess: non-finite or non-positive price; skipping LP" p_minmax = extrema(p)
+        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=:bad_price, time=0.0)
+    end
+
+    model = Model(Mosek.Optimizer)
+    verbose || set_silent(model)
+    if !isnothing(timelimit) && timelimit > 0
+        set_time_limit_sec(model, Float64(timelimit))
+    end
+
+    # Per-agent decision variables.
+    x = [@variable(model, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    t = [@variable(model, base_name = "t_$(i)") for i in 1:m]
+    U = [@variable(model, [1:agents[i].L], lower_bound = 0.0, base_name = "U_$(i)") for i in 1:m]
+    ν = [@variable(model, [1:n], lower_bound = 0.0, base_name = "nu_$(i)") for i in 1:m]
+    μ = [@variable(model, lower_bound = 0.0, base_name = "mu_$(i)") for i in 1:m]
+    @variable(model, τ >= 0.0)
+
+    for i in 1:m
+        ai = agents[i]
+        A_i = ai.a               # L × n
+        b_i = ai.b               # L
+        L_i = ai.L
+        # UMP primal: A_i x_i + b_i .≥ t_i 1, ⟨p, x_i⟩ = w_i.
+        @constraint(model, A_i * x[i] .+ b_i .>= t[i] .* ones(L_i))
+        @constraint(model, dot(p, x[i]) == w[i])
+        # UMP dual: A_i' U_i + ν_i = μ_i p, ⟨1, U_i⟩ = 1.
+        @constraint(model, A_i' * U[i] .+ ν[i] .== μ[i] .* p)
+        @constraint(model, sum(U[i]) == 1.0)
+        # Strong duality: t_i = ⟨b_i, U_i⟩ + w_i μ_i.
+        @constraint(model, t[i] == dot(b_i, U[i]) + w[i] * μ[i])
+    end
+
+    # Market clearing: -τ 1 ≤ diag(p) (1 - Σ x_i) ≤ τ 1.
+    aggregate = sum(x[i] for i in 1:m)
+    for j in 1:n
+        @constraint(model, p[j] * (1.0 - aggregate[j]) <= τ)
+        @constraint(model, p[j] * (1.0 - aggregate[j]) >= -τ)
+    end
+
+    @objective(model, Min, τ)
+    t_start = time()
+    optimize!(model)
+    elapsed = time() - t_start
+
+    status = termination_status(model)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.TIME_LIMIT)
+        @warn "PLC excess LP terminated abnormally" status
+        return (tau=NaN, x=[fill(NaN, n) for _ in 1:m], status=status, time=elapsed)
+    end
+    return (
+        tau=value(τ),
+        x=[value.(x[i]) for i in 1:m],
+        status=status,
+        time=elapsed,
+    )
+end
+
+# -----------------------------------------------------------------------
+# Optimal Nash social welfare (NSW) of a PLC Fisher market.
+#
+#   max_{x ≥ 0}  Σ_i w_i log u_i,   u_i = min_ℓ (a_{iℓ}·x_i + b_{iℓ}),
+#   s.t.  Σ_i x_i ≤ supply   (unit supply 1 per good, matching solve_plc_excess).
+#
+# For fixed Fisher budgets w this convex program's maximizer is the market's
+# Walrasian-equilibrium allocation, and its optimal value is the real market's
+# optimal Nash welfare W_real(p*) — the welfare ceiling any price can attain.
+# Solved in Mosek as an exponential-cone program: t_i ≤ log u_i is encoded by
+# (t_i, 1, u_i) ∈ ExpCone (1·exp(t_i/1) ≤ u_i), maximizing Σ w_i t_i.
+# Returns (welfare, x, status); welfare is NaN on solver failure.
+# -----------------------------------------------------------------------
+function solve_plc_welfare_opt(agents::Vector{<:PLCAgent}, w::AbstractVector;
+    supply::Union{Real,AbstractVector}=1.0, verbose::Bool=false,
+    timelimit::Union{Real,Nothing}=nothing)
+    m = length(agents)
+    @assert length(w) == m "budget vector length mismatch"
+    n = size(agents[1].a, 2)
+    @assert all(a -> size(a.a, 2) == n, agents) "agent gradient widths must equal n"
+    s = supply isa AbstractVector ? collect(float.(supply)) : fill(float(supply), n)
+
+    model = Model(Mosek.Optimizer)
+    verbose || set_silent(model)
+    if !isnothing(timelimit) && timelimit > 0
+        set_time_limit_sec(model, Float64(timelimit))
+    end
+
+    x = [@variable(model, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    @variable(model, u[1:m] >= 0.0)   # per-agent utility (epigraph of the min)
+    @variable(model, t[1:m])          # t_i ≤ log u_i
+    for i in 1:m
+        ai = agents[i]
+        # u_i ≤ a_{iℓ}·x_i + b_{iℓ} ∀ℓ  ⇒  u_i = min_ℓ(·) at the optimum.
+        @constraint(model, ai.a * x[i] .+ ai.b .>= u[i])
+        # (t_i, 1, u_i) ∈ ExpCone  ⇔  exp(t_i) ≤ u_i  ⇔  t_i ≤ log u_i.
+        @constraint(model, [t[i], 1.0, u[i]] in MOI.ExponentialCone())
+    end
+    @constraint(model, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
+    @objective(model, Max, sum(w[i] * t[i] for i in 1:m))
+
+    optimize!(model)
+    status = termination_status(model)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS, MOI.TIME_LIMIT)
+        @warn "PLC NSW (Nash social welfare) program terminated abnormally" status
+        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], status=status)
+    end
+    # objective_value = Σ w_i t_i = Σ w_i log u_i* at the optimum.
+    return (welfare=objective_value(model), x=[value.(x[i]) for i in 1:m], status=status)
+end
+
+# Nash social welfare Σ_i w_i log u_i(x_i) of a PLC market at a given allocation
+# `x` (a vector of per-agent bundles), mirroring ces_welfare's NaN-safe log.
+# Returns NaN if any agent's utility is non-finite (e.g. `x` came from a failed
+# solve), so callers don't silently report a masked 0.
+function plc_welfare(agents::Vector{<:PLCAgent}, w::AbstractVector, x::AbstractVector)
+    W = 0.0
+    for i in eachindex(agents)
+        u_i = utility(agents[i], nothing, x[i])
+        isnan(u_i) && return NaN
+        W += w[i] * (u_i > 0.0 ? log(u_i) : 0.0)
+    end
+    return W
+end

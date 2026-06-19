@@ -33,27 +33,27 @@ const _GES_Y_UPPER_DEFAULT = 10.0
 """
     register_cli_ges!(s::ArgParseSettings)
 
-Adds the "Separation: GES" arg group: `--ges-sigma-lower`, `--ges-sigma-upper`,
-`--ges-y-lower`, `--ges-y-upper`. These set the GES NLP search box; their
-defaults mirror CES (`--ces-sigma-upper`, `LOWER/UPPER_Y_BOUND`) except the
+Adds the "Separation: GES" arg group: `--sep-ges-sigma-lower`, `--sep-ges-sigma-upper`,
+`--sep-ges-y-lower`, `--sep-ges-y-upper`. These set the GES NLP search box; their
+defaults mirror CES (`--sep-ces-sigma-upper`, `LOWER/UPPER_Y_BOUND`) except the
 σ lower bound is strictly positive (GES requires σ > 0).
 """
 function register_cli_ges!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: GES")
     @add_arg_table! s begin
-        "--ges-sigma-lower"
+        "--sep-ges-sigma-lower"
         help = "Strict-positive lower bound on σ_j for GES (polynomial-utility concavity needs σ > 0). Default $(_GES_SIGMA_LOWER_DEFAULT)."
         arg_type = Float64
         default = _GES_SIGMA_LOWER_DEFAULT
-        "--ges-sigma-upper"
+        "--sep-ges-sigma-upper"
         help = "Upper bound on σ_j (CES-matching default $(_GES_SIGMA_UPPER_DEFAULT)). Lower (e.g. 5) keeps the recovered c_j = exp(y_j/(σ_j+1)) numerically tame."
         arg_type = Float64
         default = _GES_SIGMA_UPPER_DEFAULT
-        "--ges-y-lower"
+        "--sep-ges-y-lower"
         help = "Lower bound on y_j (CES-matching default $(_GES_Y_LOWER_DEFAULT))."
         arg_type = Float64
         default = _GES_Y_LOWER_DEFAULT
-        "--ges-y-upper"
+        "--sep-ges-y-upper"
         help = "Upper bound on y_j (CES-matching default $(_GES_Y_UPPER_DEFAULT))."
         arg_type = Float64
         default = _GES_Y_UPPER_DEFAULT
@@ -67,10 +67,10 @@ end
 Forward GES NLP bounds into the runner kwargs.
 """
 function apply_cli_ges!(local_extra::Dict, cli)
-    local_extra[:ges_sigma_lower] = cli["ges_sigma_lower"]
-    local_extra[:ges_sigma_upper] = cli["ges_sigma_upper"]
-    local_extra[:ges_y_lower] = cli["ges_y_lower"]
-    local_extra[:ges_y_upper] = cli["ges_y_upper"]
+    local_extra[:ges_sigma_lower] = cli["sep_ges_sigma_lower"]
+    local_extra[:ges_sigma_upper] = cli["sep_ges_sigma_upper"]
+    local_extra[:ges_y_lower] = cli["sep_ges_y_lower"]
+    local_extra[:ges_y_upper] = cli["sep_ges_y_upper"]
     return local_extra
 end
 
@@ -126,7 +126,7 @@ w_i(p_k) = ⟨p_k, b_i⟩).
 """
 function produce_revealed_preferences_ges(
     agents::Vector{GESAgent},
-    budgets::Union{Vector{Float64},Matrix{Float64}},
+    budgets,
     K::Int,
     n::Int;
     seed=nothing
@@ -139,13 +139,13 @@ function produce_revealed_preferences_ges(
     for k in 1:K
         e_k = -log.(rand(n))
         p_k = e_k ./ sum(e_k)
+        # Per-agent wealth at this sample's price (fixed budget / endowment
+        # value ⟨p_k,b_i⟩ / price-dependent wealth function), via `wealth_at`.
+        w = wealth_at(budgets, p_k)
         g_k = zeros(n)
         for i in 1:m
-            # Fisher: fixed budget. AD: endowment value at this sample's price.
-            w_i = budgets isa AbstractMatrix ?
-                  dot(p_k, view(budgets, :, i)) : budgets[i]
-            γ_i = share(agents[i], p_k, w_i)   # GES spending share at (p_k, w_i)
-            g_k .+= w_i .* γ_i ./ p_k          # x_i = w_i γ_i / p
+            γ_i = share(agents[i], p_k, w[i])   # GES spending share at (p_k, w_i)
+            g_k .+= w[i] .* γ_i ./ p_k          # x_i = w_i γ_i / p
         end
         Ξ[k] = (copy(p_k), copy(g_k))
     end
@@ -273,7 +273,7 @@ function ges_share_by_opt(c::AbstractVector, r::AbstractVector,
     @assert all(c .> 0) "GES requires c_j > 0"
     @assert w > 0
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     if !verbose
         set_attribute(model, "print_level", MadNLP.ERROR)
     end
@@ -362,7 +362,7 @@ function solve_separation_ges(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     y_lo, y_hi = Float64(ges_y_lower), Float64(ges_y_upper)
     ϵ_λ = 1e-6                                    # strict-positive λ floor
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     if !verbose
         set_attribute(model, "print_level", MadNLP.ERROR)
     end
@@ -532,4 +532,47 @@ function solve_separation_ges(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     return (γ_new=γ_new,
         params=(c=Vector{Float64}(c_opt), r=Vector{Float64}(r_opt), w=w_f),
         obj=obj_val, class=:ges)
+end
+
+# -----------------------------------------------------------------------
+# Optimal Nash social welfare (NSW) of a GES Fisher market.
+#
+#   max_{x ≥ 0}  Σ_i w_i log u_i,  u_i = Σ_j c_ij x_ij^{r_ij}  (r ∈ (0,1)),
+#   s.t.  Σ_i x_i ≤ supply  (unit supply 1 per good).
+#
+# GES utility is additively separable and concave (r_j ∈ (0,1)), so the NSW is a
+# clean Mosek power+exp-cone program — `c` stays a linear coefficient (no
+# c^{1/ρ} overflow as in the CES case):
+#   p_ij ≤ x_ij^{r_ij}  ([x_ij,1,p_ij] ∈ Pow(r_ij)),  u_i ≤ Σ_j c_ij p_ij,
+#   τ_i ≤ log u_i  ([τ_i,1,u_i] ∈ ExpCone),  max Σ w_i τ_i.
+# Returns (welfare, x, status); welfare is NaN on solver failure.
+# -----------------------------------------------------------------------
+function solve_ges_welfare_opt(agents::Vector{<:GESAgent}, w::AbstractVector;
+    supply::Union{Real,AbstractVector}=1.0, verbose::Bool=false)
+    m = length(agents)
+    n = agents[1].n
+    @assert length(w) == m "budget vector length mismatch"
+    s = supply isa AbstractVector ? collect(float.(supply)) : fill(float(supply), n)
+
+    md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
+    x = [@variable(md, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    @variable(md, τ[1:m])
+    for i in 1:m
+        a = agents[i]
+        p = @variable(md, [1:n], lower_bound = 0.0, base_name = "p_$(i)")
+        @constraint(md, [j = 1:n], [x[i][j], 1.0, p[j]] in MOI.PowerCone(a.r[j]))
+        u = @variable(md, lower_bound = 0.0)
+        @constraint(md, u <= sum(a.c[j] * p[j] for j in 1:n))
+        @constraint(md, [τ[i], 1.0, u] in MOI.ExponentialCone())   # τ_i ≤ log u_i
+    end
+    @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
+    @objective(md, Max, sum(w[i] * τ[i] for i in 1:m))
+
+    JuMP.optimize!(md)
+    status = termination_status(md)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS)
+        @warn "GES NSW (Nash social welfare) program terminated abnormally" status
+        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], status=status)
+    end
+    return (welfare=objective_value(md), x=[value.(x[i]) for i in 1:m], status=status)
 end

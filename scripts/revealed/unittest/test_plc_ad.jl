@@ -16,8 +16,8 @@
 using Random, LinearAlgebra
 using ExchangeMarket
 
-include("../tools.jl")
-include("./androids/plc.jl")
+include("../../tools.jl")
+include("../androids/plc.jl")
 
 # ---- knobs --------------------------------------------------------------
 const N = 4       # goods

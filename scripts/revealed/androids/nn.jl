@@ -148,16 +148,16 @@ end
 """
     register_cli_nn!(s::ArgParseSettings)
 
-Add the "Separation: NN" arg group (`--nn-hidden`, `--nn-iters`).
+Add the "Separation: NN" arg group (`--sep-nn-hidden`, `--sep-nn-iters`).
 """
 function register_cli_nn!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: NN")
     @add_arg_table! s begin
-        "--nn-hidden"
+        "--sep-nn-hidden"
         help = "Hidden width H of the per-android MLP used by `:nn` separation. Total θ dimension is 2nH + n + H. Default 16."
         arg_type = Int
         default = NN_HIDDEN_DEFAULT
-        "--nn-iters"
+        "--sep-nn-iters"
         help = "Outer LBFGS iteration cap for the NN separation subproblem. Each call is autodiffed (ForwardDiff) and warm-started from He init."
         arg_type = Int
         default = NN_ITERS_DEFAULT
@@ -171,11 +171,11 @@ end
 Forward NN-separation CLI values into the runner kwargs.
 """
 function apply_cli_nn!(local_extra::Dict, cli)
-    if cli["nn_hidden"] != NN_HIDDEN_DEFAULT
-        local_extra[:nn_hidden] = cli["nn_hidden"]
+    if cli["sep_nn_hidden"] != NN_HIDDEN_DEFAULT
+        local_extra[:nn_hidden] = cli["sep_nn_hidden"]
     end
-    if cli["nn_iters"] != NN_ITERS_DEFAULT
-        local_extra[:nn_iters] = cli["nn_iters"]
+    if cli["sep_nn_iters"] != NN_ITERS_DEFAULT
+        local_extra[:nn_iters] = cli["sep_nn_iters"]
     end
     return local_extra
 end

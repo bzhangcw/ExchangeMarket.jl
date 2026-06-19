@@ -61,7 +61,7 @@ function solve_wealth_redist_nlp(
     K = length(Ξ)
     n = length(Ξ[1][1])
 
-    model = Model(MadNLP.Optimizer)
+    model = new_model(nlp=true)
     if !verbose
         set_attribute(model, "print_level", MadNLP.ERROR)
     end

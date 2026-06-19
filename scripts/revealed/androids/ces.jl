@@ -32,7 +32,7 @@ const _CES_SIGMA_UPPER_DEFAULT = 20.0
 """
     register_cli_ces!(s::ArgParseSettings)
 
-Add the "Separation: CES" arg group: `--ces-sigma-lower`, `--ces-sigma-upper`.
+Add the "Separation: CES" arg group: `--sep-ces-sigma-lower`, `--sep-ces-sigma-upper`.
 These tune the σ search range for the free-σ LBFGS step
 (`solve_separation_lbfgs_ces`) and the σ grid for per-sample inversion
 (`solve_separation_inversion_ces`).
@@ -40,11 +40,11 @@ These tune the σ search range for the free-σ LBFGS step
 function register_cli_ces!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: CES")
     @add_arg_table! s begin
-        "--ces-sigma-lower"
+        "--sep-ces-sigma-lower"
         help = "Lower bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so the LBFGS box floors this at -0.98 (the (c, ρ) recovery diverges at -1). Raise (e.g. to 0) to restrict to gross substitutes."
         arg_type = Float64
         default = _CES_SIGMA_LOWER_DEFAULT
-        "--ces-sigma-upper"
+        "--sep-ces-sigma-upper"
         help = "Upper bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_UPPER_DEFAULT); raise for near-linear (σ → ∞) regimes."
         arg_type = Float64
         default = _CES_SIGMA_UPPER_DEFAULT
@@ -59,8 +59,8 @@ Forward CES-separation σ-bound CLI values into the runner kwargs, which
 solve_separation_class threads down to the CES oracles.
 """
 function apply_cli_ces!(local_extra::Dict, cli)
-    local_extra[:ces_sigma_lower] = cli["ces_sigma_lower"]
-    local_extra[:ces_sigma_upper] = cli["ces_sigma_upper"]
+    local_extra[:ces_sigma_lower] = cli["sep_ces_sigma_lower"]
+    local_extra[:ces_sigma_upper] = cli["sep_ces_sigma_upper"]
     return local_extra
 end
 
@@ -288,12 +288,12 @@ function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     verbose=false,
     kwargs...) where T
 
-    # Lower bound for the σ box: the user's --ces-sigma-lower, floored at
+    # Lower bound for the σ box: the user's --sep-ces-sigma-lower, floored at
     # the strict-interior value -0.98. The softmax objective itself is fine
     # at σ = -1, but the (y, σ) → (c, ρ) recovery used downstream by
     # `add_column_to_market!` (ρ = σ/(1+σ), c = exp(y/(1+σ))) diverges
     # there, so the box must stay one step above the boundary regardless
-    # of the CLI value. Raising the bound (e.g. --ces-sigma-lower 0 for
+    # of the CLI value. Raising the bound (e.g. --sep-ces-sigma-lower 0 for
     # gross substitutes only) is honored as-is.
     strict_sigma_lower = max(T(ces_sigma_lower), T(-0.98))
 
@@ -574,4 +574,106 @@ function solve_separation_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
         kwargs...
     )
     return (γ_new=γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces)
+end
+
+# -----------------------------------------------------------------------
+# Optimal Nash social welfare (NSW) of a CES Fisher market.
+#
+#   max_{x ≥ 0}  Σ_i w_i τ_i,  τ_i ≤ log u_i,  u_i = (Σ_j c_ij x_ij^{ρ_i})^{1/ρ_i},
+#   s.t.  Σ_i x_i ≤ supply   (unit supply 1 per good).
+#
+# The maximizer is the market's Walrasian-equilibrium allocation and the optimal
+# value is the real market's optimal NSW W_real* — obtained WITHOUT solving for
+# the equilibrium price p*. log u_i goes through the exponential cone; the CES
+# aggregator is modeled per ρ-regime to stay well-conditioned (the naïve
+# c^{1/ρ} homothetic trick from response_ces_conic.jl overflows for the real
+# market's large c and small ρ, e.g. 30^{1/0.05} ≈ 1e29, so Mosek returns junk):
+#
+#   ρ = 1     (σ = ∞, linear):  g_i ≤ Σ_j c_ij x_ij,  τ_i ≤ log g_i
+#   ρ ∈ (0,1):  per-term log route, keeps c LINEAR (no c^{1/ρ}):
+#               p_ij ≤ x_ij^ρ  ([x_ij,1,p_ij] ∈ Pow(ρ)),
+#               g_i ≤ Σ_j c_ij p_ij,  τ_i ≤ (1/ρ) log g_i  ([ρτ_i,1,g_i] ∈ ExpCone)
+#   ρ < 0:      homothetic trick (here c^{1/(1-ρ)} is an O(1) power, well-scaled):
+#               Σ_j ξ_ij = u_i,  [ξ_ij, x_ij, c_ij^{1/(1-ρ)} u_i] ∈ Pow(1/(1-ρ))
+#               ⇒ u_i ≤ (Σ_j c_ij x_ij^ρ)^{1/ρ},  τ_i ≤ log u_i
+#
+# Returns (welfare, x, status); welfare is NaN on solver failure.
+# -----------------------------------------------------------------------
+function solve_ces_welfare_opt(fa::FisherMarket, w::AbstractVector;
+    supply::Union{Real,AbstractVector}=1.0, verbose::Bool=false)
+    m = fa.m
+    n = length(fa.c[:, 1])
+    @assert length(w) == m "budget vector length mismatch"
+    s = supply isa AbstractVector ? collect(float.(supply)) : fill(float(supply), n)
+
+    md = ExchangeMarket.__generate_empty_jump_model(; verbose=verbose, tol=1e-8)
+    x = [@variable(md, [1:n], lower_bound = 0.0, base_name = "x_$(i)") for i in 1:m]
+    @variable(md, τ[1:m])   # τ_i ≤ log u_i
+    for i in 1:m
+        c_i = Vector(fa.c[:, i])
+        ρ = isinf(fa.σ[i]) ? 1.0 : fa.ρ[i]   # linear atom (σ = ∞) ⇒ ρ = 1
+        if ρ == 1.0
+            g = @variable(md, lower_bound = 0.0)
+            @constraint(md, g <= sum(c_i[j] * x[i][j] for j in 1:n))
+            @constraint(md, [τ[i], 1.0, g] in MOI.ExponentialCone())
+        elseif 0.0 < ρ < 1.0
+            p = @variable(md, [1:n], lower_bound = 0.0, base_name = "p_$(i)")
+            @constraint(md, [j = 1:n], [x[i][j], 1.0, p[j]] in MOI.PowerCone(ρ))
+            g = @variable(md, lower_bound = 0.0)
+            @constraint(md, g <= sum(c_i[j] * p[j] for j in 1:n))
+            # [ρτ_i, 1, g_i] ∈ ExpCone ⇔ g_i ≥ exp(ρτ_i) ⇔ τ_i ≤ (1/ρ) log g_i
+            @constraint(md, [ρ * τ[i], 1.0, g] in MOI.ExponentialCone())
+        elseif ρ < 0.0
+            α = 1 / (1 - ρ)
+            cr = c_i .^ α
+            u = @variable(md, lower_bound = 0.0)
+            ξ = @variable(md, [1:n], lower_bound = 0.0, base_name = "xi_$(i)")
+            @constraint(md, sum(ξ) == u)
+            @constraint(md, [j = 1:n],
+                [ξ[j], x[i][j], cr[j] * u] in MOI.PowerCone(α))
+            log_to_expcone!(u, τ[i], md)
+        else
+            error("solve_ces_welfare_opt: unsupported ρ = $ρ (need ρ < 1, ρ ≠ 0; ρ = 1 is the σ = ∞ linear case)")
+        end
+    end
+    supply = @constraint(md, [j = 1:n], sum(x[i][j] for i in 1:m) <= s[j])
+    @objective(md, Max, sum(w[i] * τ[i] for i in 1:m))
+
+    JuMP.optimize!(md)
+    status = termination_status(md)
+    if status ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.SLOW_PROGRESS)
+        @warn "CES NSW (Nash social welfare) program terminated abnormally" status
+        return (welfare=NaN, x=[fill(NaN, n) for _ in 1:m], price=fill(NaN, n), status=status)
+    end
+    # The Walrasian price is the supply constraint's shadow price (the EG dual);
+    # |·| since the sign follows the Max/≤ convention. Normalized to a simplex so
+    # it doubles as the equilibrium-price solver behind solve_ces_equilibrium.
+    pr = abs.(dual.(supply))
+    sp = sum(pr)
+    price = sp > 0 ? pr ./ sp : fill(1.0 / n, n)
+    # Report the Nash welfare evaluated *analytically* on the optimal allocation,
+    # Σ_i w_i log u_i(x*_i) with u_i = (Σ_j c_ij x_ij^{ρ})^{1/ρ}, rather than the
+    # conic objective_value Σ_i w_i τ_i. The two agree for well-separated ρ, but
+    # as ρ → 0 the ExpCone([ρτ,1,g]) (and the ρ<0 PowerCone(α=1/(1-ρ))) go
+    # degenerate, so the solver's τ_i decouples from the true log u_i and the
+    # objective drifts (here by ~7 on un-normalized c with |ρ| down to 1e-3). The
+    # allocation x* and the dual price stay well-conditioned, so re-scoring them
+    # with the exact CES utility gives a welfare faithful for all ρ ≠ 0 and
+    # consistent with ces_welfare(price). Evaluated as log(s)/ρ (log before the
+    # 1/ρ power) to avoid forming the overflowing s^{1/ρ} at small ρ.
+    x_opt = [value.(x[i]) for i in 1:m]
+    spow(a, b) = a > 0.0 ? a^b : 0.0
+    W = 0.0
+    for i in 1:m
+        c_i = Vector(fa.c[:, i])
+        ρ = isinf(fa.σ[i]) ? 1.0 : fa.ρ[i]
+        s = 0.0
+        for j in 1:n
+            s += c_i[j] * spow(x_opt[i][j], ρ)
+        end
+        log_u = s > 0.0 ? log(s) / ρ : -Inf
+        W += w[i] * (isfinite(log_u) ? log_u : 0.0)
+    end
+    return (welfare=W, welfare_conic=objective_value(md), x=x_opt,
+        price=price, status=status)
 end

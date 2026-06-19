@@ -143,6 +143,10 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     end
     timelimit = get(kwargs, :timelimit, Inf)        # wall-clock cap, seconds
     interval_eval_test = get(kwargs, :interval_eval_test, 1)
+    # Per-iteration table cadence (--interval-logging): print the regular iter row
+    # every `log_interval` iters. Convergence / termination rows always print.
+    # 1 (default) = every iter.
+    log_interval = Int(get(kwargs, :log_interval, 1))
     # Mini-batch / subsampling for the separation oracle. When 0 < sample_size < K,
     # each iteration draws a fresh random subset S ⊂ [K] of size sample_size
     # and runs the separation call on (Ξ_train[S], u[S, :]). For stage-1 single-cut
@@ -164,6 +168,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     # `f_real::Union{FisherMarket,Nothing}` — pass via kwargs from test_real.jl.
     # `interval_eval_excess`: 0 or -1 disables, >0 evaluates every N iters.
     f_real = get(kwargs, :f_real, nothing)
+    wealth_fn = get(kwargs, :wealth_fn, nothing)   # ground-truth wealth model for real demand
     interval_eval_excess = get(kwargs, :interval_eval_excess, 0)
     @assert !isempty(classes) "method kwargs :classes must be non-empty"
 
@@ -247,6 +252,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     has_excess = !isnothing(f_real) && interval_eval_excess > 0
 
     _t0 = time()
+    reset_cg_timers!()   # per-android separation + redistribution accumulators
     # `stage` is a small ordinal that selects the separation strategy:
     #   stage = 2 ⇒ multicut (K per-sample inversion candidates)
     #   stage = 1 ⇒ single-cut (one improving column from the per-class separation oracle)
@@ -277,7 +283,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         print_config("tol_|∇|", isnothing(tol_rc) ? "off" : @sprintf("%g", tol_rc))
         print_config("sample_size", sample_size)
         sample_size > 0 && print_config("mini-batch", sample_hard ?
-            "residual-weighted (--sample-hard)" : "uniform")
+                                                      "residual-weighted (--sample-hard)" : "uniform")
         print_config("interval_dropping", interval_dropping)
         println("-"^table_width(CPM_TABLE))
         print_header(CPM_TABLE)
@@ -295,9 +301,10 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # Show Gurobi's barrier log on the FIRST master solve only — useful
         # to confirm Method=2 / Crossover=0 are taking effect and to spot
         # numerical issues early — and stay silent afterward.
-        w, s_slack, model_primal, balance, budget = solve_wealth_redist_primal(
+        w, s_slack, model_primal, balance, budget = @time_redist solve_wealth_redist_primal(
             Ξ_train, γ_ref[];
-            verbose=(iter == 1) && verbose,
+            # verbose=(iter == 1) && verbose,
+            verbose=false,
             timelimit=_remaining,
             pinned_idx=_pinned_idx(),
             pinned_w=nonh_w,
@@ -342,7 +349,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
         # Market-excess (same forward-fill cadence as test).
         if has_excess && fa.m > 0 && (iter % interval_eval_excess == 0)
             try
-                v = validate_surrogate(fa, f_real; verbose=false)
+                v = validate_surrogate(fa, f_real; wealth_fn=wealth_fn, verbose=false)
                 last_excess[] = v.excess_surrogate_linf
             catch err
                 @warn "[$name iter $iter] validate_surrogate failed" err
@@ -504,12 +511,12 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
             error("Unknown separation stage: $stage")
         end
 
-        # log after separation
-        _log_row(rc_val, class_str)
+        # log after separation (throttled by --interval-logging)
+        (log_interval <= 1 || iter % log_interval == 0) && _log_row(rc_val, class_str)
     end
 
     # final master solve with latest columns
-    w_final, _, _, _, _ = solve_wealth_redist_primal(
+    w_final, _, _, _, _ = @time_redist solve_wealth_redist_primal(
         Ξ_train, γ_ref[];
         verbose=false,
         pinned_idx=_pinned_idx(),
@@ -534,7 +541,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     end
     if has_excess && fa.m > 0 && !isempty(history[:excess])
         try
-            v = validate_surrogate(fa, f_real; verbose=false)
+            v = validate_surrogate(fa, f_real; wealth_fn=wealth_fn, verbose=false)
             history[:excess][end] = v.excess_surrogate_linf
         catch err
             @warn "[$name final] validate_surrogate failed" err
@@ -543,6 +550,7 @@ function run_method_tracked(name::Symbol, separation_kind::Symbol, kwargs::Dict,
     if verbose
         @printf("--- done: %d agents, obj/K=%.3e, t=%.4fs ---\n", fa.m, history[:primal_obj][end], _elapsed)
     end
+    print_cg_timing_summary()
 
     return fa, γ_ref, history
 end

@@ -1,5 +1,5 @@
 using DRSOM
-using COPT
+using MosekTools
 import MathOptInterface as MOI
 
 proj(x) = x < 0 ? Inf : x
@@ -56,9 +56,9 @@ end
 
 function solve_socp_subp_primal(_htJ, _htz, _g, _α, _M, Δ; bool_verbose=0, mode=1, p=nothing)
     n = length(_htz)
-    model = Model(COPT.ConeOptimizer)
+    model = Model(Mosek.Optimizer)
     set_silent(model)
-    set_optimizer_attribute(model, "LogToConsole", bool_verbose)
+    bool_verbose != 0 && unset_silent(model)
 
     @variable(model, x[1:n])
     @variable(model, t)

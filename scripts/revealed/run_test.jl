@@ -1,10 +1,23 @@
-# Compare CG / Multicut / FW / SFW on a real market (CES or PLC).
-# Separate training and test revealed-preference sets of the same size K,
-# track train primal objective and test error per iteration, then plot.
+# Unified experiment driver for revealed-preference CES surrogate fitting.
 #
-# When --rep > 1, the whole experiment (data resampling + method runs) is
-# repeated with different seeds, and the plot shows the mean trajectory
-# per method with a ±1σ ribbon over the rep dimension.
+# Fits every variant in the preset's run set (presets.yaml `variant:`) on ONE
+# real-market dataset, prints a side-by-side comparison table (+ optional
+# real-market validation), and serializes a run_plot.jl-compatible plot context
+# (each variant a styled series). Replaces the former run_test / run_one_method /
+# run_one_method_ablation trio: the run set IS the variant list, and a plain
+# method is just a variant with an empty `cli:`.
+#
+# Selection is via `--method sym1,sym2,…` (preset `variant:` syms); empty runs
+# every variant. Use `--preset PATH` for a different catalog. Each variant's
+# fitted surrogate is serialized to `<out-dir>/fa_<market>_<sym>.jls`.
+#
+# The dataset is built ONCE and the global RNG is reseeded to --seed before each
+# fit, so the bootstrap atom is identical across variants and only the
+# method/knobs differ. Plotting is delegated to run_plot.jl (see the hint at the
+# end), so this step needs no Plots / PGFPlotsX / LaTeX stack.
+#
+# NOTE: the shared CLI parser still accepts --methods / --rep, but this driver
+# ignores them; the run set comes from the preset and each fit uses one dataset.
 #
 # CLI: see `julia run_test.jl -h` for all options.
 
@@ -13,269 +26,346 @@ using Random, SparseArrays, LinearAlgebra
 using DelimitedFiles
 using ArgParse
 using JuMP, MosekTools
-using Plots, LaTeXStrings, Printf
+using Printf
 using Statistics
+using Serialization
 import MathOptInterface as MOI
 
 using ExchangeMarket
 
 include("../tools.jl")
-include("../plots.jl")
-include("./androids/plc.jl")
-# androids/ql.jl is included transitively via separation.jl (loaded by
-# setup.jl below); it's the source of `solve_separation_ql` for the
-# :ql android class — the ground-truth :ql MARKET branch was removed.
+include("./androids/plc.jl")   # ground-truth PLC generator
 include("./setup.jl")
 
-switch_to_pdf(; bool_use_html=false)
-
 const cli = parse_args_for_test_real()
-
-# All CLI unpacking / derivation lives in `build_run_config` (setup.jl) so
-# run_one_method.jl shares the exact same plumbing. Destructure the fields
-# the rest of this script references by bare name.
 cfg = build_run_config(cli)
-(; market_type, budget_type, n, m, K, K_test, seed, rep, timelimit, iterlimit_override,
-    tol_obj_override, tol_delta_override, interval_eval_test,
-    interval_eval_excess, do_validate, csv_path, verbosity, out_dir,
-    data_file_path, method_names, allowed_classes, opt_plc, ces_rho_range,
-    sparsity) = cfg
 
-method_filter(name) = name in method_names
+# Which preset variants to run, by `sym` (presets.yaml `variant:`): selected via
+# `--method` (comma-separated syms, e.g. `--method cg,adfw`). Empty (default)
+# runs every variant in the preset.
+const _ALL_SYMS = [String(v.sym) for v in method_variants]
+const SELECTED_VARIANTS = filter(!isempty, strip.(split(cli["method"], ",")))
+for s in SELECTED_VARIANTS
+    s in _ALL_SYMS || @warn "--method entry \"$s\" matches no variant sym" available = _ALL_SYMS
+end
+variants = NamedTuple[v for v in method_variants
+                      if isempty(SELECTED_VARIANTS) || String(v.sym) in SELECTED_VARIANTS]
+isempty(variants) &&
+    error("no variants to run — --method=\"$(cli["method"])\" matched none of $(_ALL_SYMS)")
 
-@info "configuration" market_type n m K seed rep timelimit methods = method_names classes = allowed_classes ces_rho_range sparsity
+print_tree("configuration", [
+    "market" => cfg.market_type,
+    "wealth_function" => cfg.wealth_function == 1 ? "first-order (AD)" :
+                         cfg.wealth_function == 2 ? "second-order (quadratic)" : "constant (Fisher)",
+    "lift" => cfg.lift,
+    "dimensions" => ["n" => cfg.n, "m" => cfg.m, "K" => cfg.K, "K_test" => cfg.K_test],
+    "classes" => cfg.allowed_classes,
+    "engine" => "$(cfg.engine) (LP→$(lp_engine()), gurobi=$(gurobi_available()))",
+    "sample_size" => cli["sample_size"],
+    "variants" => [string(i) => v.label for (i, v) in enumerate(variants)],
+    "--method filter" => isempty(SELECTED_VARIANTS) ? "(all)" : join(SELECTED_VARIANTS, ", "),
+    "seed" => cfg.seed,
+    "timelimit" => @sprintf("%g s", cfg.timelimit),
+])
+if cli["sample_size"] <= 0 && any(get(v.cli, "sample_hard", false) === true for v in variants)
+    @warn "--sample-size is 0 (full batch): the sample_hard variants are " *
+          "identical to their uniform siblings. Pass --sample-size > 0 to " *
+          "exercise the boosting mini-batch."
+end
 
-# `build_rep_data` and `run_one_method` now live in setup.jl (shared with
-# run_one_method.jl); both take the `cfg` NamedTuple built above.
+# One dataset at the master seed.
+@printf("[dataset] building dataset (n=%d, m=%d, K=%d, seed=%d) ...\n", cfg.n, cfg.m, cfg.K, cfg.seed)
+flush(stdout)
+_t_ds = @elapsed (rd = build_rep_data(cfg, 1, cfg.seed))
+@printf("[dataset] done in %.2f s\n", _t_ds)
+flush(stdout)
+
+results = Vector{NamedTuple}(undef, length(variants))
+
+# Fit one variant. Each call reseeds the (task-local) RNG to cfg.seed so the
+# bootstrap atom is identical across variants — the method/knobs become the only
+# difference. Under threading every Task carries its own default RNG, so seeding
+# inside the task keeps each fit reproducible AND race-free.
+function _fit_variant(i, v)
+    ov = isempty(v.cli) ? "" :
+         "  [" * join(["$k=$val" for (k, val) in v.cli], ", ") * "]"
+    println("\n" * "="^100)
+    @printf("VARIANT %d/%d: %s  (method=%s)%s\n", i, length(variants), v.label, v.method, ov)
+    println("="^100)
+
+    # Look up this variant's base method spec (separation_kind + base kwargs).
+    (_, separation_kind, base_kwargs) = first(s for s in method_kwargs if s[1] == v.method)
+
+    # Per-variant CLI: copy the parsed flags, then apply this variant's overrides
+    # (e.g. "sample_hard", "ad_delta_free"). No-ops for methods that don't read
+    # them. A shallow copy suffices — only top-level scalar keys change.
+    cli_v = copy(cli)
+    for (k, val) in v.cli
+        cli_v[k] = val
+    end
+
+    Random.seed!(cfg.seed)
+    res = run_one_method(cfg, cli_v, 1, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real,
+        v.method, separation_kind, base_kwargs; wealth_fn=rd.wealth_fn)
+
+    # Save this variant's fitted surrogate market (one file per variant sym, so
+    # the writes are race-free under threading). Reload with `deserialize(path)`.
+    fa_path = joinpath(cfg.out_dir, "fa_$(String(cfg.market_type))_$(String(v.sym)).jls")
+    serialize(fa_path, res.fa)
+    @info "saved fitted surrogate" variant = v.sym atoms = res.fa.m path = fa_path
+
+    δ_final = haskey(res.hist, :delta) && !isempty(res.hist[:delta]) ?
+              res.hist[:delta][end] : NaN
+    return (
+        variant=v,
+        fa=res.fa,
+        iters=length(res.hist[:primal_obj]),
+        atoms=res.fa.m,
+        train=res.hist[:primal_obj][end],
+        test=res.hist[:test_err][end],
+        delta=δ_final,
+        t=res.t,
+        hist=res.hist,
+    )
+end
+
+# Fit the selected variants on separate threads when Julia has >1 thread (pass
+# `julia --threads=N`). Distinct `results[i]` writes are independent; the dataset
+# `rd`, `cfg`, and `cli` are read-only. Per-variant progress logs interleave when
+# threaded; the SUMMARY tables below are rebuilt from `results` in order.
+set_parallel_variants!(Threads.nthreads() > 1 && length(variants) > 1)
+if parallel_variants()
+    @info "fitting $(length(variants)) variants concurrently across $(Threads.nthreads()) threads (per-variant logs interleave)"
+    @sync for (i, v) in enumerate(variants)
+        Threads.@spawn (results[i] = _fit_variant(i, v))
+    end
+else
+    for (i, v) in enumerate(variants)
+        results[i] = _fit_variant(i, v)
+    end
+end
 
 # -----------------------------------------------------------------------
-# Drive the reps × methods grid concurrently.
-# Reps' data are built sequentially (cheap setup); the (rep, method)
-# pairs are then `Threads.@spawn`-ed all at once so the scheduler can
-# utilize every available thread across the whole grid.
+# Optional validation: solve each fitted surrogate's equilibrium and judge it
+# by the real market via the price-scaled excess demand. AD (adcg surrogate or
+# AD ground truth) is skipped — validate_surrogate has no price-dependent-budget
+# method.
 # -----------------------------------------------------------------------
-@info "task scheduler" nthreads = Threads.nthreads() rep methods = method_names
-
-selected_methods = [(name, pk, kw) for (name, pk, kw) in method_kwargs if method_filter(name)]
-
-rep_data = Vector{NamedTuple}(undef, rep)
-for r in 1:rep
-    rep_data[r] = build_rep_data(cfg, r, seed + (r - 1) * 1000)
+validation = Dict{Symbol,Any}()
+# Real-market optimal Nash welfare W_real*; stays NaN unless the validation
+# block below solves it. Initialized at top level so the SUMMARY table's NSW%
+# column can reference it even when validation is skipped.
+welfare_real_opt = NaN
+# Validation works for ANY real-market family: solve the surrogate's
+# equilibrium (Fisher via Mirror Descent, AD via potred), project the price
+# back to the real goods if the surrogate is money-lifted, and evaluate the
+# real market's aggregate demand there. CES ground truth uses rd.wealth_fn
+# (constant/first-order); GES/SPLC/NGES use their per-class demand; PLC uses
+# its fixed-budget joint-LP (constant wealth, no lift).
+do_validate_effective = cfg.do_validate
+if cfg.do_validate && cfg.market_type === :plc && (cfg.wealth_function != 0 || cfg.lift)
+    @warn "PLC ground-truth validation supports only --wealth-function 0 without --lift; skipping" wealth_function = cfg.wealth_function lift = cfg.lift
+    global do_validate_effective = false
 end
-
-grid_tasks = Task[]
-for r in 1:rep, (name, pk, kw) in selected_methods
-    rd = rep_data[r]
-    push!(grid_tasks, Threads.@spawn run_one_method(cfg, cli, r, rd.rep_seed, rd.Ξ_train, rd.Ξ_test, rd.f_real, name, pk, kw))
-end
-grid_results = [fetch(t) for t in grid_tasks]
-
-per_rep_results = [Dict{Symbol,NamedTuple}() for _ in 1:rep]
-for res in grid_results
-    per_rep_results[res.rep_idx][res.name] = (fa=res.fa, hist=res.hist, t=res.t)
-end
-
-# -----------------------------------------------------------------------
-# Optional validation: for each fitted surrogate, solve its CES
-# equilibrium and judge it by the real market via the price-scaled
-# excess demand z(p_s) = p_s · (q − g_real(p_s)). Detailed per-rep
-# results are printed below; the per-method mean ± std is then folded
-# into the summary table.
-# -----------------------------------------------------------------------
-validate_per_rep = [Dict{Symbol,NamedTuple}() for _ in 1:rep]
-do_validate_effective = do_validate && (market_type === :ces || market_type === :plc) &&
-                        budget_type !== :ad   # AD validation not wired (any market type)
-if do_validate && !(market_type === :ces || market_type === :plc)
-    @warn "--validate only supported for --market-type ces|plc; skipping" market_type
-end
-if do_validate && budget_type === :ad
-    @warn "--validate not supported for --budget-type ad; skipping" budget_type
-end
-if do_validate_effective
+if do_validate_effective && rd.f_real !== nothing
     println()
     println("=== Validation: real-market clearing at surrogate equilibrium price ===")
-    @printf("%4s | %-10s | %12s | %12s\n",
-        "rep", "method", "‖p(q-g)‖∞", "‖p(q-g)‖₁")
-    @printf("%4s-+-%-10s-+-%12s-+-%12s\n",
-        "----", "----------", "------------", "------------")
-    for r in 1:rep
-        f_real = rep_data[r].f_real
-        f_real === nothing && continue
-        for name in method_names
-            haskey(per_rep_results[r], name) || continue
-            fa = per_rep_results[r][name].fa
-            # AD (adcg surrogate or AD ground truth): validate_surrogate not wired.
-            (fa isa ArrowDebreuMarket || f_real isa ArrowDebreuMarket) && continue
-            v = validate_surrogate(fa, f_real; verbose=false)
-            validate_per_rep[r][name] = v
-            pretty = get(display_name, name, String(name))
-            @printf("%4d | %-10s | %12.3e | %12.3e\n",
-                r, pretty, v.excess_surrogate_linf, v.excess_surrogate_l1)
+    println(sprintlnlong("orig = ‖q(1−d(q))‖∞ on the n real goods; norm = same at the simplex-normalized price q̃=q/⟨1,q⟩ (scale-invariant, comparable across lift/no-lift); lift = ‖p̄(supply−d̄)‖∞ on the n+1 lifted goods (− if not lifted); surr = surrogate's OWN clearing residual at p* (≈0 ⇒ equilibrium reached ⇒ real excess is model misspecification)";
+        indent="    "))
+    @printf("%-22s | %14s | %14s | %14s | %14s\n", "variant", "orig ‖p(q-g)‖∞", "norm ‖q̃(1-d)‖∞", "lift ‖p̄(q̄-d̄)‖∞", "surr ‖p(1-d̂)‖∞")
+    @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%14s\n", "-"^22, "-"^14, "-"^14, "-"^14, "-"^14)
+    # Real-market optimal NSW (Nash social welfare) W_real* = max Σ wᵢ log uᵢ,
+    # obtained by maximizing welfare DIRECTLY via a Mosek convex program — never
+    # via the real equilibrium price p* (we compare welfares, not prices, so there
+    # is no need to solve for p*). CES, PLC, GES and NGES Fisher markets are
+    # supported (each a concave welfare-max convex program); other families stay
+    # NaN. Requires constant budgets (--wealth-function 0).
+    welfare_real_opt = NaN
+    if cfg.wealth_function == 0
+        if rd.f_real isa FisherMarket
+            welfare_real_opt = solve_ces_welfare_opt(rd.f_real, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: PLCAgent
+            welfare_real_opt = solve_plc_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: GESAgent
+            welfare_real_opt = solve_ges_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        elseif hasproperty(rd.f_real, :agents) && eltype(rd.f_real.agents) <: NGESAgent
+            welfare_real_opt = solve_nges_welfare_opt(rd.f_real.agents, rd.f_real.w).welfare
+        end
+    end
+    for r in results
+        println("--- solving $(r.variant.label) surrogate equilibrium ---")
+        vres = validate_surrogate(r.fa, rd.f_real; wealth_fn=rd.wealth_fn, verbose=true)
+        validation[r.variant.sym] = vres
+        liftstr = isnan(vres.excess_lift_linf) ? "-" : @sprintf("%.3e", vres.excess_lift_linf)
+        surrstr = isnan(vres.excess_surr_self_linf) ? "-" : @sprintf("%.3e", vres.excess_surr_self_linf)
+        @printf("%-22s | %14.3e | %14.3e | %14s | %14s\n",
+            r.variant.label, vres.excess_surrogate_linf, vres.excess_norm_linf, liftstr, surrstr)
+    end
+
+    # --- Welfare table (NSW = Nash social welfare,  W = Σ wᵢ log uᵢ) -------------
+    # W_real*: real market's optimal NSW (max Σ wᵢ log uᵢ, solved directly; a
+    # per-row column, identical across variants); W_real(p^s): real market at the
+    # surrogate's clearing price p^s; W_surr(p^s): the surrogate's own androids
+    # at p^s. "loss %" = 100·(W_real* − W_real(p^s)) / |W_real*| is the relative
+    # welfare the surrogate's price costs the real economy (smaller is better).
+    if any(haskey(validation, r.variant.sym) && !isnan(validation[r.variant.sym].welfare_real_ps) for r in results)
+        println()
+        println("--- NSW:  W = Σ wᵢ log uᵢ  (Nash social welfare) ---")
+        if isnan(welfare_real_opt)
+            @printf("    optimal NSW W_real*: not solved for this market/wealth setting (only CES & PLC with --wealth-function 0)\n")
+        end
+        # "Σx/s" = max_j Σ_i x_ij / s_j of the rationed allocation W_real(p^s) is
+        # scored on; ≤ 1 confirms the NSW is measured on a supply-feasible
+        # (clearing, non-oversubscribed) bundle.
+        @printf("%-22s | %14s | %14s | %14s | %10s | %8s\n",
+            "variant", "W_real*", "W_real(p^s)", "W_surr(p^s)", "loss %", "Σx/s")
+        @printf("%-22s-+-%14s-+-%14s-+-%14s-+-%10s-+-%8s\n",
+            "-"^22, "-"^14, "-"^14, "-"^14, "-"^10, "-"^8)
+        for r in results
+            vres = get(validation, r.variant.sym, nothing)
+            (isnothing(vres) || isnan(vres.welfare_real_ps)) && continue
+            optstr = isnan(welfare_real_opt) ? "-" : @sprintf("%+.6e", welfare_real_opt)
+            # loss relative to the optimum welfare; "-" when the real optimum
+            # wasn't solved (no reference) or is exactly 0 (percentage undefined).
+            lossstr = (isnan(welfare_real_opt) || welfare_real_opt == 0) ? "-" :
+                      @sprintf("%+.3f%%", 100 * (welfare_real_opt - vres.welfare_real_ps) / abs(welfare_real_opt))
+            usev = hasproperty(vres, :nsw_supply_use) ? vres.nsw_supply_use : NaN
+            usestr = isnan(usev) ? "-" : @sprintf("%.4f", usev)
+            @printf("%-22s | %14s | %+14.6e | %+14.6e | %10s | %8s\n",
+                r.variant.label, optstr, vres.welfare_real_ps, vres.welfare_surr_ps, lossstr, usestr)
         end
     end
 end
 
 # -----------------------------------------------------------------------
-# Per-method aggregation across reps:
-#   - pad trajectories with their last value to the longest length
-#   - compute mean & std at each iteration
-# Final-iter scalars (androids, train, test, t) are reported as mean.
+# Comparison table.
 # -----------------------------------------------------------------------
-function pad_forward(v::Vector{T}, L::Int) where {T}
-    length(v) >= L && return v[1:L]
-    last = v[end]
-    return vcat(v, fill(last, L - length(v)))
+println()
+println("="^100)
+println("SUMMARY  (market=$(cfg.market_type), wealth=$(cfg.wealth_function), lift=$(cfg.lift), n=$(cfg.n), m=$(cfg.m), K=$(cfg.K), sample_size=$(cli["sample_size"]))")
+println("="^100)
+@printf("%-22s | %5s | %5s | %11s | %11s | %8s | %8s | %9s | %11s | %11s | %11s | %11s | %9s\n",
+    "variant", "iters", "atoms", "train", "test", "δ*", "time(s)", "t/it(ms)", "‖p(q-g)‖∞", "norm‖∞", "lift‖∞", "surr‖∞", "NSW %")
+@printf("%-22s-+-%5s-+-%5s-+-%11s-+-%11s-+-%8s-+-%8s-+-%9s-+-%11s-+-%11s-+-%11s-+-%11s-+-%9s\n",
+    "-"^22, "-"^5, "-"^5, "-"^11, "-"^11, "-"^8, "-"^8, "-"^9, "-"^11, "-"^11, "-"^11, "-"^11, "-"^9)
+for r in results
+    vres = get(validation, r.variant.sym, nothing)
+    valstr = isnothing(vres) ? "          -" : @sprintf("%11.3e", vres.excess_surrogate_linf)
+    normstr = isnothing(vres) ? "          -" : @sprintf("%11.3e", vres.excess_norm_linf)
+    liftstr = (isnothing(vres) || isnan(vres.excess_lift_linf)) ? "          -" :
+              @sprintf("%11.3e", vres.excess_lift_linf)
+    surrstr = (isnothing(vres) || isnan(vres.excess_surr_self_linf)) ? "          -" :
+              @sprintf("%11.3e", vres.excess_surr_self_linf)
+    # NSW %: Nash-social-welfare loss at the surrogate price, 100·(W_real* −
+    # W_real(p^s))/|W_real*| — same as the welfare table's "loss %". "-" when
+    # the real optimum or the surrogate's real welfare wasn't solved.
+    nswstr = (isnothing(vres) || isnan(welfare_real_opt) || welfare_real_opt == 0 ||
+              isnan(vres.welfare_real_ps)) ? "        -" :
+             @sprintf("%+8.3f%%", 100 * (welfare_real_opt - vres.welfare_real_ps) / abs(welfare_real_opt))
+    t_per_it = r.iters > 0 ? 1000 * r.t / r.iters : NaN   # mean wall-clock per iteration (ms)
+    @printf("%-22s | %5d | %5d | %11.3e | %11.3e | %8.4f | %8.2f | %9.3f | %s | %s | %s | %s | %s\n",
+        r.variant.label, r.iters, r.atoms, r.train, r.test, r.delta, r.t, t_per_it, valstr, normstr, liftstr, surrstr, nswstr)
 end
 
-agg = Dict{Symbol,NamedTuple}()
-for name in method_names
-    runs = [pr[name] for pr in per_rep_results if haskey(pr, name)]
-    isempty(runs) && continue
-    Ls = [length(r.hist[:primal_obj]) for r in runs]
-    Lmax = maximum(Ls)
-    train_mat = hcat([pad_forward(max.(r.hist[:primal_obj], 1e-8), Lmax) for r in runs]...)
-    test_mat = hcat([pad_forward(max.(r.hist[:test_err], 1e-8), Lmax) for r in runs]...)
-    # Per-iter market excess history (NaN-filled when not tracked).
-    excess_runs = [haskey(r.hist, :excess) && !isempty(r.hist[:excess]) ?
-                   pad_forward(max.(r.hist[:excess], 1e-8), Lmax) :
-                   fill(NaN, Lmax) for r in runs]
-    excess_mat = hcat(excess_runs...)
-    has_excess_curve = any(!isnan, excess_mat)
-    nag = [r.hist[:num_agents][end] for r in runs]
-    # Std of final values across reps — NaN when only one rep so the
-    # summary table can render "-" instead of a fake number.
-    _std_or_nan(v) = length(v) > 1 ? std(v) : NaN
-    # Validation metric (market excess at surrogate equilibrium).
-    val_vals = Float64[get(validate_per_rep[r], name, (excess_surrogate_linf=NaN,)).excess_surrogate_linf
-                       for r in 1:rep if haskey(per_rep_results[r], name)]
-    val_clean = filter(!isnan, val_vals)
-    finals = (
-        train_mean=mean(train_mat[end, :]),
-        train_std=_std_or_nan(train_mat[end, :]),
-        test_mean=mean(test_mat[end, :]),
-        test_std=_std_or_nan(test_mat[end, :]),
-        t_mean=mean(r.t for r in runs),
-        t_std=_std_or_nan([r.t for r in runs]),
-        atoms_mean=mean(r.fa.m for r in runs),
-        iters_mean=mean(Ls),
-        nag_mean=mean(nag),
-        val_mean=isempty(val_clean) ? NaN : mean(val_clean),
-        val_std=_std_or_nan(val_clean),
-    )
-    train_mean = vec(mean(train_mat; dims=2))
-    train_std = vec(std(train_mat; dims=2))
-    train_min = vec(minimum(train_mat; dims=2))
-    train_max = vec(maximum(train_mat; dims=2))
-    test_mean = vec(mean(test_mat; dims=2))
-    test_std = vec(std(test_mat; dims=2))
-    test_min = vec(minimum(test_mat; dims=2))
-    test_max = vec(maximum(test_mat; dims=2))
-    # Excess summary stats — skipnans across reps; per-iter slots with all
-    # NaN reps stay NaN so the plotter draws gaps cleanly.
-    _safe_mean(v) = (vc = filter(!isnan, v); isempty(vc) ? NaN : mean(vc))
-    _safe_std(v) = (vc = filter(!isnan, v); length(vc) > 1 ? std(vc) : NaN)
-    _safe_min(v) = (vc = filter(!isnan, v); isempty(vc) ? NaN : minimum(vc))
-    _safe_max(v) = (vc = filter(!isnan, v); isempty(vc) ? NaN : maximum(vc))
-    excess_mean = [_safe_mean(excess_mat[i, :]) for i in 1:Lmax]
-    excess_std = [_safe_std(excess_mat[i, :]) for i in 1:Lmax]
-    excess_min = [_safe_min(excess_mat[i, :]) for i in 1:Lmax]
-    excess_max = [_safe_max(excess_mat[i, :]) for i in 1:Lmax]
-    agg[name] = (
-        runs=runs,
-        Lmax=Lmax,
-        train_mean=train_mean, train_std=train_std, train_min=train_min, train_max=train_max,
-        test_mean=test_mean, test_std=test_std, test_min=test_min, test_max=test_max,
-        excess_mean=excess_mean, excess_std=excess_std,
-        excess_min=excess_min, excess_max=excess_max,
-        has_excess=has_excess_curve,
-        finals=finals,
-    )
-end
+best_train = argmin(r -> r.train, results)
+best_test = argmin(r -> r.test, results)
+println()
+@printf("best train_obj: %s (%.3e)\n", best_train.variant.label, best_train.train)
+@printf("best test_err : %s (%.3e)\n", best_test.variant.label, best_test.test)
 
-# -----------------------------------------------------------------------
-# Summary
-# -----------------------------------------------------------------------
-println("\n=== Summary (mean over $rep rep$(rep == 1 ? "" : "s")) ===")
-fmt_std(s) = isnan(s) ? "       -" : @sprintf("%8.1e", s)
-fmt_mean(v) = @sprintf("%9.3e", v)
-if do_validate_effective
-    @printf("%-12s %8s %8s %20s %20s %16s %20s\n",
-        "method", "iters", "androids", "train_obj (std)", "test_err (std)",
-        "time (s) (std)", "‖p(q-g)‖∞ (std)")
-else
-    @printf("%-12s %8s %8s %20s %20s %16s\n",
-        "method", "iters", "androids", "train_obj (std)", "test_err (std)",
-        "time (s) (std)")
-end
-for name in method_names
-    haskey(agg, name) || continue
-    f = agg[name].finals
-    if do_validate_effective
-        val_str = isnan(f.val_mean) ? "        -" : fmt_mean(f.val_mean)
-        @printf("%-12s %8.1f %8.1f %s (%s) %s (%s) %6.3f (%s) %s (%s)\n",
-            get(display_name, name, String(name)),
-            f.iters_mean, f.atoms_mean,
-            fmt_mean(f.train_mean), fmt_std(f.train_std),
-            fmt_mean(f.test_mean), fmt_std(f.test_std),
-            f.t_mean, fmt_std(f.t_std),
-            val_str, fmt_std(f.val_std))
-    else
-        @printf("%-12s %8.1f %8.1f %s (%s) %s (%s) %6.3f (%s)\n",
-            get(display_name, name, String(name)),
-            f.iters_mean, f.atoms_mean,
-            fmt_mean(f.train_mean), fmt_std(f.train_std),
-            fmt_mean(f.test_mean), fmt_std(f.test_std),
-            f.t_mean, fmt_std(f.t_std))
-    end
-end
-
-# Optional CSV log: one row per (rep, method).
-if !isempty(csv_path)
-    csv_path = isabspath(csv_path) ? csv_path : joinpath(@__DIR__, csv_path)
+# Optional CSV log: one row per variant.
+if !isempty(cfg.csv_path)
+    csv_path = isabspath(cfg.csv_path) ? cfg.csv_path : joinpath(@__DIR__, cfg.csv_path)
     new_file = !isfile(csv_path)
     open(csv_path, "a") do io
-        if new_file
-            println(io, "market_type,n,m,K,rep,method,iters,atoms_T,train_obj,test_err,time_s")
-        end
-        for r_idx in 1:rep
-            for name in method_names
-                haskey(per_rep_results[r_idx], name) || continue
-                run = per_rep_results[r_idx][name]
-                println(io, join((
-                        String(market_type), n, m, K, r_idx, String(name),
-                        length(run.hist[:primal_obj]), run.fa.m,
-                        run.hist[:primal_obj][end], run.hist[:test_err][end],
-                        round(run.t; digits=3),
-                    ), ","))
-            end
+        new_file && println(io,
+            "market_type,n,m,K,variant,method,iters,atoms_T,train_obj,test_err,delta,time_s")
+        for r in results
+            println(io, join((
+                    String(cfg.market_type), cfg.n, cfg.m, cfg.K,
+                    String(r.variant.sym), String(r.variant.method),
+                    r.iters, r.atoms, r.train, r.test, r.delta, round(r.t; digits=3),
+                ), ","))
         end
     end
     @info "appended results" csv_path
 end
 
 # -----------------------------------------------------------------------
-# Persist the per-method aggregation context. Plotting is delegated to
-# run_plot.jl so this script stays focused on the benchmark itself; see
-# the hint printed at the end for the exact replay command.
+# Serialize a run_plot.jl-compatible plot context (each variant a styled
+# series). Built inline so this run step needs no Plots / PGFPlotsX / LaTeX
+# stack — only run_plot.jl does. rep = 1, so the std/min/max fields equal the
+# single trajectory (the plotter draws no ribbon).
 # -----------------------------------------------------------------------
-include("./run_plot.jl")
-plot_ctx = build_plot_ctx(;
-    agg=agg, rep=rep, market_type=market_type,
-    n=n, m=m, K=K, opt_plc=opt_plc,
-    method_names=method_names, interval_marker=10,
+function _ctx_entry(r)
+    tr = Float64.(r.hist[:primal_obj])
+    te = Float64.(r.hist[:test_err])
+    L = length(tr)
+    nan = fill(NaN, L)
+    return (
+        Lmax=L,
+        train_mean=tr, train_std=tr, train_min=tr, train_max=tr,
+        test_mean=te, test_std=te, test_min=te, test_max=te,
+        excess_mean=nan, excess_std=nan, excess_min=nan, excess_max=nan,
+        has_excess=false,
+        finals=(nag_mean=Float64(r.atoms),),
+    )
+end
+
+agg = Dict{Symbol,NamedTuple}(r.variant.sym => _ctx_entry(r) for r in results)
+style = Dict{Symbol,Any}(
+    r.variant.sym => (color=r.variant.color, marker=r.variant.marker, label=r.variant.plotlabel)
+    for r in results)
+
+plot_ctx = (
+    agg=agg,
+    rep=1,
+    market_type=cfg.market_type,
+    n=cfg.n, m=cfg.m, K=cfg.K,
+    opt_plc=cfg.opt_plc,
+    method_names=Symbol[r.variant.sym for r in results],
+    interval_marker=10,
+    style=style,
 )
-if !isempty(data_file_path)
-    save_plot_ctx(data_file_path, plot_ctx)
-    # Print the render hint to stderr (same stream as the @info "saved …"
-    # logs above). stdout is block-buffered when the output isn't a TTY
-    # (piped to a file, captured, or filtered), so a trailing `println`
-    # to stdout gets reordered after / buried under the stderr logs and is
-    # easy to miss; stderr is unbuffered and shows reliably.
+
+if !isempty(cfg.data_file_path)
+    mkpath(dirname(abspath(cfg.data_file_path)))
+    open(io -> serialize(io, plot_ctx), cfg.data_file_path, "w")
+    # Render hint to stderr (unbuffered; stdout is block-buffered when piped).
     println(stderr)
     println(stderr, "─"^60)
     println(stderr, "To render the risk curves:")
-    println(stderr, "  julia --project=. revealed/run_plot.jl -f $(data_file_path)")
+    println(stderr, "  julia --project=. revealed/run_plot.jl -f $(cfg.data_file_path)")
     println(stderr, "  (add --smooth N for a moving-average window, --no-tex to skip pgfplots .tex)")
     println(stderr, "─"^60)
     flush(stdout)
+end
+
+# -----------------------------------------------------------------------
+# Serialize the ground-truth real market and every fitted surrogate, so a run
+# can be re-validated / inspected without refitting. The saved NamedTuple holds
+# the real market (`f_real`) and its wealth model (`wealth_fn`), the train/test
+# revealed-preference datasets, the validation results, and one entry per
+# variant carrying the fitted surrogate market (`fa`) plus its labels. Reload
+# with `Serialization.deserialize` (ExchangeMarket must be loaded for the market
+# types). Suppressed by `--no-data-file`.
+# -----------------------------------------------------------------------
+if !cli["no_data_file"]
+    surr_path = joinpath(cfg.out_dir, "surrogates_$(String(cfg.market_type)).jls")
+    saved = (
+        market_type=cfg.market_type,
+        wealth_function=cfg.wealth_function,
+        lift=cfg.lift,
+        n=cfg.n, m=cfg.m, K=cfg.K, seed=cfg.seed,
+        f_real=rd.f_real,
+        wealth_fn=rd.wealth_fn,
+        Xi_train=rd.Ξ_train,
+        Xi_test=rd.Ξ_test,
+        validation=validation,
+        surrogates=[(sym=r.variant.sym, label=r.variant.label,
+            method=r.variant.method, fa=r.fa) for r in results],
+    )
+    mkpath(cfg.out_dir)
+    open(io -> serialize(io, saved), surr_path, "w")
+    @info "saved real market + fitted surrogates" surr_path n_variants = length(results)
 end

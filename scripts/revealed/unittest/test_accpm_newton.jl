@@ -19,7 +19,7 @@ using Printf
 using LinearAlgebra
 using Random
 
-include("./setup.jl")
+include("../setup.jl")
 
 Random.seed!(20260517)
 

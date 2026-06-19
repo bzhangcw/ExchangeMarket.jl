@@ -50,6 +50,9 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
     # constraints (reuse LinearConstr)
     constr_p::Union{LinearConstr,Nothing} = nothing
 
+    # AgentView registry (lazily filled by init_agents!; mirrors FisherMarket.agents)
+    agents::Vector{Any} = Vector{Any}()
+
     """
     ArrowDebreuMarket(m, n; ρ=1.0, c=nothing, b=nothing, seed=1,
                       scale=1.0, sparsity=(2.0/n), bool_force_dense=true)
@@ -112,6 +115,7 @@ Base.@kwdef mutable struct ArrowDebreuMarket{T} <: AbstractMarket
         # aux storages
         this.df = DataFrame()
         this.constr_p = constr_p
+        this.agents = Any[]   # lazily populated by init_agents!(::ArrowDebreuMarket)
 
         # indirect utility (price-space) closures
         this.f = (p, i) -> begin
@@ -239,5 +243,8 @@ end
 Base.copy(z::ArrowDebreuMarket{T}) where {T} = begin
     this = ArrowDebreuMarket(z.m, z.n)
     copy_fields(this, z)
+    # Drop any copied AgentViews: they hold views into `z`'s arrays, not
+    # `this`'s. Re-initialized lazily by play!/init_agents! against `this`.
+    this.agents = Any[]
     return this
 end

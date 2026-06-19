@@ -98,10 +98,21 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     # (it is NOT in _control); read here only to gate the weight computation.
     sample_size = Int(get(kwargs, :sample_size, 0))
     sample_hard = get(kwargs, :sample_hard, false) === true
+    # Per-iteration table cadence (--interval-logging): print the regular iter row
+    # every `log_interval` iters; convergence / termination rows always print.
+    log_interval = Int(get(kwargs, :log_interval, 1))
 
     K = length(Ξ_train)
     n = length(Ξ_train[1][1])
     has_test = !isnothing(Ξ_test)
+    # Optional per-iter surrogate-equilibrium excess (opt-in; OFF by default).
+    # Solving the AD surrogate's equilibrium (potred) per interval is costly,
+    # so this only runs when --interval-eval-excess N>0 and a CES (FisherMarket)
+    # ground truth is available. wealth_fn carries the GT wealth model.
+    f_real = get(kwargs, :f_real, nothing)
+    wealth_fn = get(kwargs, :wealth_fn, nothing)
+    interval_eval_excess = Int(get(kwargs, :interval_eval_excess, 0))
+    has_excess = !isnothing(f_real) && (f_real isa FisherMarket) && interval_eval_excess > 0
 
     # Loop/master control keys consumed here; everything else (per-class
     # oracle knobs like ces_sigma_lower/upper, linear M/mip_*, AND
@@ -113,9 +124,9 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     # whose cost is super-linear in K.
     _control = (:classes, :max_iters, :tol_obj, :tol_rc, :tol_delta, :timelimit,
         :drop, :interval_dropping, :interval_eval_test, :interval_eval_excess,
-        :f_real, :seed, :redist_use_nlp, :redist_nonh_w, :tol_stage_2,
+        :f_real, :wealth_fn, :seed, :redist_use_nlp, :redist_nonh_w, :tol_stage_2,
         :initial_cands, :initial_γ_ref, :initial_fa, :initial_masks,
-        :ad_endow_mode, :ad_mask_size, :ad_delta, :sample_hard)
+        :ad_endow_mode, :ad_mask_size, :ad_delta, :sample_hard, :log_interval)
     oracle_kw = Dict{Symbol,Any}(k => v for (k, v) in kwargs if !(k in _control))
 
     # Warm restart (phased schedules, run_plc_phased.jl): resume from the
@@ -162,6 +173,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     )
 
     _t0 = time()
+    reset_cg_timers!()   # per-android separation + redistribution accumulators
     if verbose
         print_banner(AD_TABLE, BANNER_TITLE)
         print_config("method", "cg (Arrow–Debreu)")
@@ -174,7 +186,7 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         print_config("K (training samples)", K)
         print_config("n (goods)", n)
         sample_size > 0 && print_config("mini-batch", sample_hard ?
-            "$(sample_size), residual-weighted (--sample-hard)" : "$(sample_size), uniform")
+                                                      "$(sample_size), residual-weighted (--sample-hard)" : "$(sample_size), uniform")
         print_config("max_iters", max_iters)
         print_config("timelimit (s)", @sprintf("%g", Float64(timelimit)))
         print_config("tol_obj", isnothing(tol_obj) ? "off" : @sprintf("%g", tol_obj))
@@ -199,10 +211,30 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         end
         _remaining = isfinite(timelimit) ? max(1.0, timelimit - (time() - _t0)) : nothing
 
-        B, s_slack, model_primal, balance, supply, δ_val = solve_wealth_redist_primal_ad(
+        B, s_slack, model_primal, balance, supply, δ_val = @time_redist solve_wealth_redist_primal_ad(
             Ξ_train, γ_ref[]; masks=masks, delta=ad_delta,
-            verbose=(iter == 1) && verbose, timelimit=_remaining,
+            verbose=false, timelimit=_remaining,
             cache=master_cache)
+        # Master produced no primal point (rare now that the solve is not time-
+        # limited: barrier numerical failure / infeasibility). Fall back to the
+        # last successfully solved surrogate: the column appended at the end of
+        # the previous iteration is the only change since that solve, so drop it
+        # and stop. On the very first solve there is nothing to fall back to.
+        if isnothing(B)
+            stat = termination_status(model_primal)
+            iter == 1 && error("AD master returned no solution on the first solve " *
+                               "(status: $stat); no surrogate to fall back to.")
+            verbose && print_continuation(AD_TABLE, @sprintf(
+                "master returned no solution (status %s); rolling back the last column, keeping the iter-%d surrogate",
+                stat, iter - 1))
+            if size(γ_ref[], 1) > 1
+                γ_ref[] = γ_ref[][1:end-1, :, :]
+                pop!(cands)
+                pop!(masks)
+            end
+            master_cache[] = nothing   # cached b-var ↔ atom mapping is now stale
+            break
+        end
         primal_obj = objective_value(model_primal) / K
         u, ν = extract_duals_ad(model_primal, balance, supply, K, n)
         # Pricing scan priority: goods with the largest master residual
@@ -237,9 +269,20 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         end
 
         te = has_test ? evaluate_test_error_ad(cands, B, Ξ_test; delta=δ_val) : NaN
+        # Surrogate-equilibrium excess: NaN unless per-iter validation is opted in.
+        ex = NaN
+        if has_excess && length(cands) > 0 && (iter % interval_eval_excess == 0)
+            try
+                fa_iter = ad_market_from_atoms(cands, B)
+                v = validate_surrogate(fa_iter, f_real; wealth_fn=wealth_fn, verbose=false)
+                ex = v.excess_surrogate_linf
+            catch err
+                @warn "[adcg iter $iter] AD validate_surrogate failed" err
+            end
+        end
         push!(history[:primal_obj], primal_obj)
         push!(history[:test_err], te)
-        push!(history[:excess], NaN)        # surrogate-equilibrium excess not wired for AD
+        push!(history[:excess], ex)
         push!(history[:num_agents], length(cands))
         push!(history[:delta], δ_val)
 
@@ -305,13 +348,31 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
         # Endowment mask of the new atom: always contains the winning good
         # (so the atom can serve the cut it violates), padded per the mode.
         push!(masks, make_ad_mask(ad_endow_mode, n, best.good; mask_size=ad_mask_size))
-        _log_row(rc_val, class_str)
+        # throttled by --interval-logging; convergence rows above always print.
+        (log_interval <= 1 || iter % log_interval == 0) && _log_row(rc_val, class_str)
     end
 
     # Final master solve with all columns, for the returned B / test error,
     # then a final prune so the returned surrogate is minimal.
-    B, _, _, _, _, δ_final = solve_wealth_redist_primal_ad(Ξ_train, γ_ref[]; masks=masks,
-        delta=ad_delta, verbose=false, cache=master_cache)
+    B, _, _, model_final, _, δ_final = @time_redist solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
+        masks=masks, delta=ad_delta, verbose=false, cache=master_cache)
+    # The final solve is the first to see the column added in the last loop
+    # iteration (the in-loop break paths solve before adding). If it yields no
+    # point, drop that column and re-solve the last known-good master.
+    if isnothing(B)
+        @warn "final AD master solve returned no solution (status: " *
+              "$(termination_status(model_final))); dropping the last column and re-solving"
+        if size(γ_ref[], 1) > 1
+            γ_ref[] = γ_ref[][1:end-1, :, :]
+            pop!(cands)
+            pop!(masks)
+            master_cache[] = nothing
+        end
+        B, _, _, _, _, δ_final = @time_redist solve_wealth_redist_primal_ad(Ξ_train, γ_ref[];
+            masks=masks, delta=ad_delta, verbose=false, cache=master_cache)
+        isnothing(B) && error("AD master could not produce a solution even after " *
+                              "dropping the last column; cannot return a surrogate.")
+    end
     if drop
         ndrop, keep = drop_zero_atoms_ad(cands, γ_ref, B)
         if ndrop > 0
@@ -343,5 +404,6 @@ function run_ad_tracked(kwargs::Dict, Ξ_train, Ξ_test=nothing; verbosity::Int=
     # The fitted surrogate is a first-class ArrowDebreuMarket: atoms as CES
     # (c, ρ) columns, the master's endowments B as the market's b.
     fa = ad_market_from_atoms(cands, B)
+    print_cg_timing_summary()
     return fa, γ_ref, history
 end

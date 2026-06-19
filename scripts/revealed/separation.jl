@@ -285,7 +285,7 @@ function solve_separation(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     best = nothing
     best_rc = T(-Inf)
     for class in classes
-        cand = solve_separation_class(
+        cand = @time_sep class solve_separation_class(
             class, Ξ, u;
             nonh_w=nonh_w, verbose=verbose, kwargs...
         )
@@ -339,9 +339,9 @@ function solve_separation_multicut(
 ) where T
     K = length(Ξ)
     n = length(Ξ[1][1])
-    ces_results = (:ces in classes) ? solve_separation_inversion_ces(Ξ, u; kwargs...) : nothing
-    lin_results = (:linear in classes) ? solve_separation_inversion_linear(Ξ, u) : nothing
-    leon_results = (:leontief in classes) ? solve_separation_inversion_leontief(Ξ, u) : nothing
+    ces_results = (:ces in classes) ? (@time_sep :ces solve_separation_inversion_ces(Ξ, u; kwargs...)) : nothing
+    lin_results = (:linear in classes) ? (@time_sep :linear solve_separation_inversion_linear(Ξ, u)) : nothing
+    leon_results = (:leontief in classes) ? (@time_sep :leontief solve_separation_inversion_leontief(Ξ, u)) : nothing
 
     # Per-sample winner across all inversion-capable classes. We carry a
     # class-specific `params::NamedTuple` so the runner can pass it

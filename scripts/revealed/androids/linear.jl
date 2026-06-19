@@ -53,15 +53,15 @@ end
 """
     register_cli_linear!(s::ArgParseSettings)
 
-Add the "Separation: Linear" arg group (`--linear-separation-indicator`).
+Add the "Separation: Linear" arg group (`--sep-linear-separation-indicator`, `--sep-linear-mip-relgap`).
 """
 function register_cli_linear!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: Linear")
     @add_arg_table! s begin
-        "--linear-separation-indicator"
+        "--sep-linear-separation-indicator"
         help = "Linear separation MILP: use Gurobi indicator constraints instead of the default big-M formulation. Slower on dense u (more per-node overhead), but tighter LP relaxation on sparse data."
         action = :store_true
-        "--linear-mip-relgap"
+        "--sep-linear-mip-relgap"
         help = "Gurobi `MIPGap` for the linear-separation MILP (relative optimality gap). Negative ⇒ leave the solver default (`solve_separation_linear`'s `mip_relgap` default applies)."
         arg_type = Float64
         default = -1.0
@@ -75,11 +75,11 @@ end
 Forward linear-separation CLI values into the runner kwargs.
 """
 function apply_cli_linear!(local_extra::Dict, cli)
-    if cli["linear_separation_indicator"]
+    if cli["sep_linear_separation_indicator"]
         local_extra[:use_indicators] = true
     end
-    if cli["linear_mip_relgap"] >= 0
-        local_extra[:mip_relgap] = cli["linear_mip_relgap"]
+    if cli["sep_linear_mip_relgap"] >= 0
+        local_extra[:mip_relgap] = cli["sep_linear_mip_relgap"]
     end
     return local_extra
 end

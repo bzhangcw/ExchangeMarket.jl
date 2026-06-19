@@ -114,6 +114,12 @@ end
 """Compute utility u(xᵢ) for this agent."""
 @inline utility(a::AgentView) = utility(a.atype, a.c, a.x)
 
+"""Compute log-utility log u(xᵢ), numerically stable at ρ ≈ 0 for CES."""
+@inline logutility(a::AgentView) = logutility(a.atype, a.c, a.x)
+# Generic fallback: log of the utility level. CES / Linear override this with a
+# form that avoids the s^{1/ρ} overflow (see response_ces.jl).
+@inline logutility(at::AgentType, c, x) = slog(utility(at, c, x))
+
 # -----------------------------------------------------------------------
 # Initialize agents vector in market
 # -----------------------------------------------------------------------

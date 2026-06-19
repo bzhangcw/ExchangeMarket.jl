@@ -96,7 +96,7 @@ let nce = count(t -> t[1] === :ces && isfinite(fa.storage.ces.σ[t[2]]) && fa.st
     @info "surrogate curvature" smooth_ces_androids = nce total_androids = fa.m
     nce == 0 && @warn "Surrogate has NO smooth (finite-σ CES) androids: it is piecewise-linear, " *
                       "so its Hessian is ~0 and the quasi-Newton step carries no curvature. " *
-                      "Re-fit with `--classes ces` (optionally `--ces-sigma-upper`) for a curved surrogate."
+                      "Re-fit with `--classes ces` (optionally `--sep-ces-sigma-upper`) for a curved surrogate."
 end
 
 # -----------------------------------------------------------------------

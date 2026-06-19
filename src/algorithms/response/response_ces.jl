@@ -21,6 +21,19 @@ import MathOptInterface as MOI
     return spow(s, 1.0 / at.ρ)
 end
 
+# Numerically stable log-utility. The level u = (Σ_j c_j x_j^{ρ})^{1/ρ} overflows
+# to Inf (or underflows to 0) for ρ ≈ 0 whenever the inner sum s ≠ 1, since
+# s^{1/ρ} blows up; `slog(utility(...))` then yields ±Inf. Take the log *before*
+# the 1/ρ power instead — log u = log(s)/ρ — which stays finite for all ρ ≠ 0 and
+# matches `utility` exactly away from the singularity.
+@inline function logutility(at::CESAgent, c, x)
+    s = 0.0
+    foreach_nz(c) do j, cj
+        s += cj * spow(x[j], at.ρ)
+    end
+    return s > 0.0 ? slog(s) / at.ρ : 0.0
+end
+
 # --------------------------------------------------------------------------
 # CES closed-form demand: x_j = w c_j^(1+σ) p_j^(-σ-1) / Σ_k c_k^(1+σ) p_k^(-σ)
 # --------------------------------------------------------------------------

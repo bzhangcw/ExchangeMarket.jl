@@ -40,6 +40,15 @@ function validate(market::Market, alg)
     println(__default_sep)
     _excess = (sum(market.x; dims=2)[:] - market.q) ./ maximum(market.q)
     @printf(" :(normalized) market excess: [%.4e, %.4e]\n", minimum(_excess), maximum(_excess))
-    @printf(" :            social welfare:  %.8e\n", (slog.(market.val_u))' * market.w)
+    # Weighted Nash social welfare Σ_i w_i log u_i. The stored CES level u_i
+    # = (Σ_j c_ij x_ij^{ρ})^{1/ρ} overflows to Inf for ρ ≈ 0, so score CES
+    # agents through the stable `logutility` (log u = log(s)/ρ); other agent
+    # types keep using the stored level via `slog`.
+    _welfare = 0.0
+    for i in 1:m
+        a = market.agents[i]
+        _welfare += w[i] * (a.atype isa CESAgent ? logutility(a) : slog(market.val_u[i]))
+    end
+    @printf(" :            social welfare:  %.8e\n", _welfare)
     println(__default_sep)
 end

@@ -35,7 +35,7 @@ using ExchangeMarket
 # -----------------------------------------------------------------------
 function solve_ces_equilibrium(
     fa::FisherMarket;
-    maxiter::Int=20,
+    maxiter::Int=200,
     maxtime::Float64=120.0,
     tol::Float64=1e-12,
     p₀::Union{Vector{Float64},Nothing}=nothing,
@@ -70,7 +70,7 @@ function solve_ces_equilibrium(
             optimizer=CESAnalytic,
             option_mu=:normal,
             option_step=:affinesc,
-            linsys=:DRq,
+            linsys=:krylov,
         )
         res = _run(hb, maxiter, maxtime, tol)
         (all(isfinite, res.p) && sum(res.p) > 0) && return res
@@ -209,8 +209,10 @@ function ces_welfare_at(fa::FisherMarket, w::AbstractVector, x::Vector{<:Abstrac
         @inbounds for j in eachindex(x[i])
             s += c_i[j] * spow(x[i][j], ρ)
         end
-        u_i = spow(s, 1.0 / ρ)
-        W += w[i] * (u_i > 0.0 ? log(u_i) : 0.0)
+        # log u_i = log(s^(1/ρ)) = log(s)/ρ, taking the log *before* the 1/ρ
+        # power so small ρ never forms the overflowing intermediate s^(1/ρ).
+        log_u_i = s > 0.0 ? log(s) / ρ : -Inf
+        W += w[i] * (isfinite(log_u_i) ? log_u_i : 0.0)
     end
     return W
 end

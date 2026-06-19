@@ -74,7 +74,11 @@ if cli["sample_size"] <= 0 && any(get(v.cli, "sample_hard", false) === true for 
 end
 
 # One dataset at the master seed.
-rd = build_rep_data(cfg, 1, cfg.seed)
+@printf("[dataset] building dataset (n=%d, m=%d, K=%d, seed=%d) ...\n", cfg.n, cfg.m, cfg.K, cfg.seed)
+flush(stdout)
+_t_ds = @elapsed (rd = build_rep_data(cfg, 1, cfg.seed))
+@printf("[dataset] done in %.2f s\n", _t_ds)
+flush(stdout)
 
 results = Vector{NamedTuple}(undef, length(variants))
 
@@ -312,6 +316,7 @@ agg = Dict{Symbol,NamedTuple}(r.variant.sym => _ctx_entry(r) for r in results)
 style = Dict{Symbol,Any}(
     r.variant.sym => (color=r.variant.color, marker=r.variant.marker, label=r.variant.plotlabel)
     for r in results)
+
 plot_ctx = (
     agg=agg,
     rep=1,

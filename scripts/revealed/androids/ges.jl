@@ -33,27 +33,27 @@ const _GES_Y_UPPER_DEFAULT = 10.0
 """
     register_cli_ges!(s::ArgParseSettings)
 
-Adds the "Separation: GES" arg group: `--ges-sigma-lower`, `--ges-sigma-upper`,
-`--ges-y-lower`, `--ges-y-upper`. These set the GES NLP search box; their
-defaults mirror CES (`--ces-sigma-upper`, `LOWER/UPPER_Y_BOUND`) except the
+Adds the "Separation: GES" arg group: `--sep-ges-sigma-lower`, `--sep-ges-sigma-upper`,
+`--sep-ges-y-lower`, `--sep-ges-y-upper`. These set the GES NLP search box; their
+defaults mirror CES (`--sep-ces-sigma-upper`, `LOWER/UPPER_Y_BOUND`) except the
 σ lower bound is strictly positive (GES requires σ > 0).
 """
 function register_cli_ges!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: GES")
     @add_arg_table! s begin
-        "--ges-sigma-lower"
+        "--sep-ges-sigma-lower"
         help = "Strict-positive lower bound on σ_j for GES (polynomial-utility concavity needs σ > 0). Default $(_GES_SIGMA_LOWER_DEFAULT)."
         arg_type = Float64
         default = _GES_SIGMA_LOWER_DEFAULT
-        "--ges-sigma-upper"
+        "--sep-ges-sigma-upper"
         help = "Upper bound on σ_j (CES-matching default $(_GES_SIGMA_UPPER_DEFAULT)). Lower (e.g. 5) keeps the recovered c_j = exp(y_j/(σ_j+1)) numerically tame."
         arg_type = Float64
         default = _GES_SIGMA_UPPER_DEFAULT
-        "--ges-y-lower"
+        "--sep-ges-y-lower"
         help = "Lower bound on y_j (CES-matching default $(_GES_Y_LOWER_DEFAULT))."
         arg_type = Float64
         default = _GES_Y_LOWER_DEFAULT
-        "--ges-y-upper"
+        "--sep-ges-y-upper"
         help = "Upper bound on y_j (CES-matching default $(_GES_Y_UPPER_DEFAULT))."
         arg_type = Float64
         default = _GES_Y_UPPER_DEFAULT
@@ -67,10 +67,10 @@ end
 Forward GES NLP bounds into the runner kwargs.
 """
 function apply_cli_ges!(local_extra::Dict, cli)
-    local_extra[:ges_sigma_lower] = cli["ges_sigma_lower"]
-    local_extra[:ges_sigma_upper] = cli["ges_sigma_upper"]
-    local_extra[:ges_y_lower] = cli["ges_y_lower"]
-    local_extra[:ges_y_upper] = cli["ges_y_upper"]
+    local_extra[:ges_sigma_lower] = cli["sep_ges_sigma_lower"]
+    local_extra[:ges_sigma_upper] = cli["sep_ges_sigma_upper"]
+    local_extra[:ges_y_lower] = cli["sep_ges_y_lower"]
+    local_extra[:ges_y_upper] = cli["sep_ges_y_upper"]
     return local_extra
 end
 

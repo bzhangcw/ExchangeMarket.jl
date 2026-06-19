@@ -507,10 +507,10 @@ function parse_args_for_test_real(argv=ARGS)
     # class owns its own knobs (mirrors register_cli_cpm! / _accpm!).
     # Shared knobs first, then per-class.
     register_cli_separation!(s)   # --sample-size
-    register_cli_ces!(s)          # --ces-sigma-lower, --ces-sigma-upper
-    register_cli_ges!(s)          # --ges-sigma-{lower,upper}, --ges-y-{lower,upper}
-    register_cli_linear!(s)       # --linear-separation-indicator
-    register_cli_nn!(s)           # --nn-hidden, --nn-iters
+    register_cli_ces!(s)          # --sep-ces-sigma-lower, --sep-ces-sigma-upper
+    register_cli_ges!(s)          # --sep-ges-sigma-{lower,upper}, --sep-ges-y-{lower,upper}
+    register_cli_linear!(s)       # --sep-linear-separation-indicator
+    register_cli_nn!(s)           # --sep-nn-hidden, --sep-nn-iters
 
     # ---- (5) Stopping ------------------------------------------------
     add_arg_group!(s, "Stopping")

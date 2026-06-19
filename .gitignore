@@ -1,6 +1,10 @@
 # extras
 results
 logs
+
+# Julia Manifest.toml
+Manifest.toml
+
 # doc
 *.xdv
 *.toc

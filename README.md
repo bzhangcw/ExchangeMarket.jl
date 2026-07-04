@@ -8,9 +8,9 @@ Start a Julia REPL with the project environment
 ```zsh
 julia -i --project=./scripts
 ```
-then dev source package
+then run the setup scripts.
 ```julia
-] dev .
+] include("./scripts/setup.jl")
 ```
 You are ready to go.
 

@@ -10,6 +10,7 @@
 # -----------------------------------------------------------------------
 
 using LinearAlgebra, SparseArrays
+using JuMP
 using Optim
 using LogExpFunctions: logsumexp
 using ArgParse
@@ -32,20 +33,39 @@ const _CES_SIGMA_UPPER_DEFAULT = 20.0
 """
     register_cli_ces!(s::ArgParseSettings)
 
-Add the "Separation: CES" arg group: `--sep-ces-sigma-lower`, `--sep-ces-sigma-upper`.
-These tune the σ search range for the free-σ LBFGS step
-(`solve_separation_lbfgs_ces`) and the σ grid for per-sample inversion
+Add the "Separation: CES" arg group, including `--sep-ces-solver lbfgs|gurobi`.
+The σ bounds tune the joint (y, σ) LBFGS or Gurobi solve
+and the σ grid for per-sample inversion
 (`solve_separation_inversion_ces`).
 """
 function register_cli_ces!(s::ArgParseSettings)
     add_arg_group!(s, "Separation: CES")
     @add_arg_table! s begin
+        "--sep-ces-solver"
+        help = "Single-cut CES backend: lbfgs (default, local) or gurobi (global nonlinear optimization with variable σ; requires Gurobi >= 12). Multicut inversion is unchanged."
+        arg_type = String
+        range_tester = x -> x in ("lbfgs", "gurobi")
+        "--sep-ces-gurobi-timelimit"
+        help = "Maximum seconds per Gurobi CES call (default 60), also capped by the runner's remaining time."
+        arg_type = Float64
+        "--sep-ces-gurobi-absgap"
+        help = "Gurobi absolute optimality-gap tolerance for the SUM separation objective (default 1e-6)."
+        arg_type = Float64
+        "--sep-ces-gurobi-relgap"
+        help = "Gurobi relative optimality-gap tolerance for CES separation (default 1e-4)."
+        arg_type = Float64
+        "--sep-ces-gurobi-y-lower"
+        help = "Lower bound for every y coordinate in the Gurobi CES oracle (default -100). Tighter boxes can substantially speed up certification."
+        arg_type = Float64
+        "--sep-ces-gurobi-y-upper"
+        help = "Upper bound for every y coordinate in the Gurobi CES oracle (default 100)."
+        arg_type = Float64
         "--sep-ces-sigma-lower"
-        help = "Lower bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); CES requires σ > -1, so the LBFGS box floors this at -0.98 (the (c, ρ) recovery diverges at -1). Raise (e.g. to 0) to restrict to gross substitutes."
+        help = "Lower bound on σ for the LBFGS/Gurobi box and inversion σ-grid. Default $(_CES_SIGMA_LOWER_DEFAULT); joint solvers floor this at -0.98 because (c, ρ) recovery diverges at -1. Raise to 0 to restrict to gross substitutes."
         arg_type = Float64
         default = _CES_SIGMA_LOWER_DEFAULT
         "--sep-ces-sigma-upper"
-        help = "Upper bound on σ for both the LBFGS box and the inversion σ-grid. Default $(_CES_SIGMA_UPPER_DEFAULT); raise for near-linear (σ → ∞) regimes."
+        help = "Upper bound on σ for the LBFGS/Gurobi box and inversion σ-grid. Default $(_CES_SIGMA_UPPER_DEFAULT); raise for near-linear (σ → ∞) regimes."
         arg_type = Float64
         default = _CES_SIGMA_UPPER_DEFAULT
     end
@@ -61,6 +81,13 @@ solve_separation_class threads down to the CES oracles.
 function apply_cli_ces!(local_extra::Dict, cli)
     local_extra[:ces_sigma_lower] = cli["sep_ces_sigma_lower"]
     local_extra[:ces_sigma_upper] = cli["sep_ces_sigma_upper"]
+    solver = get(cli, "sep_ces_solver", nothing)
+    isnothing(solver) || (local_extra[:ces_solver] = Symbol(solver))
+    for key in (:ces_gurobi_timelimit, :ces_gurobi_absgap,
+        :ces_gurobi_relgap, :ces_gurobi_y_lower, :ces_gurobi_y_upper)
+        val = get(cli, "sep_" * String(key), nothing)
+        isnothing(val) || (local_extra[key] = val)
+    end
     return local_extra
 end
 
@@ -77,6 +104,9 @@ function ces_config_summary(kwargs::Dict; is_multicut::Bool)
     hi = get(kwargs, :ces_sigma_upper, _CES_SIGMA_UPPER_DEFAULT)
     if is_multicut
         return @sprintf("Inversion (σ [%g, %g] × LBFGS refine)", lo, hi)
+    elseif Symbol(get(kwargs, :ces_solver, :lbfgs)) === :gurobi
+        return @sprintf("Gurobi joint (y, σ), σ ∈ [%g, %g], limit %gs",
+            max(lo, -0.98), hi, get(kwargs, :ces_gurobi_timelimit, 60.0))
     else
         return @sprintf("LBFGS (σ ∈ [%g, %g])", lo, hi)
     end
@@ -359,13 +389,178 @@ function solve_separation_lbfgs_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 end
 
 """
+    solve_separation_gurobi_ces(Ξ, u; ces_sigma_lower=-1.0,
+        ces_sigma_upper=20.0, ces_gurobi_timelimit=60.0, kwargs...)
+
+Globally optimize the box-constrained CES SEP jointly in `(y, σ)`, using
+Gurobi >= 12 through JuMP's nonlinear interface. Requires engine.jl's
+`gurobi_available` and `_gurobi_env` helpers. No integer variables or σ grid.
+
+For centered log prices ℓ, introduce a normalizer a[k] and log shares h[k,j]:
+    h[k,j] = y[j] - σ * ℓ[k,j] - a[k]
+    γ[k,j] = exp(h[k,j]),  sum(γ[k,:]) = 1.
+This is exactly softmax. Bounding h <= 0 avoids large positive exponentials;
+finite bounds follow from the full y and σ boxes. No additional gauge
+constraint is imposed, since pinning y[1]=0 would shrink the original box.
+
+Returns `(γ_new, params=(y, σ), obj, class=:ces, solver_info)`. `obj`,
+`solver_info.objective_bound`, and `absolute_gap` use the SUM over samples,
+not its average. Bounds concern only the supplied samples and parameter box,
+and are subject to solver numerical tolerances. Shares and the incumbent
+objective are recomputed from `(y, σ)` rather than taken from auxiliary γ.
+On a time limit without an incumbent, returns the feasible initial point
+with the available upper bound (or the analytical sum of row maxima).
+"""
+function solve_separation_gurobi_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
+    u::Matrix{T};
+    y_init::Union{Vector{T},Nothing}=nothing,
+    σ_init::Real=0.5,
+    ces_sigma_lower::Real=_CES_SIGMA_LOWER_DEFAULT,
+    ces_sigma_upper::Real=_CES_SIGMA_UPPER_DEFAULT,
+    ces_gurobi_y_lower::Real=LOWER_Y_BOUND,
+    ces_gurobi_y_upper::Real=UPPER_Y_BOUND,
+    ces_gurobi_timelimit::Real=60.0,
+    ces_gurobi_absgap::Real=1e-6,
+    ces_gurobi_relgap::Real=1e-4,
+    ces_gurobi_threads::Integer=0,
+    timelimit::Union{Real,Nothing}=nothing,
+    verbose::Bool=true,
+    kwargs...) where {T<:AbstractFloat}
+
+    started = time_ns()
+    K = length(Ξ)
+    K > 0 || throw(ArgumentError("CES separation needs at least one observation"))
+    n = length(Ξ[1][1])
+    n > 0 || throw(ArgumentError("CES separation needs at least one good"))
+    size(u) == (K, n) || throw(DimensionMismatch("u must have size ($K, $n)"))
+    all(isfinite, u) || throw(ArgumentError("CES weights must be finite"))
+    all(isfinite, (ces_sigma_lower, ces_sigma_upper,
+        ces_gurobi_y_lower, ces_gurobi_y_upper, σ_init)) ||
+        throw(ArgumentError("CES parameter bounds and σ_init must be finite"))
+    σlo, σhi = max(Float64(ces_sigma_lower), -0.98), Float64(ces_sigma_upper)
+    ylo, yhi = Float64(ces_gurobi_y_lower), Float64(ces_gurobi_y_upper)
+    σlo <= σhi || throw(ArgumentError("CES σ upper bound must be >= max(lower, -0.98)"))
+    ylo <= yhi || throw(ArgumentError("CES y lower bound must be <= upper bound"))
+    for (name, val) in ((:ces_gurobi_timelimit, ces_gurobi_timelimit),
+        (:timelimit, isnothing(timelimit) ? Inf : timelimit))
+        val >= 0 || throw(ArgumentError("$name must be nonnegative"))
+    end
+    for val in (ces_gurobi_absgap, ces_gurobi_relgap)
+        isfinite(val) && val >= 0 || throw(ArgumentError("CES gap tolerances must be finite and nonnegative"))
+    end
+    ces_gurobi_threads >= 0 || throw(ArgumentError("ces_gurobi_threads must be nonnegative"))
+    if !isnothing(y_init)
+        length(y_init) == n || throw(DimensionMismatch("y_init must have length $n"))
+        all(isfinite, y_init) || throw(ArgumentError("y_init must be finite"))
+    end
+    ℓ = Matrix{Float64}(undef, K, n)
+    for k in 1:K
+        p = Ξ[k][1]
+        length(p) == n || throw(DimensionMismatch("price vector $k must have length $n"))
+        all(x -> isfinite(x) && x > 0, p) ||
+            throw(ArgumentError("CES prices must be finite and strictly positive"))
+        lp = log.(Float64.(p))
+        ℓ[k, :] .= lp .- (minimum(lp) + (maximum(lp) - minimum(lp)) / 2)
+    end
+    # Affine logit bounds and monotonicity of logsumexp bound a[k].
+    zlo = ylo .+ min.(-σlo .* ℓ, -σhi .* ℓ)
+    zhi = yhi .+ max.(-σlo .* ℓ, -σhi .* ℓ)
+    alo = [logsumexp(zlo[k, :]) for k in 1:K]
+    ahi = [logsumexp(zhi[k, :]) for k in 1:K]
+    hlo = [zlo[k, j] - ahi[k] for k in 1:K, j in 1:n]
+    all(isfinite, hlo) && all(isfinite, alo) && all(isfinite, ahi) ||
+        throw(ArgumentError("CES parameter/price bounds exceed floating-point range"))
+
+    gurobi_available() || error("CES backend :gurobi requires an installed, licensed Gurobi >= 12")
+    # Both parallel variants and AD's threaded per-good pricing can call
+    # this oracle concurrently. Gurobi environments cannot be shared then.
+    threaded = Threads.nthreads() > 1 || parallel_variants()
+    env = threaded ? Gurobi.Env(Dict{String,Any}("OutputFlag" => 0)) : _gurobi_env()
+    md = Model(() -> Gurobi.Optimizer(env))
+    JuMP.MOI.supports_constraint(backend(md), JuMP.MOI.ScalarNonlinearFunction,
+        JuMP.MOI.EqualTo{Float64}) ||
+        error("CES backend :gurobi requires Gurobi >= 12 and nonlinear support in Gurobi.jl")
+    set_attribute(md, "OutputFlag", verbose ? 1 : 0)
+    set_attribute(md, "NonConvex", 2)
+    set_attribute(md, "MIPGapAbs", Float64(ces_gurobi_absgap))
+    set_attribute(md, "MIPGap", Float64(ces_gurobi_relgap))
+    set_attribute(md, "Threads", ces_gurobi_threads)
+    @variable(md, ylo <= y[1:n] <= yhi)
+    @variable(md, σlo <= σ <= σhi)
+    @variable(md, alo[k] <= a[k=1:K] <= ahi[k])
+    @variable(md, hlo[k, j] <= h[k=1:K, j=1:n] <= 0)
+    @variable(md, 0 <= γ[1:K, 1:n] <= 1)
+    @constraint(md, [k = 1:K, j = 1:n], h[k, j] == y[j] - σ * ℓ[k, j] - a[k])
+    @constraint(md, [k = 1:K, j = 1:n], γ[k, j] == exp(h[k, j]))
+    @constraint(md, [k = 1:K], sum(γ[k, j] for j in 1:n) == 1)
+    @objective(md, Max, sum(Float64(u[k, j]) * γ[k, j] for k in 1:K, j in 1:n))
+
+    y0 = clamp.(isnothing(y_init) ? zeros(T, n) : copy(y_init), T(ylo), T(yhi))
+    σ0 = T(clamp(σ_init, σlo, σhi))
+    γ0 = produce_gamma(Ξ, y0, σ0)
+    obj0 = sum(u .* γ0)
+    set_start_value.(y, y0)
+    set_start_value(σ, σ0)
+    for k in 1:K
+        z0 = y0 .- σ0 .* ℓ[k, :]
+        a0 = logsumexp(z0)
+        set_start_value(a[k], a0)
+        for j in 1:n
+            set_start_value(h[k, j], z0[j] - a0)
+            set_start_value(γ[k, j], γ0[k, j])
+        end
+    end
+    budget = min(Float64(ces_gurobi_timelimit),
+        isnothing(timelimit) ? Inf : Float64(timelimit))
+    if isfinite(budget)
+        set_time_limit_sec(md, max(0.0, budget - (time_ns() - started) / 1e9))
+    end
+    JuMP.optimize!(md)
+    status, primal = termination_status(md), primal_status(md)
+    incumbent = has_values(md)
+    y_opt, σ_opt, γ_new, obj = y0, σ0, γ0, obj0
+    if incumbent
+        # Project solver bound-tolerance violations back into the exact box.
+        y_try = T.(clamp.(value.(y), ylo, yhi))
+        σ_try = T(clamp(value(σ), σlo, σhi))
+        if all(isfinite, y_try) && isfinite(σ_try)
+            γ_try = produce_gamma(Ξ, y_try, σ_try)
+            obj_try = sum(u .* γ_try)
+            if obj_try >= obj
+                y_opt, σ_opt, γ_new, obj = y_try, σ_try, γ_try, obj_try
+            end
+        end
+    end
+    trivial_bound = sum(maximum(u[k, :]) for k in 1:K)
+    raw_bound = try
+        objective_bound(md)
+    catch err
+        # A zero/very short time limit can end before Gurobi has a bound.
+        err isa JuMP.MOI.GetAttributeNotAllowed{JuMP.MOI.ObjectiveBound} || rethrow()
+        Inf
+    end
+    bound = isfinite(raw_bound) ? min(trivial_bound, raw_bound) : trivial_bound
+    if bound < obj - 1e-6 * max(1.0, abs(obj))
+        @warn "Gurobi CES bound is below the recomputed feasible objective; using the analytical upper bound" bound obj
+        bound = trivial_bound
+    end
+    bound = max(Float64(obj), Float64(bound))  # numerical tolerances
+    info = (solver=:gurobi, termination_status=status, primal_status=primal,
+        has_incumbent=incumbent, objective_bound=bound,
+        absolute_gap=bound - obj, solve_time=solve_time(md))
+    verbose && println("CES Gurobi separation: σ=$σ_opt, obj=$obj, upper=$bound, status=$status")
+    return (γ_new=γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces,
+        solver_info=info)
+end
+
+"""
     solve_separation_fix_σ_ces(Ξ, u, σ; y_init=nothing, verbose=false)
 
 Solve the separation problem with fixed σ:
     max_{y ∈ ℝ^n} Σ_k u_k^T softmax(y - σ log p_k)
 
-With σ fixed this is concave in y (softmax is log-concave, and u_k ≥ 0),
-so any local maximum is global.
+Fixing σ does not make this objective concave. This LBFGS routine returns
+a local solution, without a global optimality certificate.
 
 Returns: y, σ, γ_new, obj_val
 """
@@ -403,10 +598,8 @@ function solve_separation_fix_σ_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
 
     y0 = isnothing(y_init) ? zeros(T, n) : copy(y_init)
 
-    # Unconstrained LBFGS. The objective is concave in y but only up to
-    # the softmax shift, so the optimum is a level set rather than a point.
-    # LBFGS starting at y0 converges in objective value; the gauge is fixed
-    # downstream by add_column_to_market!.
+    # Unconstrained local LBFGS; the softmax shift leaves the objective
+    # unchanged. The gauge is fixed downstream by add_column_to_market!.
     _tlim_opts = isnothing(timelimit) || timelimit <= 0 ? NamedTuple() :
                  (time_limit=Float64(timelimit),)
     result = optimize(
@@ -549,19 +742,27 @@ end
 """
     solve_separation_ces(Ξ, u; verbose=false, kwargs...)
 
-Run the LP-warmstart + LBFGS CES separation pipeline and return a NamedTuple
+Run the selected CES backend (`ces_solver=:lbfgs` or `:gurobi`) and return a NamedTuple
 suitable for the per-class separation oracle:
     (γ_new, params=(y=y_opt, σ=σ_opt), obj=obj, class=:ces).
 
-Same procedure as the previous cg_single path in run_method_tracked:
+The default LBFGS procedure is:
 1. Warm-start (y, σ) via the dual-LP fit (solve_separation_dual_lp_ces).
 2. Refine via the non-convex LBFGS objective (solve_separation_lbfgs_ces).
 """
 function solve_separation_ces(Ξ::Vector{Tuple{Vector{T},Vector{T}}},
     u::Matrix{T};
+    ces_solver::Union{Symbol,AbstractString}=:lbfgs,
     verbose::Bool=false,
     timelimit::Union{Real,Nothing}=nothing,
     kwargs...) where T
+    solver = Symbol(ces_solver)
+    if solver === :gurobi
+        return solve_separation_gurobi_ces(Ξ, u;
+            timelimit=timelimit, verbose=verbose, kwargs...)
+    elseif solver !== :lbfgs
+        throw(ArgumentError("Unknown CES backend $ces_solver; use :lbfgs or :gurobi"))
+    end
     y_lp, σ_lp, _, _ = solve_separation_dual_lp_ces(
         Ξ, u; verbose=verbose
     )

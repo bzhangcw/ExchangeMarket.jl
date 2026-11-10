@@ -35,6 +35,14 @@ ws=linear_response_workspace(cg,wg)
     @test linear_arrays(cg,wg)[1] === cg
     @test_throws ArgumentError linear_validate_solver(cg,:cholesky)
 end
+@testset "GPU CSR structure satisfies native IC requirements" begin
+    A, indices = linear_gpu_pattern(cg)
+    rp, ci = Array(A.rowPtr), Array(A.colVal)
+    @test first(rp) == 1 && last(rp) == length(ci) + 1
+    @test all(issorted(ci[rp[i]:rp[i+1]-1]) for i in 1:n)
+    @test all(i in ci[rp[i]:rp[i+1]-1] for i in 1:n)
+    @test Array(indices) == [i + (ci[k]-1)*n for i in 1:n for k in rp[i]:rp[i+1]-1]
+end
 @testset "GPU PR agrees with CPU at fixed checkpoints" begin
     for k in (1,5,20)
         a=run_pr(c,w;stop=z->false,maxiter=k)
@@ -49,6 +57,7 @@ end
     common=(tol=1e-4,σ_min=1e-4*minimum(w)/n,show_trace=false,maxiter=200,stop=stop)
     cpu=linear_perturbed_ipm((;c,w);common...)
     for solver in (:cudss,:pcg_ic)
+        println("Testing native GPU solver: ", solver); flush(stdout)
         gpu=linear_perturbed_ipm((c=cg,w=wg);common...,linear_solver=solver)
         @test gpu.status == :converged
         @test gpu.st.x isa CUDA.CuArray

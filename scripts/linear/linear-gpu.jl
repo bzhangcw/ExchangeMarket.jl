@@ -70,7 +70,8 @@ function linear_gpu_pattern(c)
     # Preserve structural zeros even when numerical values later underflow.
     rows = reshape(CUDA.CuArray(Int32.(1:n)), :, 1)
     pattern .= Float64.((pattern .> 0) .& (rows .>= rows'))
-    A = LinearCUSPARSE.CuSparseMatrixCSR(pattern)
+    # Legacy cuSPARSE IC(0) requires sorted column indices within each row.
+    A = LinearCUSPARSE.CuSparseMatrixCSR(pattern; sorted=true)
     indices = similar(A.colVal)
     CUDA.@cuda threads=256 blocks=cld(n,256) linear_csr_map_kernel!(indices, A.rowPtr, A.colVal, n)
     A, indices

@@ -2,7 +2,7 @@ using LinearAlgebra, Printf
 include("linear-perturbed-linsys.jl")
 
 """
-    linear_equilibrium_metrics(c, w, p, x)
+    linear_equilibrium_metrics(c, w, p, x; demand=nothing)
 
 Common accuracy measures for a unit-supply linear Fisher market: maximum
 market-clearing error, relative budget error, and relative utility loss against
@@ -10,15 +10,22 @@ an exact linear best response at the current prices. `error` is their maximum.
 Also returns total_spending, total_budget, and total_budget_error for reporting.
 These aggregate fields do not change the individual-budget stopping metric.
 No allocation or price normalization is applied when measuring these errors.
+Pass a reusable length-n `demand` vector to avoid allocating row-sum storage.
 """
-function linear_equilibrium_metrics(c, w, p, x)
+function linear_equilibrium_metrics(c, w, p, x; demand=nothing)
     n, m = size(c)
     total_budget = sum(w)
     if !all(isfinite, p) || !all(>(0), p) || !all(isfinite, x) || any(<(0), x)
         return (mc=Inf, budget=Inf, regret=Inf, error=Inf,
             total_spending=Inf, total_budget=total_budget, total_budget_error=Inf)
     end
-    mc = maximum(abs, vec(sum(x; dims=2)) .- 1)
+    if demand === nothing
+        demand = vec(sum(x; dims=2))
+    else
+        length(demand) == n || throw(DimensionMismatch("demand must have length n"))
+        sum!(demand, x)
+    end
+    mc = maximum(v -> abs(v - 1), demand)
     budget = 0.0
     regret = 0.0
     total_spending = 0.0

@@ -93,8 +93,10 @@ On turing1, from the existing repository root:
 Default prefixes are `2000,5000,20000,50000,200000,500000,1000000,all`.
 Use `--users 2000 --outdir scripts/linear/jd_gpu_smoke` for a first case.
 Other controls include `--methods pr,perturbed,pcg`, `--repeats 1`,
-`--time-limit 7200`, `--maxiter-pr 1000000`, `--maxiter-ipm 200`,
+`--time-limit 7200`, `--maxiter-pr 1000000`, `--maxiter-ipm 100000`,
 `--linear-rtol 1e-9`, and `--linear-maxiter 0` (automatic: 5 × goods).
+The larger IPM update cap lets the paper's wall-time limit govern difficult
+real-data instances instead of the synthetic benchmark's 200-update cap.
 IPM uses `sigma_min = tol * minimum(w) / goods`, as in the synthetic tests.
 
 By default all methods stop on the paper's displayed relative KKT error,

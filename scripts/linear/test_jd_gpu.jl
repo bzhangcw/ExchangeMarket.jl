@@ -31,7 +31,7 @@ function options(args)
             default=1000000
         "--maxiter-ipm"
             arg_type=Int
-            default=200
+            default=100000
         "--linear-rtol"
             arg_type=Float64
             default=1e-9

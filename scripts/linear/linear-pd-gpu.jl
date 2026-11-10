@@ -169,7 +169,7 @@ function pd_residuals_gpu(st::PDStateGPU, kkt::KKTSystemGPU)
     μ = st.μ
     μ_a = max(μ * st.μ_scale, st.μ_a_min)
 
-    r1 = 1.0 .- dropdims(sum(st.x; dims=2); dims=2) .+ st.q
+    r1 = 1.0 .- dropdims(sum(st.x; dims=2); dims=2) .- st.q
     # r2[i] = -w[i]/λ[i] + dot(c[:,i], x[:,i])
     r2 = -w ./ st.λ .+ dropdims(sum(c .* st.x; dims=1); dims=1)
     # r3 = s + λ'.*c - p
@@ -771,6 +771,17 @@ end
 # -----------------------------------------------------------------------
 # Main solver
 # -----------------------------------------------------------------------
+"""
+    pd_ipm_gpu(f; device=identity, mode=:schur, monitor=nothing, ...)
+
+Batched PD-IPM; `device=identity, mode=:schur` uses CPU Cholesky.
+An optional `monitor(st, kkt)` returns a NamedTuple with a `converged::Bool`
+field and additional scalar diagnostics. These fields are recorded in `traj`;
+its convergence flag replaces both legacy stopping rules. This allows methods
+with different central paths to be compared at the same equilibrium accuracy.
+Trajectory times and `elapsed` include initialization. `factorizations` counts
+factorization attempts in `:schur` and `:aug` modes.
+"""
 function pd_ipm_gpu(
     f;
     μ₀=1.0,
@@ -781,8 +792,10 @@ function pd_ipm_gpu(
     μ_scale::Float64=1.0,
     μ_a_min::Float64=0.0,
     show_trace=true,
-    show_every=1
+    show_every=1,
+    monitor=nothing
 )
+    t_start = time()
     n, m = f.n, f.m
 
     _dev_str = device === identity ? "CPU" : "GPU"
@@ -817,9 +830,11 @@ function pd_ipm_gpu(
         println(_sep)
     end
 
-    _t0 = time()
+    _t0 = t_start
+    factorizations = 0
     status = :max_iter
     for k in 1:maxiter
+        mode in (:schur, :aug) && (factorizations += 1)
         nr = pd_newton_gpu!(st, kkt; mode=mode)
         res = nr.res
 
@@ -846,15 +861,21 @@ function pd_ipm_gpu(
                 nr.t_residuals, nr.t_update_kkt, nr.t_build, nr.t_solve, nr.t_backsub, nr.sub_iter)
         end
 
-        push!(traj, (k=k, μ=st.μ, nr1=nr1, nr2=nr2, nr3=nr3, nc1=nc1, nc2=nc2, α=α, t=_elapsed))
+        # Optional monitor supplies common external accuracy metrics and a stop flag.
+        # It overrides both legacy stopping tests, including the small-μ shortcut.
+        extra = monitor === nothing ? NamedTuple() : monitor(st, kkt)
+        _elapsed = time() - _t0  # Include the common diagnostics in trajectory time.
+        push!(traj, merge((k=k, μ=st.μ, nr1=nr1, nr2=nr2, nr3=nr3,
+            nc1=nc1, nc2=nc2, α=α, t=_elapsed,
+            t_build=nr.t_build, t_solve=nr.t_solve), extra))
 
-        if nr1 < tol && nr2 < √tol
+        if monitor === nothing ? (nr1 < tol && nr2 < √tol) : extra.converged
             show_trace && @printf("converged at k=%d, gap=%.2e\n", k, gap)
             status = :converged
             break
         end
 
-        if st.μ < tol * tol
+        if monitor === nothing && st.μ < tol * tol
             show_trace && @printf("converged (μ < tol²) at k=%d, μ=%.2e, gap=%.2e\n", k, st.μ, gap)
             status = :converged
             break
@@ -865,7 +886,8 @@ function pd_ipm_gpu(
         st.μ = (1 - α) * μ_new
     end
 
-    return (st=st, traj=traj, kkt=kkt, status=status)
+    return (st=st, traj=traj, kkt=kkt, status=status,
+        factorizations=factorizations, elapsed=time() - t_start)
 end
 
 # -----------------------------------------------------------------------

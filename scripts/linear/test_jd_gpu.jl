@@ -95,6 +95,28 @@ function metric_fields(z)
       total_spending=z.total_spending,total_budget=z.total_budget,total_budget_error=z.total_budget_error)
 end
 target(z,cfg)=(cfg["criterion"]=="paper" ? z.paper_error : z.error)<=cfg["tol"]*(1+1e-8)
+mutable struct JDStop
+    cfg::Dict{String,Any}
+    job::String
+    started::Float64
+    last_saved::Float64
+    calls::Int
+    last_metrics::Any
+    warming::Bool
+    gpu::String
+end
+function (monitor::JDStop)(z)
+    monitor.warming && return false
+    elapsed=time()-monitor.started;monitor.calls+=1;monitor.last_metrics=z
+    if elapsed-monitor.last_saved>=30 || target(z,monitor.cfg) || elapsed>=monitor.cfg["time-limit"]
+        atomic_toml(monitor.job*".progress",Dict(string(k)=>v for (k,v) in pairs(
+            merge(metric_fields(z),(wall_seconds=elapsed,updates=monitor.calls-1,gpu=monitor.gpu)))))
+        println("updates=",monitor.calls-1," elapsed=",round(elapsed;digits=2),
+                " paper_error=",z.paper_error," total_spending=",z.total_spending)
+        flush(stdout);monitor.last_saved=elapsed
+    end
+    target(z,monitor.cfg) || elapsed>=monitor.cfg["time-limit"]
+end
 function solve(f,method,cfg,stop)
     method=="pr" && return run_pr(f.c,f.w;stop,maxiter=cfg["maxiter-pr"])
     linear_perturbed_ipm(f;tol=cfg["tol"],stop,σ_min=cfg["tol"]*minimum(f.w)/size(f.c,1),
@@ -109,7 +131,7 @@ function warmup(method,cfg)
     w=rand(rng,29).+.1;w./=sum(w)
     f=(c=jd_gpu_array(sparse(c)),w=CuArray(w))
     small=merge(cfg,Dict("maxiter-pr"=>2,"maxiter-ipm"=>2))
-    solve(f,method,small,z->false)
+    solve(f,method,small,JDStop(small,"",time(),0.0,0,nothing,true,""))
     CUDA.synchronize();nothing
 end
 function worker(cfg)
@@ -142,25 +164,16 @@ function worker_gpu(cfg,f,row)
         device=(c=jd_gpu_array(f.c),w=CuArray(f.w));CUDA.synchronize();device
     end
     row=merge(row,(transfer_seconds=transferred.time,))
-    started=time();last_saved=0.0;calls=0;last_metrics=nothing
+    started=time()
+    monitor=JDStop(cfg,job,started,0.0,0,nothing,false,row.gpu)
     atomic_toml(job*".started",Dict("time"=>started))
-    function stop(z)
-        elapsed=time()-started;calls+=1;last_metrics=z
-        if elapsed-last_saved>=30 || target(z,cfg) || elapsed>=cfg["time-limit"]
-            atomic_toml(job*".progress",Dict(string(k)=>v for (k,v) in pairs(
-                merge(metric_fields(z),(wall_seconds=elapsed,updates=calls-1,gpu=row.gpu)))))
-            println("updates=",calls-1," elapsed=",round(elapsed;digits=2),
-                    " paper_error=",z.paper_error," total_spending=",z.total_spending)
-            flush(stdout);last_saved=elapsed
-        end
-        target(z,cfg) || elapsed>=cfg["time-limit"]
-    end
     try
         measurement=@timed begin
-            result=solve(transferred.value,method,cfg,stop);CUDA.synchronize();result
+            result=solve(transferred.value,method,cfg,monitor);CUDA.synchronize();result
         end
-        result=measurement.value;z=result.traj[end];met=target(z,cfg)
-        status=met ? "converged" : measurement.time>=cfg["time-limit"] ? "time_limit" : string(result.status)
+        result=measurement.value;z=result.traj[end]
+        met=target(z,cfg) && measurement.time<=cfg["time-limit"]
+        status=measurement.time>cfg["time-limit"] ? "time_limit" : met ? "converged" : string(result.status)
         row=merge(row,metric_fields(z),(status=status,target_met=met,updates=z.k,
             wall_seconds=measurement.time,allocated_MiB=measurement.bytes/2.0^20))
         if method!="pr"
@@ -175,7 +188,7 @@ function worker_gpu(cfg,f,row)
     catch err
         showerror(stderr,err,catch_backtrace());println(stderr)
         row=merge(row,(status="error",wall_seconds=time()-started,message=sprint(showerror,err)))
-        last_metrics===nothing || (row=merge(row,metric_fields(last_metrics),(updates=calls-1,)))
+        monitor.last_metrics===nothing || (row=merge(row,metric_fields(monitor.last_metrics),(updates=monitor.calls-1,)))
     end
     write_rows(job*".csv",[row])
 end

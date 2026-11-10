@@ -24,7 +24,7 @@ for (method,color) in zip(("PR","Perturbed","PCG"),(:steelblue,:darkorange,:seag
     for (panel,values) in ((timing,rows.median_wall_seconds),(iterations,rows.median_updates.+1))
         plot!(panel,rows.users,ifelse.(good,values,NaN);label=method,color,marker=:circle)
         bad=.!good .& isfinite.(values) .& (values.>0)
-        scatter!(panel,rows.users[bad],values[bad];label="$(method): target missed",color,
+        any(bad) && scatter!(panel,rows.users[bad],values[bad];label="$(method): target missed",color,
             marker=:xcross,markersize=7)
     end
 end

@@ -49,6 +49,10 @@ function options(args)
             action=:store_true
         "--job"
             default=""
+        "--job-repeat"
+            help="Internal repetition index"
+            arg_type=Int
+            default=1
     end
     cfg=parse_args(args,settings)
     0<cfg["tol"]<1 || error("tol must be in (0,1)")
@@ -137,7 +141,9 @@ end
 function worker(cfg)
     job=cfg["job"];method=cfg["methods"]
     f=JDData.load_market(cfg["data"];users=cfg["users"]=="all" ? nothing : parse(Int,cfg["users"]))
-    row=base_row(f,method,1,cfg,"")
+    configpath=joinpath(cfg["outdir"],"config.toml")
+    digest=isfile(configpath) ? TOML.parsefile(configpath)["matrix_sha256"] : open(sha256,cfg["data"]) |> bytes2hex
+    row=base_row(f,method,cfg["job-repeat"],cfg,digest)
     try
         # Keep the supervisor free of CUDA contexts and permit CPU-only --help.
         @eval begin
@@ -197,7 +203,7 @@ shellquote(s)="'"*replace(string(s),"'"=>"'\\''")*"'"
 function run_case(cfg,users,method,repeat,digest,job)
     f=JDData.load_market(cfg["data"];users=users=="all" ? nothing : parse(Int,users))
     row=base_row(f,method,repeat,cfg,digest);f=nothing;GC.gc()
-    child=String["--worker","--job",job,"--users",users,"--methods",method]
+    child=String["--worker","--job",job,"--job-repeat",string(repeat),"--users",users,"--methods",method]
     for key in ("data","outdir","tol","criterion","time-limit","maxiter-pr","maxiter-ipm","linear-rtol","linear-maxiter")
         append!(child,["--"*key,string(cfg[key])])
     end
@@ -242,7 +248,7 @@ function main(args=ARGS)
     cfg["worker"] && return worker(cfg)
     digest=open(sha256,cfg["data"]) |> bytes2hex
     out=cfg["outdir"];mkpath(out);mkpath(joinpath(out,"jobs"))
-    signature=filter(p->!(p.first in ("resume","worker","job")),cfg)
+    signature=filter(p->!(p.first in ("resume","worker","job","job-repeat")),cfg)
     signature["matrix_sha256"]=digest
     configpath=joinpath(out,"config.toml")
     if isfile(configpath)

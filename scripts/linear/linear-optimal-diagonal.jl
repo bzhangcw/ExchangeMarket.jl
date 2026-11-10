@@ -66,4 +66,3 @@ function _perturbed_optimal_diagonal(B; tolerance=1e-9)
         objective=reference*tv, primal_violation, dual_violation, status,
         iterations=barrier_iterations(model), reference_condition=reference)
 end
-

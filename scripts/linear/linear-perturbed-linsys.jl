@@ -13,7 +13,7 @@ function perturbed_optimal_diagonal(B; kwargs...)
     if !isdefined(@__MODULE__, :_perturbed_optimal_diagonal)
         Base.include(@__MODULE__, joinpath(@__DIR__, "linear-optimal-diagonal.jl"))
     end
-    Base.invokelatest(_perturbed_optimal_diagonal, B; kwargs...)
+    Base.invokelatest(() -> _perturbed_optimal_diagonal(B; kwargs...))
 end
 
 """

@@ -7,6 +7,7 @@ linear_device(::CUDA.CuArray) = :gpu
 linear_sync(::CUDA.CuArray) = CUDA.synchronize()
 linear_default_solver(::CUDA.CuArray) = :cudss
 linear_supports(::CUDA.CuArray) = nothing
+linear_arrays(c::CUDA.CuArray, w::CUDA.CuArray) = throw(ArgumentError("GPU inputs must both be Float64 CUDA arrays"))
 linear_arrays(c::CUDA.CuArray, w) = throw(ArgumentError("GPU inputs must both be resident Float64 CUDA arrays"))
 linear_arrays(c::AbstractArray, w::CUDA.CuArray) = throw(ArgumentError("mixed CPU/GPU market arrays"))
 function linear_arrays(c::CUDA.CuMatrix{Float64}, w::CUDA.CuVector{Float64})
@@ -25,6 +26,7 @@ function linear_response_workspace(c::CUDA.CuArray, w)
 end
 linear_metrics_workspace(c::CUDA.CuArray) = linear_array_metrics_workspace(c)
 linear_pr_workspace(c::CUDA.CuArray, p) = linear_array_metrics_workspace(c)
+linear_allocations(c::CUDA.CuArray, T, n, m) = similar(c, T, n, m)
 function linear_equilibrium_metrics(c::CUDA.CuArray, w, p, x; demand=nothing, workspace=nothing)
     ws = workspace === nothing ? linear_metrics_workspace(c) : workspace
     linear_array_metrics(c, w, p, x, ws; demand=demand === nothing ? ws.demand : demand)

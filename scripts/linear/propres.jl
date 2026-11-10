@@ -45,7 +45,7 @@ function run_pr(c, w; stop::F, maxiter) where {F}
     maxiter >= 0 || throw(ArgumentError("maxiter must be nonnegative"))
     T = promote_type(Float64, eltype(c), eltype(w))
     p = linear_prices(c, w, nothing)
-    x = similar(c, T, n, m)
+    x = linear_allocations(c, T, n, m)
     x .= (w' ./ n) ./ p
     weighted_utility = linear_pr_workspace(c, p)
     metrics_workspace = linear_metrics_workspace(c)

@@ -14,6 +14,7 @@ linear_validate_solver(c, method) = method == :cudss ?
 linear_prices(c, w, ::Nothing) = fill!(similar(w, size(c, 1)), sum(w) / size(c, 1))
 linear_prices(c, w, p) = copyto!(similar(w, size(c, 1)), p)
 linear_pr_workspace(c, p) = similar(p)
+linear_allocations(c, T, n, m) = Matrix{T}(undef, n, m)
 
 function linear_set_diagonal!(H, diagonal)
     for j in axes(H, 1)

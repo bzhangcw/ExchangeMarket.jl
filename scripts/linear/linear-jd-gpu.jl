@@ -38,7 +38,7 @@ function jd_gpu_array(c::SparseMatrixCSC{Float64})
     max(n,m,count+1)<typemax(Int32) || error("JD sparse GPU indices exceed Int32 capacity")
     rowcounts=zeros(Int32,n)
     for j in c.rowval;rowcounts[j]+=1;end
-    rowptr=vcat(Int32(1),Int32(1).+cumsum(rowcounts))
+    rowptr=Int32.(vcat(1,1 .+ cumsum(rowcounts)))
     next=copy(rowptr[1:n]);colval=Vector{Int32}(undef,count)
     csc_to_csr=similar(colval);csr_to_csc=similar(colval)
     for i in 1:m, k in c.colptr[i]:c.colptr[i+1]-1

@@ -218,3 +218,6 @@ CMakeFiles
 dualnv/cpp/Makefile
 dualnv/thirdparty
 /out/
+
+# Downloaded JD data and generated sparse matrices
+/dataset/jd/

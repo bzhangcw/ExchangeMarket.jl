@@ -43,10 +43,8 @@ function run_pr(c, w; stop::F, maxiter) where {F}
     linear_device(c) == linear_device(w) || throw(ArgumentError("mixed CPU/GPU market arrays"))
     length(w) == m || throw(DimensionMismatch("one budget is required per buyer"))
     maxiter >= 0 || throw(ArgumentError("maxiter must be nonnegative"))
-    T = promote_type(Float64, eltype(c), eltype(w))
     p = linear_prices(c, w, nothing)
-    x = linear_allocations(c, T, n, m)
-    x .= (w' ./ n) ./ p
+    x = linear_pr_initial_allocation(c, w, p)
     weighted_utility = linear_pr_workspace(c, p)
     metrics_workspace = linear_metrics_workspace(c)
     demand = similar(p)

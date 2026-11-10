@@ -292,10 +292,7 @@ function linear_perturbed_ipm(f;
     linear_validate_solver(c, linear_solver)
     n, m = size(c)
     n > 0 && m > 0 && length(w) == m || throw(ArgumentError("incompatible market dimensions"))
-    all(isfinite, c) && all(>=(0), c) || throw(ArgumentError("valuations must be nonnegative and finite"))
-    all(isfinite, w) && all(>(0), w) || throw(ArgumentError("budgets must be positive and finite"))
-    all(vec(maximum(c; dims=1)) .> 0) || throw(ArgumentError("every buyer must value a good"))
-    all(vec(maximum(c; dims=2)) .> 0) || throw(ArgumentError("every good must be valued for strict market clearing"))
+    linear_validate_market(c, w)
     isfinite(σ₀) && σ₀ > 0 && isfinite(μ₀) && μ₀ > 0 || throw(ArgumentError("σ₀ and μ₀ must be positive and finite"))
     σ₀ >= μ₀ || throw(ArgumentError("σ₀ must be at least μ₀ to maintain σ ≥ μ"))
     0 < tol < 1 && 0 < reduction < 1 && 0 < oracle_tol < tol || throw(ArgumentError("invalid tolerance or reduction"))
@@ -311,10 +308,11 @@ function linear_perturbed_ipm(f;
     budget_error_floor = n * sigma_floor / min_budget
     p = linear_prices(c, w, p₀)
     length(p) == n || throw(ArgumentError("p₀ has wrong length"))
-    st = PerturbedLinearState(p, linear_zeros(c, n, m), linear_zeros(c, n, m), linear_zeros(w, m), linear_zeros(w, m),
+    buffers = linear_ipm_buffers(c, w, solver_workspace)
+    st = PerturbedLinearState(p, buffers.x, buffers.s, linear_zeros(w, m), linear_zeros(w, m),
         Float64(σ₀), Float64(μ₀), :PerturbedLinear)
-    H, V, diagonal = linear_zeros(c, n, n), linear_zeros(c, n, m), linear_zeros(w, n)
-    sensitivity = linear_zeros(w, n)
+    H, V, diagonal = buffers.H, buffers.V, buffers.diagonal
+    sensitivity = buffers.sensitivity
     trial_p, trial_x, trial_s = similar(p), similar(st.x), similar(st.s)
     trial_λ, trial_δ = similar(st.λ), similar(st.δ)
     factor_count, oracle_count, scalar_iterations = 0, 0, 0
@@ -338,7 +336,7 @@ function linear_perturbed_ipm(f;
 
     for k in 0:maxiter
         metrics = linear_equilibrium_metrics(c, w, st.p, st.x; workspace=metrics_workspace)
-        g = 1 .- vec(sum(st.x; dims=2))
+        g = 1 .- linear_demand(st.x)
         F = g .- st.μ ./ st.p
         elapsed = (time_ns() - t0) / 1e9
         push!(traj, merge((k=k, σ=st.σ, μ=st.μ, nσ=n * st.σ, α=last_α, t=elapsed,
@@ -395,7 +393,7 @@ function linear_perturbed_ipm(f;
         # Once σ is fixed, its continuation term disappears from the rhs.
         d = θσ == θ ? -(st.p .* g .- st.μ) .- θ .* (st.p .* sensitivity .+ st.μ) :
             -(st.p .* g .- st.μ) .- θσ .* st.p .* sensitivity .- θ * st.μ
-        row_sum = st.p .* vec(sum(st.x; dims=2)) .+ st.μ
+        row_sum = st.p .* linear_demand(st.x) .+ st.μ
         if record_systems
             push!(systems, (k=k, B=copy(H), b=copy(d), V=copy(V),
                 row_sum=copy(row_sum), p=copy(st.p), σ=st.σ, μ=st.μ,
@@ -442,7 +440,7 @@ function linear_perturbed_ipm(f;
             t_oracle += @elapsed scalar_iterations += linear_perturbed_response!(
                 trial_x, trial_s, trial_λ, trial_δ, c, w, trial_p, trial_σ; rtol=oracle_tol, supports, workspace=response_workspace)
             oracle_count += 1
-            trial_F = 1 .- vec(sum(trial_x; dims=2)) .- trial_μ ./ trial_p
+            trial_F = 1 .- linear_demand(trial_x) .- trial_μ ./ trial_p
             trial_driver = sigma_floor == 0 ? trial_σ : buyer_price_ratio * trial_μ
             trial_merit = θ > 0 ? max(norm(trial_F, Inf), n * trial_driver / min_budget) : norm(trial_F, Inf)
             if trial_merit <= (1 - 1e-4 * α * (θ > 0 ? θ : 1)) * base_merit
@@ -461,8 +459,8 @@ function linear_perturbed_ipm(f;
         st.μ = trial_μ
         st.σ = trial_σ
         st.p .= trial_p
-        st.x .= trial_x
-        st.s .= trial_s
+        linear_copy!(st.x, trial_x)
+        linear_copy!(st.s, trial_s)
         st.λ .= trial_λ
         st.δ .= trial_δ
         last_α = α
@@ -471,7 +469,7 @@ function linear_perturbed_ipm(f;
     # Rejected trials never change the current prices or barrier parameters.
     if !(status in (:converged, :sigma_floor_reached))
         metrics = linear_equilibrium_metrics(c, w, st.p, st.x; workspace=metrics_workspace)
-        F = 1 .- vec(sum(st.x; dims=2)) .- st.μ ./ st.p
+        F = 1 .- linear_demand(st.x) .- st.μ ./ st.p
         push!(traj, merge((k=traj[end].k, σ=st.σ, μ=st.μ, nσ=n * st.σ, α=0.0,
                 t=(time_ns() - t0) / 1e9, factorizations=factor_count,
                 oracle_calls=oracle_count, t_oracle=t_oracle,
@@ -497,6 +495,6 @@ function linear_perturbed_allocation!(f, st::PerturbedLinearState)
     f.p .= st.p
     f.x .= st.x
     f.val_u .= vec(sum(f.c .* st.x; dims=1))
-    f.sumx .= vec(sum(st.x; dims=2))
+    f.sumx .= linear_demand(st.x)
     return f
 end

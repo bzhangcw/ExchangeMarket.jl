@@ -149,3 +149,24 @@ function linear_array_pr_step!(x, p, c, w, ws)
     x ./= p
     nothing
 end
+
+# Storage hooks let sparse markets share the same continuation and line search.
+linear_demand(x) = vec(sum(x; dims=2))
+linear_copy!(target, source) = copyto!(target, source)
+function linear_validate_market(c, w)
+    all(isfinite, c) && all(>=(0), c) || throw(ArgumentError("valuations must be nonnegative and finite"))
+    all(isfinite, w) && all(>(0), w) || throw(ArgumentError("budgets must be positive and finite"))
+    all(vec(maximum(c; dims=1)) .> 0) || throw(ArgumentError("every buyer must value a good"))
+    all(vec(maximum(c; dims=2)) .> 0) || throw(ArgumentError("every good must be valued for strict market clearing"))
+end
+function linear_ipm_buffers(c, w, solver_workspace)
+    n,m = size(c)
+    (; x=linear_zeros(c,n,m), s=linear_zeros(c,n,m), H=linear_zeros(c,n,n),
+       V=linear_zeros(c,n,m), diagonal=linear_zeros(w,n), sensitivity=linear_zeros(w,n))
+end
+function linear_pr_initial_allocation(c, w, p)
+    n,m = size(c)
+    x = linear_allocations(c, promote_type(Float64,eltype(c),eltype(w)), n,m)
+    x .= (w' ./ n) ./ p
+    x
+end

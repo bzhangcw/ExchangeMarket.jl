@@ -147,7 +147,11 @@ function linear_gpu_inverse!(out, v, ws)
     nothing
 end
 
-function linear_perturbed_solve(B::CUDA.CuMatrix{Float64}, b::CUDA.CuVector{Float64};
+linear_gpu_update_values!(ws, B::CUDA.CuMatrix) = (ws.matrix.nzVal .= view(vec(B), ws.indices))
+linear_perturbed_solve(B::CUDA.CuMatrix{Float64}, b::CUDA.CuVector{Float64}; kwargs...) =
+    linear_gpu_solve(B, b; kwargs...)
+
+function linear_gpu_solve(B, b::CUDA.CuVector{Float64};
     method=:cudss, row_sum=nothing, V=nothing, optimal_solver=nothing,
     initial_guess=:zero, rtol=1e-9, maxiter=max(20,5length(b)),
     ic_drop=0.0, ic_normalize::Bool=true, workspace=nothing)
@@ -161,7 +165,7 @@ function linear_perturbed_solve(B::CUDA.CuMatrix{Float64}, b::CUDA.CuVector{Floa
     size(ws.matrix) == size(B) || throw(DimensionMismatch("workspace/matrix mismatch"))
     CUDA.synchronize()
     setup_seconds = @elapsed begin
-        ws.matrix.nzVal .= view(vec(B), ws.indices)
+        linear_gpu_update_values!(ws, B)
         if method == :cudss
             if !ws.analyzed
                 CUDSS.cudss("analysis", ws.direct, ws.direction, b)

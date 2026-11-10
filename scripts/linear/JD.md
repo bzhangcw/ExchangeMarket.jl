@@ -142,3 +142,9 @@ market = JDData.load_market("dataset/jd/utilities.bin"; users=2000)
 @assert sum(market.w) ≈ 1
 # market.c is SparseMatrixCSC{Float64}; rows = goods, columns = users.
 ```
+
+Regenerate the summary table and plots from saved CSV data (no GPU needed):
+
+```bash
+julia --project=scripts scripts/linear/plot_jd_gpu.jl scripts/linear/jd_gpu_results
+```

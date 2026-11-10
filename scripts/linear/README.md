@@ -56,3 +56,9 @@ market transfer are excluded. `transfer_seconds` is reported separately, and
 allocations only. All methods use the same raw-allocation accuracy predicate.
 Budget reporting compares total spending with total budget; individual budget
 errors are still checked by `meets_target`.
+
+## JD click-data experiment
+
+See [JD.md](JD.md) for `jd.sh` (download and preprocess), `test_jd_gpu.jl`
+(the three-method sparse GPU comparison), and `plot_jd_gpu.jl`. JD utilities
+remain raw click counts; budgets sum to one within each selected market.

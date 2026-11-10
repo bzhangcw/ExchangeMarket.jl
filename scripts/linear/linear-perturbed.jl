@@ -1,4 +1,5 @@
 using LinearAlgebra, Printf
+include("linear-backend.jl")
 include("linear-perturbed-linsys.jl")
 
 """
@@ -12,7 +13,7 @@ These aggregate fields do not change the individual-budget stopping metric.
 No allocation or price normalization is applied when measuring these errors.
 Pass a reusable length-n `demand` vector to avoid allocating row-sum storage.
 """
-function linear_equilibrium_metrics(c, w, p, x; demand=nothing)
+function linear_equilibrium_metrics(c, w, p, x; demand=nothing, workspace=nothing)
     n, m = size(c)
     total_budget = sum(w)
     if !all(isfinite, p) || !all(>(0), p) || !all(isfinite, x) || any(<(0), x)
@@ -45,12 +46,12 @@ function linear_equilibrium_metrics(c, w, p, x; demand=nothing)
         total_budget_error=abs(total_spending / total_budget - 1))
 end
 
-mutable struct PerturbedLinearState
-    p::Vector{Float64}
-    x::Matrix{Float64}
-    s::Matrix{Float64}
-    λ::Vector{Float64}
-    δ::Vector{Float64}
+mutable struct PerturbedLinearState{V<:AbstractVector{Float64},M<:AbstractMatrix{Float64}}
+    p::V
+    x::M
+    s::M
+    λ::V
+    δ::V
     σ::Float64
     μ::Float64
     name::Symbol
@@ -76,7 +77,7 @@ Zero-valued coordinates are recovered analytically as x_ji=σ/p_j.
 Returns the total number of scalar iterations; throws if an oracle fails.
 """
 function linear_perturbed_response!(x, s, λ, δ, c, w, p, σ;
-    rtol=1e-12, maxiter=100, supports=nothing)
+    rtol=1e-12, maxiter=100, supports=nothing, workspace=nothing)
     n, m = size(c)
     isfinite(σ) && σ > 0 || throw(ArgumentError("σ must be positive and finite"))
     all(isfinite, p) && all(>(0), p) || throw(ArgumentError("prices must be positive and finite"))
@@ -157,7 +158,7 @@ function linear_perturbed_potential(c, w, p, x, σ)
 end
 
 """
-    linear_perturbed_hessian!(H, V, diagonal, c, w, p, x, σ; sensitivity=nothing, supports=nothing)
+    linear_perturbed_hessian!(H, V, diagonal, c, w, p, x, σ; sensitivity=nothing, supports=nothing, workspace=nothing)
 
 Build the exact scaled demand Hessian H = -P (Σᵢ Dₚxᵢ) P using a
 diagonal-minus-rank-m representation and BLAS multiplication. The diagonal is
@@ -168,7 +169,7 @@ If supplied, `sensitivity` receives σΣᵢ∂σxᵢ. `supports` lists the posit
 valuation indices per buyer; zero-valued coordinates contribute analytically.
 """
 function linear_perturbed_hessian!(H, V, diagonal, c, w, p, x, σ;
-    sensitivity=nothing, supports=nothing)
+    sensitivity=nothing, supports=nothing, workspace=nothing)
     n, m = size(c)
     # A zero valuation contributes σ to the scaled Hessian diagonal and σ/p
     # to σ∂σx. Start with this contribution for every buyer, then replace the
@@ -221,9 +222,11 @@ end
 """
     linear_perturbed_ipm(f; μ₀=sum(f.w)/(n*(m+1)), σ₀=μ₀, σ_min=1e-3 * minimum(f.w) / size(f.c, 1), tol=1e-6, ...)
 
-CPU price-only Newton method with exact unconstrained conjugate responses.
+Price-only Newton method with exact unconstrained conjugate responses.
+Array types select the backend; CUDA arrays require linear-gpu.jl.
+The continuation and line search are shared by CPU/GPU and direct/PCG solves.
 `f` supplies `c` (goods × buyers) and `w`; supplies are one. Every buyer and
-good must have a positive valuation. The default is dense Cholesky;
+good must have a positive valuation. The default is CPU Cholesky or GPU cuDSS;
 `linear_solver` also accepts :cg, :pcg_jacobi, :pcg_rowsum, :pcg_dr1,
 :pcg_optimal (requires `optimal_solver`), :pcg_ic (incomplete Cholesky), and
 the approximate :dr1 direction. IC uses `ic_drop=0` (IC(0)) and
@@ -278,13 +281,15 @@ function linear_perturbed_ipm(f;
     μ₀=sum(f.w) / (size(f.c, 1) * (size(f.c, 2) + 1)), σ₀=μ₀, σ_min=1e-3 * minimum(f.w) / size(f.c, 1),
     p₀=nothing, tol=1e-6, maxiter=200, reduction=0.4,
     oracle_tol=min(1e-12, tol / 100), max_backtrack=40,
-    show_trace=true, show_every=1, linear_solver=:cholesky,
+    show_trace=true, show_every=1, linear_solver=:auto,
     linear_rtol=1e-9, linear_maxiter=max(20, 5size(f.c, 1)),
     optimal_solver=nothing, record_systems=false, linear_initial_guess=:zero, stop=nothing,
     ic_drop=0.0, ic_normalize::Bool=true
 )
     t0 = time_ns()
-    c, w = Matrix{Float64}(f.c), Vector{Float64}(f.w)
+    c, w = linear_arrays(f.c, f.w)
+    linear_solver = linear_solver == :auto ? linear_default_solver(c) : linear_solver
+    linear_validate_solver(c, linear_solver)
     n, m = size(c)
     n > 0 && m > 0 && length(w) == m || throw(ArgumentError("incompatible market dimensions"))
     all(isfinite, c) && all(>=(0), c) || throw(ArgumentError("valuations must be nonnegative and finite"))
@@ -295,18 +300,21 @@ function linear_perturbed_ipm(f;
     σ₀ >= μ₀ || throw(ArgumentError("σ₀ must be at least μ₀ to maintain σ ≥ μ"))
     0 < tol < 1 && 0 < reduction < 1 && 0 < oracle_tol < tol || throw(ArgumentError("invalid tolerance or reduction"))
     maxiter >= 0 && max_backtrack > 0 && show_every > 0 || throw(ArgumentError("invalid iteration limits"))
-    supports = [findall(>(0), view(c, :, i)) for i in 1:m]
+    supports = linear_supports(c)
+    response_workspace = linear_response_workspace(c, w)
+    metrics_workspace = linear_metrics_workspace(c)
+    solver_workspace = linear_solver_workspace(c, w, linear_solver)
     min_budget = minimum(w)
     sigma_floor = Float64(σ_min)
     isfinite(sigma_floor) && 0 <= sigma_floor <= σ₀ ||
         throw(ArgumentError("σ_min must be finite and between zero and σ₀"))
     budget_error_floor = n * sigma_floor / min_budget
-    p = p₀ === nothing ? fill(sum(w) / n, n) : Vector{Float64}(p₀)
+    p = linear_prices(c, w, p₀)
     length(p) == n || throw(ArgumentError("p₀ has wrong length"))
-    st = PerturbedLinearState(p, zeros(n, m), zeros(n, m), zeros(m), zeros(m),
+    st = PerturbedLinearState(p, linear_zeros(c, n, m), linear_zeros(c, n, m), linear_zeros(w, m), linear_zeros(w, m),
         Float64(σ₀), Float64(μ₀), :PerturbedLinear)
-    H, V, diagonal = zeros(n, n), zeros(n, m), zeros(n)
-    sensitivity = zeros(n)
+    H, V, diagonal = linear_zeros(c, n, n), linear_zeros(c, n, m), linear_zeros(w, n)
+    sensitivity = linear_zeros(w, n)
     trial_p, trial_x, trial_s = similar(p), similar(st.x), similar(st.s)
     trial_λ, trial_δ = similar(st.λ), similar(st.δ)
     factor_count, oracle_count, scalar_iterations = 0, 0, 0
@@ -316,7 +324,7 @@ function linear_perturbed_ipm(f;
     t_preconditioner = 0.0
     t_oracle, t_build, t_solve = 0.0, 0.0, 0.0
     t_oracle += @elapsed scalar_iterations += linear_perturbed_response!(
-        st.x, st.s, st.λ, st.δ, c, w, st.p, st.σ; rtol=oracle_tol, supports)
+        st.x, st.s, st.λ, st.δ, c, w, st.p, st.σ; rtol=oracle_tol, supports, workspace=response_workspace)
     oracle_count += 1
     traj = NamedTuple[]
     status = :max_iter
@@ -329,7 +337,7 @@ function linear_perturbed_ipm(f;
         "k", "σ", "μ", "nσ", "mc", "spent", "budget", "regret", "α", "time(s)")
 
     for k in 0:maxiter
-        metrics = linear_equilibrium_metrics(c, w, st.p, st.x)
+        metrics = linear_equilibrium_metrics(c, w, st.p, st.x; workspace=metrics_workspace)
         g = 1 .- vec(sum(st.x; dims=2))
         F = g .- st.μ ./ st.p
         elapsed = (time_ns() - t0) / 1e9
@@ -380,10 +388,9 @@ function linear_perturbed_ipm(f;
             end
         end
         t_build += @elapsed begin
-            linear_perturbed_hessian!(H, V, diagonal, c, w, st.p, st.x, st.σ; sensitivity, supports)
-            for j in 1:n
-                H[j, j] += st.μ
-            end
+            linear_perturbed_hessian!(H, V, diagonal, c, w, st.p, st.x, st.σ; sensitivity, supports, workspace=response_workspace)
+            linear_shift_diagonal!(H, st.μ)
+            linear_sync(H)
         end
         # Once σ is fixed, its continuation term disappears from the rhs.
         d = θσ == θ ? -(st.p .* g .- st.μ) .- θ .* (st.p .* sensitivity .+ st.μ) :
@@ -397,7 +404,7 @@ function linear_perturbed_ipm(f;
         solve_result = nothing
         t_solve += @elapsed solve_result = linear_perturbed_solve(H, d;
             method=linear_solver, row_sum, V, optimal_solver, initial_guess=linear_initial_guess,
-            rtol=linear_rtol, maxiter=linear_maxiter, ic_drop, ic_normalize)
+            rtol=linear_rtol, maxiter=linear_maxiter, ic_drop, ic_normalize, workspace=solver_workspace)
         factor_count += solve_result.factorizations
         preconditioner_factorizations += solve_result.preconditioner_factorizations
         sdp_iterations += solve_result.sdp_iterations
@@ -412,14 +419,11 @@ function linear_perturbed_ipm(f;
             setup_seconds=solve_result.setup_seconds, solve_seconds=solve_result.solve_seconds,
             success=solve_result.success))
         if !solve_result.success
-            status = linear_solver == :cholesky ? :factorization_failed : :linear_solve_failed
+            status = linear_solver in (:cholesky, :cudss) ? :factorization_failed : :linear_solve_failed
             break
         end
         d = solve_result.direction
-        α = 1.0
-        for j in 1:n
-            d[j] < 0 && (α = min(α, -0.99 / d[j]))
-        end
+        α = linear_max_step(d)
         accepted = false
         base_norm = norm(F, Inf)
         driver_sigma = sigma_floor == 0 ? st.σ : buyer_price_ratio * st.μ
@@ -436,7 +440,7 @@ function linear_perturbed_ipm(f;
             # The distance from the active price boundary is O(σ).
             trial_δ .= (trial_σ / st.σ) .* st.δ
             t_oracle += @elapsed scalar_iterations += linear_perturbed_response!(
-                trial_x, trial_s, trial_λ, trial_δ, c, w, trial_p, trial_σ; rtol=oracle_tol, supports)
+                trial_x, trial_s, trial_λ, trial_δ, c, w, trial_p, trial_σ; rtol=oracle_tol, supports, workspace=response_workspace)
             oracle_count += 1
             trial_F = 1 .- vec(sum(trial_x; dims=2)) .- trial_μ ./ trial_p
             trial_driver = sigma_floor == 0 ? trial_σ : buyer_price_ratio * trial_μ
@@ -466,7 +470,7 @@ function linear_perturbed_ipm(f;
     # Record the final work counters on failure as well as the returned state.
     # Rejected trials never change the current prices or barrier parameters.
     if !(status in (:converged, :sigma_floor_reached))
-        metrics = linear_equilibrium_metrics(c, w, st.p, st.x)
+        metrics = linear_equilibrium_metrics(c, w, st.p, st.x; workspace=metrics_workspace)
         F = 1 .- vec(sum(st.x; dims=2)) .- st.μ ./ st.p
         push!(traj, merge((k=traj[end].k, σ=st.σ, μ=st.μ, nσ=n * st.σ, α=0.0,
                 t=(time_ns() - t0) / 1e9, factorizations=factor_count,

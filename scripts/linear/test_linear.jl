@@ -1,39 +1,31 @@
 #!/usr/bin/env julia
-# CPU comparison: shared-target PR, perturbed Newton, and PCG (the same IPM
-# using IC(0)-preconditioned CG). Native ExchangeMarket PR is opt-in via
-# --methods pr_native and uses MirrorDec/opt! with its native stopping rule.
-# From any directory:
-#   julia --threads=1 /path/to/test_linear.jl
-#   julia --threads=1 /path/to/test_linear.jl --tol 1e-3
-#   julia --threads=1 /path/to/test_linear.jl --sizes_n 100 500 1000 2000 --sizes_m 1000 2000 --repeats 3
-#   julia --threads=1 /path/to/test_linear.jl --methods perturbed pcg
-#   julia --threads=1 /path/to/test_linear.jl --densities 0.01 0.02 0.05
-# Sweep all combinations of sizes_n, sizes_m, and densities; sizes_m defaults
-# to [2000], and densities default to [0.01, 0.02, 0.05].
-# Outputs: runs.csv, summary.csv, and scaling.png, grouped by n, m, and density.
-# All methods use the same market and uniform initial prices. Native PR stops
-# when norm(Delta p) / maximum(p) < tol^1.5; all returned allocations are also
-# scored against the shared clearing, individual-budget, and utility target.
-# Timings include solver initialization and diagnostics, but exclude compilation,
-# market generation, final validation, plotting, and file export.
-# Native PR retains its package diagnostics. The other methods evaluate
-# the shared metrics every iterate; native PR is scored on that target only
-# after its timed opt! call. Thus stop rules and monitoring costs both differ.
+# Standalone PR / Perturbed / PCG comparison with a shared CPU/GPU runner.
+# julia test_linear.jl --device cpu --sizes_n 500 --sizes_m 1000 --tol 1e-4
+# julia test-gpu.jl                         # same case on CUDA, using cuDSS / IC(0)
+# The generated market is copied to the selected device once per case. Transfer
+# time is reported separately; wall_seconds includes solver initialization,
+# sparse analysis, numerical factorization, diagnostics and synchronization.
+# Compilation, market generation, plotting and export are excluded. allocated_MiB
+# is Julia host allocation accounting, not GPU allocation accounting.
 
-module LinearCPUComparison
+module LinearComparison
 
 using Pkg
-Pkg.activate(normpath(joinpath(@__DIR__, "..")))
+requested_gpu = get(ENV, "LINEAR_DEVICE", "cpu") == "gpu" ||
+    any(i -> ARGS[i] == "--device" && i < length(ARGS) && ARGS[i+1] == "gpu", eachindex(ARGS)) ||
+    "--device=gpu" in ARGS
+Pkg.activate(get(ENV, "LINEAR_PROJECT", requested_gpu ? joinpath(@__DIR__, "gpu") : normpath(joinpath(@__DIR__, ".."))))
 using Random, SparseArrays, LinearAlgebra, Statistics, Printf
-using ExchangeMarket, ArgParse, CSV, DataFrames
+using ArgParse, CSV, DataFrames
 ENV["GKSwstype"] = get(ENV, "GKSwstype", "100")
 using Plots
 include(joinpath(@__DIR__, "linear-perturbed.jl"))
 include(joinpath(@__DIR__, "propres.jl"))
+requested_gpu && include(joinpath(@__DIR__, "linear-gpu.jl"))
 
-const METHODS = (:pr, :pr_native, :perturbed, :pcg)
+const METHODS = (:pr, :perturbed, :pcg)
 const DEFAULT_METHODS = (:pr, :perturbed, :pcg)
-const LABELS = Dict(:pr => "PR (shared target)", :pr_native => "PR (ExchangeMarket)",
+const LABELS = Dict(:pr => "PR",
     :perturbed => "Perturbed", :pcg => "PCG")
 is_ipm(method) = method in (:perturbed, :pcg)
 method_label(method) = LABELS[method]
@@ -42,10 +34,17 @@ meets_target(z, tol) = max(z.mc, z.budget, z.regret) <= tol * (1 + 1e-8)
 function configuration(args)
     # Preserve the requested underscore spellings of --sizes_n and --sizes_m.
     settings = ArgParseSettings(autofix_names=false,
-        description="Compare PR, perturbed Newton, and IC-preconditioned PCG on CPU; native ExchangeMarket PR is opt-in; sweep goods, buyers, and densities.")
+        description="Compare standalone PR, perturbed IPM, and IC-preconditioned PCG; select CPU or GPU.")
     @add_arg_table! settings begin
+        "--device"
+            help = "Array backend: cpu or gpu (GPU uses CUDA)"
+            default = get(ENV, "LINEAR_DEVICE", "cpu")
+        "--direct-solver"
+            dest_name = "direct_solver"
+            help = "Direct backend: auto, cholesky (CPU), or cudss (GPU)"
+            default = "auto"
         "--tol"
-            help = "Shared accuracy tolerance and native PR tol (native price-step threshold = tol^1.5)"
+            help = "Shared accuracy tolerance; sigma_min = tol * minimum(w) / n"
             arg_type = Float64
             default = 1e-4
         "--sizes_n"
@@ -59,7 +58,7 @@ function configuration(args)
             nargs = '+'
             default = [2000]
         "--methods"
-            help = "Methods to run: pr, pr_native, perturbed, pcg (default: pr perturbed pcg)"
+            help = "Methods to run: pr, perturbed, pcg (default: all three)"
             nargs = '+'
             default = string.(collect(DEFAULT_METHODS))
         "--repeats"
@@ -89,7 +88,7 @@ function configuration(args)
         "--output-dir"
             dest_name = "output_dir"
             help = "Directory for CSV tables and the scaling plot"
-            default = joinpath(@__DIR__, "linear_cpu_results")
+            default = ""
         "--reference-summary"
             dest_name = "reference_summary"
             help = "Optional earlier summary.csv: verify PR/perturbed numerical results and report timing ratios"
@@ -97,6 +96,12 @@ function configuration(args)
     end
     options = parse_args(args, settings; as_symbols=true)
     cfg = (; options...)
+    cfg.device in ("cpu", "gpu") || throw(ArgumentError("device must be cpu or gpu"))
+    cfg.direct_solver in ("auto", "cholesky", "cudss") || throw(ArgumentError("unknown direct solver"))
+    direct = cfg.direct_solver == "auto" ? (cfg.device == "gpu" ? :cudss : :cholesky) : Symbol(cfg.direct_solver)
+    direct == (cfg.device == "gpu" ? :cudss : :cholesky) || throw(ArgumentError("direct solver is incompatible with device"))
+    cfg = merge(cfg, (device=Symbol(cfg.device), direct_solver=direct,
+        output_dir=isempty(cfg.output_dir) ? joinpath(@__DIR__, "linear_$(cfg.device)_results") : cfg.output_dir))
     0 < cfg.tol < 1 || throw(ArgumentError("tol must lie in (0, 1)"))
     all(d -> 0 < d <= 1, cfg.densities) || throw(ArgumentError("densities must lie in (0, 1]"))
     all(>(0), cfg.sizes_n) || throw(ArgumentError("sizes_n must be positive"))
@@ -128,84 +133,37 @@ function comparison_market(n, m; seed=1, density=0.02)
     end
     w = 0.5 .+ rand(rng, m)
     w ./= sum(w)
-    ws = cpu_workspace(n)
-    add_ces!(ws, m; ρ=1.0, c=c, w=w)
-    return FisherMarket(ws)
-end
-
-"""Run the package's actual MirrorDec/Bids/opt! driver with its native stop."""
-function run_native_pr(f; tol, maxiter)
-    market = copy(f)
-    p = fill(sum(market.w) / market.n, market.n)
-    # Uniform x gives native iterate!'s uniform initial bids. Its initial scale
-    # cancels in the first Bids update, matching run_pr after that update.
-    market.x .= 1 / market.m
-    market.g .= market.w' ./ market.n
-    alg = MirrorDec(market.n, market.m, p; optimizer=Bids,
-        option_step=:shmyrev, tol, maxiter, maxtime=Inf)
-    alg.μ = 0.0
-    alg.t = alg.tₗ = 0.0
-    alg.dₙ = Inf
-    # opt! prints unconditionally. Suppress terminal output, while retaining
-    # all of the package's computation, diagnostics, and final play!.
-    redirect_stdout(devnull) do
-        opt!(alg, market; tol, maxiter, maxtime=Inf, keep_traj=false,
-            loginterval=max(1, maxiter))
-    end
-    native_price_step = alg.dₙ / maximum(alg.p)
-    native_price_threshold = tol^1.5
-    native_stop_met = native_price_step < native_price_threshold
-    status = native_stop_met ? :native_converged : :max_iter
-    # Final play! recovers x from the current bids/prices, then advances bids.
-    # Score its returned x; recomputing g ./ p here would use the extra update.
-    market.p .= alg.p
-    return (; st=(p=alg.p, x=market.x), traj=[(k=alg.k,)], status, factorizations=0,
-        native_price_step, native_price_threshold, native_stop_met)
+    return (; n, m, c, w)
 end
 
 function run_method(method, f, cfg)
     stop = z -> meets_target(z, cfg.tol)
     method == :pr && return run_pr(f; stop, maxiter=cfg.maxiter_pr)
-    method == :pr_native && return run_native_pr(f; tol=cfg.tol, maxiter=cfg.maxiter_pr)
     is_ipm(method) || throw(ArgumentError("Unknown method $method"))
     n, m = size(f.c)
     μ₀ = sum(f.w) / (n * (m + 1))
     σ_min = cfg.tol * minimum(f.w) / n
-    return linear_perturbed_ipm(f; p₀=fill(sum(f.w) / n, n), μ₀, σ₀=μ₀, σ_min,
+    return linear_perturbed_ipm(f; μ₀, σ₀=μ₀, σ_min,
         tol=cfg.tol, stop, maxiter=cfg.maxiter_newton, show_trace=false,
-        linear_solver=method == :pcg ? :pcg_ic : :cholesky,
+        linear_solver=method == :pcg ? :pcg_ic : cfg.direct_solver,
         linear_rtol=1e-9, ic_drop=0.0, ic_normalize=true)
 end
 
-function check_pr_agreement(cfg)
-    rows = NamedTuple[]
-    for m in cfg.sizes_m, density in cfg.densities,
-        n in unique([first(cfg.sizes_n), last(cfg.sizes_n)])
-        market = comparison_market(n, m; seed=cfg.seed, density)
-        for cap in (1, 5, 20)
-            # A stringent native tolerance makes these fixed-step comparisons;
-            # an exactly stationary market may legitimately stop earlier.
-            native = run_native_pr(market; tol=1e-14, maxiter=cap)
-            k = native.traj[end].k
-            shared = run_pr(market; stop=z -> false, maxiter=k)
-            price_error = norm(native.st.p - shared.st.p, Inf) / norm(shared.st.p, Inf)
-            allocation_error = norm(native.st.x - shared.st.x, Inf) /
-                max(1.0, norm(shared.st.x, Inf))
-            agrees = price_error < 1e-12 && allocation_error < 1e-12
-            push!(rows, (n=n, m=m, density=density, requested_updates=cap, updates=k,
-                price_error, allocation_error, agrees))
-        end
-    end
-    CSV.write(joinpath(cfg.output_dir, "pr_agreement.csv"), DataFrame(rows))
-    @assert all(r.agrees for r in rows) "Native and shared-target PR iterates differ; see pr_agreement.csv"
-    println("Native/shared PR agreement verified at ", length(rows), " checkpoints.")
-    flush(stdout)
-    return rows
+function device_market(f, device)
+    device == :cpu && return f
+    isdefined(@__MODULE__, :CUDA) || error("Start with test-gpu.jl or --device gpu to load the GPU environment")
+    CUDA.functional() || error("A functional NVIDIA CUDA device is required")
+    (; n=f.n, m=f.m, c=CUDA.CuArray(f.c), w=CUDA.CuArray(f.w))
 end
 
 function measured_run(method, f, cfg, repetition, actual_density)
     GC.gc()
-    timed = @timed run_method(method, f, cfg)
+    linear_sync(f.c)
+    timed = @timed begin
+        result = run_method(method, f, cfg)
+        linear_sync(f.c)
+        result
+    end
     result = timed.value
     z = linear_equilibrium_metrics(f.c, f.w, result.st.p, result.st.x)
     target_met = meets_target(z, cfg.tol)
@@ -228,13 +186,13 @@ function measured_run(method, f, cfg, repetition, actual_density)
         blas_threads=BLAS.get_num_threads(), maxiter_pr=cfg.maxiter_pr,
         maxiter_newton=cfg.maxiter_newton, method=method_label(method),
         repetition=repetition, status=string(result.status), target_met=target_met,
-        stop_rule=method == :pr_native ? "native_price_step" : "shared_accuracy",
-        native_stop_met=method == :pr_native ? result.native_stop_met : missing,
-        native_price_step=method == :pr_native ? result.native_price_step : missing,
-        native_price_threshold=method == :pr_native ? result.native_price_threshold : missing,
+        stop_rule="shared_accuracy", device=string(cfg.device),
+        gpu_name=cfg.device == :gpu ? CUDA.name(CUDA.device()) : missing,
+        transfer_seconds=cfg.transfer_seconds,
+        end_to_end_seconds=timed.time + cfg.transfer_seconds,
         updates=result.traj[end].k, factorizations=result.factorizations,
         matrix_vector_products=matrix_vector_products,
-        linear_solver=is_ipm(method) ? (method == :pcg ? "pcg_ic" : "cholesky") : missing,
+        linear_solver=is_ipm(method) ? (method == :pcg ? "pcg_ic" : string(cfg.direct_solver)) : missing,
         linear_rtol=is_ipm(method) ? 1e-9 : missing,
         average_linear_iterations=is_ipm(method) ? result.average_linear_iterations : missing,
         preconditioner_factorizations=is_ipm(method) ? result.preconditioner_factorizations : 0,
@@ -263,25 +221,30 @@ end
 function save_plot(rows, cfg)
     gr()
     panels = []
-    for m in cfg.sizes_m, density in cfg.densities
-        case_rows = filter(r -> r.m == m && r.density == density, rows)
-        timing = plot(xlabel="Goods (n)", ylabel="Median wall time (s)", yscale=:log10,
-            title="CPU time (m = $m, density = $density)", legend=:bottomright)
-        updates = plot(xlabel="Goods (n)", ylabel="Outer updates",
-            title="Iterations (m = $m, density = $density)", legend=false)
-        for (method, color) in zip(METHODS, (:steelblue, :darkorange, :seagreen, :purple))
-            rs = sort(filter(r -> r.method == method_label(method), case_rows); by=r -> r.n)
+    vary_m = length(cfg.sizes_n) == 1 && length(cfg.sizes_m) > 1
+    axis_key, fixed_key = vary_m ? (:m, :n) : (:n, :m)
+    fixed_sizes = vary_m ? cfg.sizes_n : cfg.sizes_m
+    axis_label = vary_m ? "Buyers (m)" : "Goods (n)"
+    for fixed_size in fixed_sizes, density in cfg.densities
+        case_rows = filter(r -> getproperty(r, fixed_key) == fixed_size && r.density == density, rows)
+        case_title = "$fixed_key = $fixed_size, density = $density"
+        timing = plot(xlabel=axis_label, ylabel="Median wall time (s)", yscale=:log10,
+            title="$(uppercase(string(cfg.device))) time ($case_title)", legend=:bottomright)
+        updates = plot(xlabel=axis_label, ylabel="Outer updates",
+            title="Iterations ($case_title)", legend=false)
+        for (method, color) in zip(METHODS, (:steelblue, :seagreen, :purple))
+            rs = sort(filter(r -> r.method == method_label(method), case_rows); by=r -> getproperty(r, axis_key))
             isempty(rs) && continue
-            ns = [r.n for r in rs]
+            sizes = [getproperty(r, axis_key) for r in rs]
             for (panel, values) in ((timing, [r.median_seconds for r in rs]),
                                     (updates, [r.updates for r in rs]))
                 # Only successful runs form the scaling curve. A cross shows a
                 # stopped run that did not reach the shared target.
                 good = [r.all_targets_met for r in rs]
-                plot!(panel, ns, [ok ? v : NaN for (ok, v) in zip(good, values)];
+                plot!(panel, sizes, [ok ? v : NaN for (ok, v) in zip(good, values)];
                     label=method_label(method), color, marker=:circle, lw=2)
                 if any(.!good)
-                    scatter!(panel, ns[.!good], values[.!good]; color, marker=:x,
+                    scatter!(panel, sizes[.!good], values[.!good]; color, marker=:x,
                         label="", markersize=7)
                 end
             end
@@ -292,7 +255,7 @@ function save_plot(rows, cfg)
         end
         append!(panels, (timing, updates))
     end
-    panel_rows = length(cfg.sizes_m) * length(cfg.densities)
+    panel_rows = length(fixed_sizes) * length(cfg.densities)
     fig = plot(panels...; layout=(panel_rows, 2),
         size=(1100, 420 * panel_rows), margin=6Plots.mm,
         plot_title="tol = $(cfg.tol)")
@@ -305,7 +268,7 @@ function compare_reference(summary, cfg)
     comparison = NamedTuple[]
     for row in summary
         row.method in (method_label(:pr), method_label(:perturbed)) || continue
-        old_label = row.method == method_label(:pr) ? "PR" : row.method
+        old_label = row.method == method_label(:pr) ? "PR (shared target)" : row.method
         matches = filter(r -> r.n == row.n && r.m == row.m && r.density == row.density &&
             r.method in (old_label, row.method), reference)
         nrow(matches) == 1 || error("Expected one reference row for n=$(row.n), m=$(row.m), density=$(row.density), $(row.method)")
@@ -336,31 +299,25 @@ function main(args=ARGS)
     cfg = configuration(args)
     BLAS.set_num_threads(cfg.blas_threads)
     mkpath(cfg.output_dir)
-    println("Julia ", VERSION, " | CPU | Julia threads = ", Threads.nthreads(),
+    println("Julia ", VERSION, " | ", uppercase(string(cfg.device)), " | Julia threads = ", Threads.nthreads(),
         " | BLAS threads = ", BLAS.get_num_threads())
     println("n = ", cfg.sizes_n, " | m = ", cfg.sizes_m, " | tol = ", cfg.tol,
         " | densities = ", cfg.densities, " | repeats = ", cfg.repeats)
     println("Methods: ", join(method_label.(cfg.methods), ", "))
-    println("PR (shared target), Perturbed, and PCG use the common clearing, budget, and utility target.")
+    println("PR, Perturbed, and PCG use the common clearing, budget, and utility target.")
     println("PCG uses IC(0), scalar-normalized inverse, zero initial direction, linear rtol = 1e-9; setup time is included.")
-    if :pr_native in cfg.methods
-        println("PR (ExchangeMarket) calls native opt!: relative price step < tol^1.5 = ", cfg.tol^1.5)
-    end
     println("target_met always scores the same shared target for every selected method.")
     println("Budget reporting compares total spending with total budget.\n")
     flush(stdout)
 
-    # When native PR is selected, verify its agreement with buffered PR outside
-    # all benchmark timers. Default runs do not invoke the native driver.
-    :pr_native in cfg.methods && check_pr_agreement(cfg)
-
-    # The same dense Float64 code paths apply at every size. Compile complete
-    # solves once on a small market, rather than timing compilation at each n.
+    # Warm up the selected case (including GPU sparse solvers) before timing.
     warmup_cfg = merge(cfg, (density=first(cfg.densities),))
-    warmup = comparison_market(min(100, minimum(cfg.sizes_n)), min(2000, minimum(cfg.sizes_m));
+    warmup = comparison_market(minimum(cfg.sizes_n), minimum(cfg.sizes_m);
         seed=cfg.seed, density=warmup_cfg.density)
+    warmup = device_market(warmup, cfg.device)
     for method in cfg.methods
         result = run_method(method, warmup, warmup_cfg)
+        linear_sync(warmup.c)
         println("Warm-up ", method_label(method), ": ", result.status)
         flush(stdout)
     end
@@ -370,6 +327,11 @@ function main(args=ARGS)
         case_cfg = merge(cfg, (; density))
         market = comparison_market(n, m; seed=cfg.seed, density)
         actual_density = count(!iszero, market.c) / length(market.c)
+        transfer_seconds = @elapsed begin
+            market = device_market(market, cfg.device)
+            linear_sync(market.c)
+        end
+        case_cfg = merge(case_cfg, (; transfer_seconds))
         println("\nn = ", n, ", m = ", m, ", density = ", density)
         for repetition in 1:cfg.repeats
             for method in circshift(cfg.methods, repetition - 1)
@@ -404,5 +366,5 @@ end
 end # module
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    LinearCPUComparison.main()
+    LinearComparison.main()
 end

@@ -112,7 +112,9 @@ Results go to `scripts/linear/jd_gpu_results/runs.csv`, with per-job logs,
 trajectories, settings, source hash, environment, and `cmd.sh`. Completed rows
 are saved immediately. `--resume` requires identical settings and input hash,
 and skips completed jobs. Each method runs in an isolated Julia process to
-contain GPU failures. A two-step small-market warm-up is excluded from timing.
+contain GPU failures. Two updates at the actual problem size and a diagnostic call are warmed up
+before initializing a fresh timed state. Warm-up time is reported separately;
+using only a tiny market leaves shape-specialized CUDA compilation in timing.
 Host-to-device preparation is reported separately; solve time includes
 workspace allocation, Hessian pattern construction, analysis/factorization,
 iterations, diagnostics, and final synchronization. The 7,200-second limit

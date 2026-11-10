@@ -81,7 +81,7 @@ function base_row(f,method,repeat,cfg,digest)
       paper_goods=expected(JDData.PAPER_GOODS),paper_nnz=expected(JDData.PAPER_NNZ),
       method=method=="pr" ? "PR" : method=="perturbed" ? "Perturbed" : "PCG",repeat,
       status="pending",target_met=false,criterion=cfg["criterion"],tol=cfg["tol"],
-      wall_seconds=NaN,transfer_seconds=NaN,updates=0,
+      wall_seconds=NaN,transfer_seconds=NaN,warmup_seconds=NaN,updates=0,
       paper_error=NaN,paper_primal=NaN,paper_dual=NaN,paper_gap=NaN,
       mc=NaN,regret=NaN,shared_error=NaN,total_spending=NaN,total_budget=sum(f.w),
       total_budget_error=NaN,sigma=NaN,mu=NaN,sigma_min=cfg["tol"]*minimum(f.w)/f.n,
@@ -128,14 +128,15 @@ function solve(f,method,cfg,stop)
         maxiter=cfg["maxiter-ipm"],linear_rtol=cfg["linear-rtol"],
         linear_maxiter=cfg["linear-maxiter"]==0 ? max(20,5size(f.c,1)) : cfg["linear-maxiter"])
 end
-function warmup(method,cfg)
-    rng=MersenneTwister(812);c=Float64.(rand(rng,17,29).<.25).*rand(rng,1:7,17,29)
-    for j in 1:17;c[j,mod1(j,29)]=1;end
-    for i in 1:29;c[mod1(i,17),i]=1;end
-    w=rand(rng,29).+.1;w./=sum(w)
-    f=(c=jd_gpu_array(sparse(c)),w=CuArray(w))
+function warmup(f,method,cfg)
     small=merge(cfg,Dict("maxiter-pr"=>2,"maxiter-ipm"=>2))
-    solve(f,method,small,JDStop(small,"",time(),0.0,0,nothing,true,""))
+    result=solve(f,method,small,JDStop(small,"",time(),0.0,0,nothing,true,""))
+    # Exercise timed diagnostics too, including their first-use compilation.
+    mktempdir() do directory
+        forced=merge(cfg,Dict("time-limit"=>0.0))
+        monitor=JDStop(forced,joinpath(directory,"warmup"),time(),0.0,0,nothing,false,CUDA.name(CUDA.device()))
+        monitor(result.traj[end])
+    end
     CUDA.synchronize();nothing
 end
 function worker(cfg)
@@ -164,12 +165,17 @@ function worker_gpu(cfg,f,row)
     CUDA.functional() || error("CUDA device required")
     BLAS.set_num_threads(1)
     method=cfg["methods"];job=cfg["job"]
-    warmup(method,cfg);GC.gc();CUDA.reclaim()
     row=merge(row,(gpu=CUDA.name(CUDA.device()),))
     transferred=@timed begin
         device=(c=jd_gpu_array(f.c),w=CuArray(f.w));CUDA.synchronize();device
     end
     row=merge(row,(transfer_seconds=transferred.time,))
+    # CUDA reductions specialize on problem shape; a tiny market alone leaves
+    # compilation in the first timed iteration. Use two untimed actual-size
+    # updates, then initialize a fresh solver state for the measured run.
+    warmup_seconds=@elapsed warmup(transferred.value,method,cfg)
+    GC.gc();CUDA.reclaim()
+    row=merge(row,(warmup_seconds=warmup_seconds,))
     started=time()
     monitor=JDStop(cfg,job,started,0.0,0,nothing,false,row.gpu)
     atomic_toml(job*".started",Dict("time"=>started))

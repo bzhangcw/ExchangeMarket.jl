@@ -310,7 +310,7 @@ function linear_solver_workspace(c::JDSparseArray,w,method)
     vec()=CUDA.zeros(Float64,n)
     direction=vec();cg_type=isdefined(Krylov,:CgWorkspace) ? Krylov.CgWorkspace : Krylov.CgSolver
     cg=method==:pcg_ic ? cg_type(n,n,typeof(direction)) : nothing
-    direct=method==:cudss ? CUDSS.CudssSolver(A,"SPD",'L') : nothing
+    direct=nothing # Avoid an unused, unanalyzed native cuDSS object.
     core=LinearGPUSolver(method,A,indices,direction,vec(),vec(),vec(),vec(),cg,direct,nothing,nothing,1.0,false)
     JDSolverWorkspace(core,H,V)
 end

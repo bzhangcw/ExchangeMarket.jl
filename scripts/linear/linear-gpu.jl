@@ -135,7 +135,7 @@ function linear_solver_workspace(c::CUDA.CuArray, w, method)
     direction = vec()
     cg_type = isdefined(Krylov, :CgWorkspace) ? Krylov.CgWorkspace : Krylov.CgSolver
     cg = method == :pcg_ic ? cg_type(n, n, typeof(direction)) : nothing
-    direct = method == :cudss ? CUDSS.CudssSolver(A, "SPD", 'L') : nothing
+    direct = nothing # Allocate cuDSS only when a system is actually solved.
     LinearGPUSolver(method, A, indices, direction, vec(), vec(), vec(), vec(),
         cg, direct, nothing, nothing, 1.0, false)
 end
@@ -168,6 +168,7 @@ function linear_gpu_solve(B, b::CUDA.CuVector{Float64};
         linear_gpu_update_values!(ws, B)
         if method == :cudss
             if !ws.analyzed
+                ws.direct = CUDSS.CudssSolver(ws.matrix, "SPD", 'L')
                 CUDSS.cudss("analysis", ws.direct, ws.direction, b)
                 ws.analyzed = true
             end

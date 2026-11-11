@@ -58,7 +58,7 @@ both dimensions explicitly as `goods` and `users`.
 From the repository root, locally or in the same turing1 checkout:
 
 ```bash
-bash scripts/linear/jd.sh
+bash dataset/jd.sh
 ```
 
 Python 3.8+ and its standard library are sufficient. The script downloads and
@@ -141,11 +141,11 @@ by cuDSS or IC(0)/PCG. Factor fill can still be expensive at large scales.
 by seven UInt64 values (version=1, goods, users, nnz, seed, flags=0, reserved=0).
 It then stores CSC column pointers (UInt64, users+1), row indices (UInt32,
 nnz), raw click counts (Float64, nnz), and raw budget draws (Float64, users).
-Indices are one-based. `jd-data.jl` reads a user prefix, removes unused goods,
+Indices are one-based. `dataset/jd-data.jl` reads a user prefix, removes unused goods,
 and normalizes its budgets without changing the utility values.
 
 ```julia
-include("scripts/linear/jd-data.jl")
+include("dataset/jd-data.jl")
 market = JDData.load_market("dataset/jd/utilities.bin"; users=2000)
 @assert sum(market.w) ≈ 1
 # market.c is SparseMatrixCSC{Float64}; rows = goods, columns = users.

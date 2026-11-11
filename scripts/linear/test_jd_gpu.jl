@@ -3,7 +3,7 @@
 module JDComparison
 using ArgParse, CSV, SparseArrays, LinearAlgebra, Random, SHA, TOML, Dates
 const Tables=CSV.Tables
-include("jd-data.jl")
+include(joinpath(@__DIR__, "../../dataset/jd-data.jl"))
 
 function options(args)
     settings=ArgParseSettings(description="JD GPU comparison: PR, perturbed IPM/cuDSS, IPM/PCG-IC(0)")

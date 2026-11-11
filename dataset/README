@@ -2,3 +2,26 @@
 
 
 - URL: https://movielens.org/
+
+# JD click dataset
+
+From the repository root, run:
+
+    bash dataset/jd.sh
+
+The pipeline downloads and verifies the source, then preprocesses it into
+dataset/jd/utilities.bin. Raw click counts are retained as utilities, and the
+Julia loader normalizes the selected budgets to sum to 1.
+
+Data utilities:
+
+- jd_download.py: resumable download and checksum verification.
+- jd_preprocess.py: click aggregation and sparse binary output.
+- jd-data.jl: Julia loader for selected user cohorts.
+
+Data checks (no GPU required):
+
+    python3 dataset/test-jd-preprocess.py
+    julia dataset/test-jd-data.jl
+
+See scripts/linear/JD.md for the experiment setup and GPU comparison.

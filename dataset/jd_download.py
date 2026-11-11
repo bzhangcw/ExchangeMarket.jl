@@ -80,6 +80,6 @@ def download(directory):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data-dir', type=Path, default=Path(__file__).resolve().parents[2]/'dataset'/'jd')
+    parser.add_argument('--data-dir', type=Path, default=Path(__file__).resolve().parent/'jd')
     args = parser.parse_args()
     download(args.data_dir)

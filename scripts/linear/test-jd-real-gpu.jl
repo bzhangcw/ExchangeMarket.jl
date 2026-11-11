@@ -1,5 +1,5 @@
 using Test,Random,SparseArrays,LinearAlgebra
-include("jd-data.jl")
+include(joinpath(@__DIR__, "../../dataset/jd-data.jl"))
 include("linear-perturbed.jl")
 include("propres.jl")
 include("linear-gpu.jl")

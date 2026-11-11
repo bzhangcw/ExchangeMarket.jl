@@ -59,6 +59,6 @@ errors are still checked by `meets_target`.
 
 ## JD click-data experiment
 
-See [JD.md](JD.md) for `jd.sh` (download and preprocess), `test_jd_gpu.jl`
+See [JD.md](JD.md) for [`dataset/jd.sh`](../../dataset/jd.sh) (download and preprocess), `test_jd_gpu.jl`
 (the three-method sparse GPU comparison), and `plot_jd_gpu.jl`. JD utilities
 remain raw click counts; budgets sum to one within each selected market.

@@ -180,7 +180,7 @@ def preprocess(args):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parents[2]/'dataset'/'jd')
+    parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'jd')
     parser.add_argument('--source',type=Path)
     parser.add_argument('--seed',type=int,default=1)
     parser.add_argument('--month',default='',help='Optional YYYY-MM filter; default retains the complete published click log')

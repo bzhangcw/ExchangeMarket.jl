@@ -2,8 +2,10 @@
 # Regenerate a comparison figure and median summary from saved measurements.
 ENV["GKSwstype"]="100"
 using CSV, DataFrames, Statistics, Plots
+include(joinpath(@__DIR__, "linear-labels.jl"))
 directory=isempty(ARGS) ? joinpath(@__DIR__,"jd-gpu-results") : abspath(only(ARGS))
 runs=CSV.read(joinpath(directory,"runs.csv"),DataFrame)
+runs.method = [linear_method_label(m, :gpu) for m in runs.method]
 summary=combine(groupby(runs,[:users,:goods,:nnz,:method,:criterion,:tol]),
     :target_met=>all=>:all_runs_met_target,
     :wall_seconds=>median=>:median_wall_seconds,
@@ -17,7 +19,7 @@ timing=plot(xlabel="Users",ylabel="Solve time (seconds)",xscale=:log10,yscale=:l
     title="JD: raw clicks, total budget = 1",legend=:topleft)
 iterations=plot(xlabel="Users",ylabel="Updates + 1",xscale=:log10,yscale=:log10,
     title="Stopping rule: $(first(summary.criterion)), tol=$(first(summary.tol))",legend=false)
-for (method,color) in zip(("PR","Perturbed","PCG"),(:steelblue,:darkorange,:seagreen))
+for (method,color) in zip(("PR","Factorization (cuDSS)","PCG"),(:steelblue,:darkorange,:seagreen))
     rows=sort(filter(r->r.method==method,summary),:users)
     isempty(rows) && continue
     good=rows.all_runs_met_target

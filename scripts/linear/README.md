@@ -1,7 +1,10 @@
 # Standalone linear Fisher comparison
 
 `test-linear.jl` shares market generation, reporting, and accuracy checks for
-three methods: PR, Perturbed (direct IPM), and PCG (the same IPM with IC(0)).
+three methods: PR, Factorization (direct IPM), and PCG (the same IPM with IC(0)).
+New runs and resumed-run reports use **Factorization (CPU)** or
+**Factorization (cuDSS)** in console logs, CSVs, and plot legends.
+The CLI method identifier remains `perturbed` for compatibility with saved commands.
 The benchmark does not import or call ExchangeMarket.
 
 ```sh
@@ -89,6 +92,41 @@ preparation and, on GPU, the initial transfer. It is reported separately, and
 allocations only. All methods use the same raw-allocation accuracy predicate.
 Budget reporting compares total spending with total budget; individual budget
 errors are still checked by `meets_target`.
+
+## Saved comparison statistics and plots
+
+From the repository root, regenerate reports from the existing CPU/GPU CSVs:
+
+```sh
+julia --startup-file=no scripts/linear/plot-linear.jl
+```
+
+`--cpu-dir`, `--gpu-dir`, and `--output-dir` select alternative result folders.
+The default output is `linear-gpu-sparse-results/comparison/`. The script verifies
+matching market hashes and settings before comparing devices. It exports:
+
+- `statistics.csv`: convergence counts, runtime means/medians, update counts,
+  market-clearing error, regret, and aggregate budget error, overall and per sweep.
+- `paired-speedups.csv`: CPU/GPU ratios using only cases that converged on both
+  devices. The ratio of mean times and the geometric mean of per-case speedups
+  are reported separately.
+- `fastest-counts.csv` and `failures.csv`: fastest converged methods and all
+  unsuccessful runs.
+- `runtime-vary-n`, `runtime-vary-m`, `iterations-vary-n`, and
+  `iterations-vary-m`: CPU/GPU figures in PNG and PDF. Crosses mark missed targets.
+- `performance-profile`: the fraction of cases each method solves within a
+  given factor of the fastest converged method on the same device. Failed runs
+  remain unsolved throughout the profile.
+
+The earlier `scaling-v2.png` / `summary-v2.csv` (varying goods) and
+`scaling-v3.png` / `summary-v3.csv` (varying buyers) names are also restored in
+each sparse result folder. Earlier dense result folders are preserved.
+
+Runtime figures exclude preparation and warm-up. All-run statistics include
+capped runs; converged-only statistics are labeled explicitly. Each sweep
+measurement counts once, including configurations present in both sweeps.
+The current results have one timed repetition per point, so the plots show
+observations without uncertainty bands.
 
 ## JD click-data experiment
 

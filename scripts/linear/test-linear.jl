@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# Standalone PR / Perturbed / PCG comparison with a shared CPU/GPU runner.
+# Standalone PR / Factorization / PCG comparison with a shared CPU/GPU runner.
 # julia test-linear.jl --device cpu --sizes_n 500 --sizes_m 1000 --tol 1e-4
 # julia test-gpu.jl                         # same case on CUDA, using cuDSS / IC(0)
 # The generated market is copied to the selected device once per case. Transfer
@@ -19,22 +19,21 @@ using Random, SparseArrays, LinearAlgebra, Statistics, Printf, SHA, TOML, Dates
 using ArgParse, CSV, DataFrames
 ENV["GKSwstype"] = get(ENV, "GKSwstype", "100")
 using Plots
+include(joinpath(@__DIR__, "linear-labels.jl"))
 include(joinpath(@__DIR__, "linear-perturbed.jl"))
 include(joinpath(@__DIR__, "propres.jl"))
 requested_gpu && include(joinpath(@__DIR__, "linear-gpu.jl"))
 
 const METHODS = (:pr, :perturbed, :pcg)
 const DEFAULT_METHODS = (:pr, :perturbed, :pcg)
-const LABELS = Dict(:pr => "PR",
-    :perturbed => "Perturbed", :pcg => "PCG")
 is_ipm(method) = method in (:perturbed, :pcg)
-method_label(method) = LABELS[method]
+method_label(method, device) = linear_method_label(method, device)
 meets_target(z, tol) = linear_meets_target(z, tol)
 
 function configuration(args)
     # Preserve the requested underscore spellings of --sizes_n and --sizes_m.
     settings = ArgParseSettings(autofix_names=false,
-        description="Compare standalone PR, perturbed IPM, and IC-preconditioned PCG; select CPU or GPU.")
+        description="Compare standalone PR, Factorization, and IC-preconditioned PCG; select CPU or GPU.")
     @add_arg_table! settings begin
         "--device"
             help = "Array backend: cpu or gpu (GPU uses CUDA)"
@@ -108,7 +107,7 @@ function configuration(args)
             default = ""
         "--reference-summary"
             dest_name = "reference_summary"
-            help = "Optional earlier summary.csv: verify PR/perturbed numerical results and report timing ratios"
+            help = "Optional earlier summary.csv: verify PR/Factorization numerical results and report timing ratios"
             default = ""
     end
     options = parse_args(args, settings; as_symbols=true)
@@ -198,7 +197,7 @@ function measured_run(method, f, cfg, repetition, actual_density; progress=nothi
     return (n=f.n, m=f.m, tol=cfg.tol, seed=cfg.seed, density=cfg.density,
         actual_density=actual_density, julia_threads=Threads.nthreads(),
         blas_threads=BLAS.get_num_threads(), maxiter_pr=cfg.maxiter_pr,
-        maxiter_newton=cfg.maxiter_newton, method=method_label(method),
+        maxiter_newton=cfg.maxiter_newton, method=method_label(method, cfg.device),
         repetition=repetition, status=string(status), target_met=target_met,
         stop_rule="shared_accuracy", device=string(cfg.device), storage=string(cfg.storage),
         time_limit=cfg.time_limit, warmup_seconds=cfg.warmup_seconds,
@@ -249,7 +248,7 @@ function save_plot(rows, cfg)
         updates = plot(xlabel=axis_label, ylabel="Outer updates",
             title="Iterations ($case_title)", legend=false)
         for (method, color) in zip(METHODS, (:steelblue, :seagreen, :purple))
-            rs = sort(filter(r -> r.method == method_label(method), case_rows); by=r -> getproperty(r, axis_key))
+            rs = sort(filter(r -> linear_method_key(r.method) == method, case_rows); by=r -> getproperty(r, axis_key))
             isempty(rs) && continue
             sizes = [getproperty(r, axis_key) for r in rs]
             for (panel, values) in ((timing, [r.median_seconds for r in rs]),
@@ -258,7 +257,7 @@ function save_plot(rows, cfg)
                 # stopped run that did not reach the shared target.
                 good = [r.all_targets_met for r in rs]
                 plot!(panel, sizes, [ok ? v : NaN for (ok, v) in zip(good, values)];
-                    label=method_label(method), color, marker=:circle, lw=2)
+                    label=method_label(method, cfg.device), color, marker=:circle, lw=2)
                 if any(.!good)
                     scatter!(panel, sizes[.!good], values[.!good]; color, marker=:x,
                         label="", markersize=7)
@@ -283,10 +282,9 @@ function compare_reference(summary, cfg)
     reference = CSV.read(cfg.reference_summary, DataFrame)
     comparison = NamedTuple[]
     for row in summary
-        row.method in (method_label(:pr), method_label(:perturbed)) || continue
-        old_label = row.method == method_label(:pr) ? "PR (shared target)" : row.method
+        linear_method_key(row.method) in (:pr, :perturbed) || continue
         matches = filter(r -> r.n == row.n && r.m == row.m && r.density == row.density &&
-            r.method in (old_label, row.method), reference)
+            linear_method_key(r.method) == linear_method_key(row.method), reference)
         nrow(matches) == 1 || error("Expected one reference row for n=$(row.n), m=$(row.m), density=$(row.density), $(row.method)")
         ref = only(eachrow(matches))
         old_storage=hasproperty(ref,:storage) ? ref.storage : "dense"
@@ -322,7 +320,10 @@ function atomic_toml(path,data)
     open(path*".tmp","w") do io;TOML.print(io,data);end
     mv(path*".tmp",path;force=true)
 end
-read_row(path)=only(Tables.rowtable(CSV.File(path;stringtype=String)))
+function read_row(path)
+    row=only(Tables.rowtable(CSV.File(path;stringtype=String)))
+    merge(row,(method=linear_method_label(row.method,row.device),))
+end
 const Tables=CSV.Tables
 function jobs(cfg)
     [(;n,m,density,repetition,method,
@@ -333,7 +334,7 @@ end
 function pending_row(job,cfg,f,digest,actual_density,transfer_seconds)
     (;n=f.n,m=f.m,tol=cfg.tol,seed=cfg.seed,density=job.density,actual_density,
       julia_threads=Threads.nthreads(),blas_threads=BLAS.get_num_threads(),
-      maxiter_pr=cfg.maxiter_pr,maxiter_newton=cfg.maxiter_newton,method=method_label(job.method),
+      maxiter_pr=cfg.maxiter_pr,maxiter_newton=cfg.maxiter_newton,method=method_label(job.method, cfg.device),
       repetition=job.repetition,status="pending",target_met=false,stop_rule="shared_accuracy",
       device=string(cfg.device),storage=string(cfg.storage),time_limit=cfg.time_limit,
       warmup_seconds=NaN,market_sha256=digest,message="",
@@ -385,7 +386,7 @@ function worker_main(cfg)
         base=pending_row(job,cfg,market,digest,actual_density,transfer_seconds)
         atomic_csv(job.path*".progress.csv",base)
         try
-            println("Running ",job.method," n=",job.n," m=",job.m," density=",job.density);flush(stdout)
+            println("Running ",method_label(job.method,cfg.device)," n=",job.n," m=",job.m," density=",job.density);flush(stdout)
             phase!(cfg,job,"warmup",300.0)
             # Two untimed updates at the actual shape; never warm up to convergence.
             casecfg=merge(cfg,(density=job.density,transfer_seconds,warmup_seconds=0.0,market_sha256=digest))
@@ -437,7 +438,7 @@ function save_metadata(cfg)
         for (k,v) in pairs(cfg) if !(k in (:resume,:worker,:verbose)))
     signature["julia_version"]=string(VERSION)
     source=IOBuffer()
-    for name in ("test-linear.jl","linear-backend.jl","linear-perturbed.jl","linear-perturbed-linsys.jl",
+    for name in ("test-linear.jl","linear-labels.jl","linear-backend.jl","linear-perturbed.jl","linear-perturbed-linsys.jl",
                  "propres.jl","linear-sparse.jl","linear-gpu.jl","linear-gpu-sparse.jl")
         write(source,read(joinpath(@__DIR__,name)))
     end
@@ -540,7 +541,7 @@ function main(args=ARGS)
     rm(current;force=true)
     summary=NamedTuple[]
     for m in cfg.sizes_m,n in cfg.sizes_n,density in cfg.densities,method in cfg.methods
-        push!(summary,summarize(filter(r->r.n==n && r.m==m && r.density==density && r.method==method_label(method),runs)))
+        push!(summary,summarize(filter(r->r.n==n && r.m==m && r.density==density && linear_method_key(r.method)==method,runs)))
     end
     CSV.write(joinpath(cfg.output_dir,"summary.csv"),DataFrame(summary))
     compare_reference(summary,cfg);save_plot(summary,cfg)

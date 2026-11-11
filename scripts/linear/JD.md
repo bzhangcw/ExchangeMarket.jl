@@ -1,6 +1,6 @@
 # JD click-data experiment
 
-The three methods are PR, Perturbed (IPM with cuDSS), and PCG (the same IPM
+The three methods are PR, Factorization (cuDSS), and PCG (the same IPM
 with native CUDA IC(0)). They share the existing outer algorithms and do not
 use the ExchangeMarket interface. They use the same `run_linear` entry point
 and generic sparse CPU/GPU backend as the synthetic experiments. `test-jd-gpu.jl` uses our earlier shared

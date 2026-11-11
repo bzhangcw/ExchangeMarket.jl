@@ -3,10 +3,11 @@
 module JDComparison
 using ArgParse, CSV, SparseArrays, LinearAlgebra, Random, SHA, TOML, Dates
 const Tables=CSV.Tables
+include(joinpath(@__DIR__, "linear-labels.jl"))
 include(joinpath(@__DIR__, "../../dataset/jd-data.jl"))
 
 function options(args)
-    settings=ArgParseSettings(description="JD GPU comparison: PR, perturbed IPM/cuDSS, IPM/PCG-IC(0)")
+    settings=ArgParseSettings(description="JD GPU comparison: PR, Factorization (cuDSS), PCG")
     @add_arg_table! settings begin
         "--data"
             default=normpath(joinpath(@__DIR__,"../../dataset/jd/utilities.bin"))
@@ -87,7 +88,7 @@ function base_row(f,method,repeat,cfg,digest)
     expected(a)=idx===nothing ? 0 : a[idx]
     (;users=f.m,goods=f.n,nnz=nnz(f.c),paper_users=expected(JDData.PAPER_USERS),
       paper_goods=expected(JDData.PAPER_GOODS),paper_nnz=expected(JDData.PAPER_NNZ),
-      method=method=="pr" ? "PR" : method=="perturbed" ? "Perturbed" : "PCG",repeat,
+      method=linear_method_label(method, :gpu),repeat,
       status="pending",target_met=false,criterion=cfg["criterion"],tol=cfg["tol"],
       wall_seconds=NaN,transfer_seconds=NaN,warmup_seconds=NaN,updates=0,
       paper_error=NaN,paper_primal=NaN,paper_dual=NaN,paper_gap=NaN,
@@ -296,10 +297,10 @@ function main(args=ARGS)
     rows=NamedTuple[]
     for users in split(cfg["users"],','),repeat in 1:cfg["repeats"],method in split(cfg["methods"],',')
         job=joinpath(out,"jobs","users-$(users)-$(method)-$(repeat)")
-        println("Running users=",users," method=",method," repeat=",repeat);flush(stdout)
+        println("Running users=",users," method=",linear_method_label(method,:gpu)," repeat=",repeat);flush(stdout)
         if cfg["resume"] && isfile(job*".csv")
             row=only(Tables.rowtable(CSV.File(job*".csv";stringtype=String)))
-            row=merge(row,(repeat=repeat,matrix_sha256=digest))
+            row=merge(row,(method=linear_method_label(row.method,:gpu),repeat=repeat,matrix_sha256=digest))
         else
             # Only our incomplete per-job markers are replaced on resume.
             for suffix in (".started",".progress");rm(job*suffix;force=true);end

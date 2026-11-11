@@ -1,6 +1,6 @@
 # Standalone linear Fisher comparison
 
-`test_linear.jl` shares market generation, reporting, and accuracy checks for
+`test-linear.jl` shares market generation, reporting, and accuracy checks for
 three methods: PR, Perturbed (direct IPM), and PCG (the same IPM with IC(0)).
 The benchmark does not import or call ExchangeMarket.
 
@@ -21,7 +21,6 @@ On the NVIDIA machine, instantiate the separate environment once:
 ```sh
 julia --project=scripts/linear/gpu -e 'using Pkg; Pkg.instantiate()'
 julia scripts/linear/test-gpu.jl --densities 0.02
-julia --project=scripts/linear/gpu scripts/linear/test-gpu-correctness.jl
 ```
 
 The GPU project pins CUDA.jl 5.4.2 and CUDSS.jl 0.1.6 to the native interfaces
@@ -59,6 +58,6 @@ errors are still checked by `meets_target`.
 
 ## JD click-data experiment
 
-See [JD.md](JD.md) for [`dataset/jd.sh`](../../dataset/jd.sh) (download and preprocess), `test_jd_gpu.jl`
-(the three-method sparse GPU comparison), and `plot_jd_gpu.jl`. JD utilities
+See [JD.md](JD.md) for [`dataset/jd.sh`](../../dataset/jd.sh) (download and preprocess), `test-jd-gpu.jl`
+(the three-method sparse GPU comparison), and `plot-jd-gpu.jl`. JD utilities
 remain raw click counts; budgets sum to one within each selected market.

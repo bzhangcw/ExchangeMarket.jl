@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 # Standalone PR / Perturbed / PCG comparison with a shared CPU/GPU runner.
-# julia test_linear.jl --device cpu --sizes_n 500 --sizes_m 1000 --tol 1e-4
+# julia test-linear.jl --device cpu --sizes_n 500 --sizes_m 1000 --tol 1e-4
 # julia test-gpu.jl                         # same case on CUDA, using cuDSS / IC(0)
 # The generated market is copied to the selected device once per case. Transfer
 # time is reported separately; wall_seconds includes solver initialization,
@@ -101,7 +101,7 @@ function configuration(args)
     direct = cfg.direct_solver == "auto" ? (cfg.device == "gpu" ? :cudss : :cholesky) : Symbol(cfg.direct_solver)
     direct == (cfg.device == "gpu" ? :cudss : :cholesky) || throw(ArgumentError("direct solver is incompatible with device"))
     cfg = merge(cfg, (device=Symbol(cfg.device), direct_solver=direct,
-        output_dir=isempty(cfg.output_dir) ? joinpath(@__DIR__, "linear_$(cfg.device)_results") : cfg.output_dir))
+        output_dir=isempty(cfg.output_dir) ? joinpath(@__DIR__, "linear-$(cfg.device)-results") : cfg.output_dir))
     0 < cfg.tol < 1 || throw(ArgumentError("tol must lie in (0, 1)"))
     all(d -> 0 < d <= 1, cfg.densities) || throw(ArgumentError("densities must lie in (0, 1]"))
     all(>(0), cfg.sizes_n) || throw(ArgumentError("sizes_n must be positive"))

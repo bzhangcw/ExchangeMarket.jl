@@ -11,7 +11,7 @@ function options(args)
         "--data"
             default=normpath(joinpath(@__DIR__,"../../dataset/jd/utilities.bin"))
         "--outdir"
-            default=joinpath(@__DIR__,"jd_gpu_results")
+            default=joinpath(@__DIR__,"jd-gpu-results")
         "--users"
             help="Comma-separated prefixes; all means every identified user"
             default="2000,5000,20000,50000,200000,500000,1000000,all"
@@ -23,6 +23,13 @@ function options(args)
         "--criterion"
             range_tester=x->x in ("paper","shared")
             default="shared"
+        "--verbose"
+            help="Stream worker logs and print IPM iterations in the terminal"
+            action=:store_true
+        "--show-every"
+            help="Print every N IPM updates when --verbose is enabled"
+            arg_type=Int
+            default=1
         "--time-limit"
             arg_type=Float64
             default=7200.0
@@ -56,6 +63,7 @@ function options(args)
     end
     cfg=parse_args(args,settings)
     0<cfg["tol"]<1 || error("tol must be in (0,1)")
+    cfg["show-every"]>0 || error("show-every must be positive")
     cfg["time-limit"]>0 && cfg["repeats"]>0 || error("invalid run limits")
     cfg["maxiter-pr"]>=0 && cfg["maxiter-ipm"]>=0 || error("negative update limit")
     0<cfg["linear-rtol"]<1 && cfg["linear-maxiter"]>=0 || error("invalid linear solve limits")
@@ -125,12 +133,13 @@ end
 function solve(f,method,cfg,stop)
     method=="pr" && return run_pr(f.c,f.w;stop,maxiter=cfg["maxiter-pr"])
     linear_perturbed_ipm(f;tol=cfg["tol"],stop,σ_min=cfg["tol"]*minimum(f.w)/size(f.c,1),
-        linear_solver=method=="perturbed" ? :cudss : :pcg_ic,show_trace=false,
+        linear_solver=method=="perturbed" ? :cudss : :pcg_ic,
+        show_trace=cfg["verbose"],show_every=cfg["show-every"],
         maxiter=cfg["maxiter-ipm"],linear_rtol=cfg["linear-rtol"],
         linear_maxiter=cfg["linear-maxiter"]==0 ? max(20,5size(f.c,1)) : cfg["linear-maxiter"])
 end
 function warmup(f,method,cfg)
-    small=merge(cfg,Dict("maxiter-pr"=>2,"maxiter-ipm"=>2))
+    small=merge(cfg,Dict("maxiter-pr"=>2,"maxiter-ipm"=>2,"verbose"=>false))
     result=solve(f,method,small,JDStop(small,"",time(),0.0,0,nothing,true,""))
     # Exercise timed diagnostics too, including their first-use compilation.
     mktempdir() do directory
@@ -207,19 +216,29 @@ function worker_gpu(cfg,f,row)
 end
 
 shellquote(s)="'"*replace(string(s),"'"=>"'\\''")*"'"
+# Replay only newly written bytes; the worker retains its complete log file.
+function stream_worker_log(path,offset)
+    open(path,"r") do io
+        seek(io,offset)
+        print(stdout,read(io,String));flush(stdout)
+        position(io)
+    end
+end
 function run_case(cfg,users,method,repeat,digest,job)
     f=JDData.load_market(cfg["data"];users=users=="all" ? nothing : parse(Int,users))
     row=base_row(f,method,repeat,cfg,digest);f=nothing;GC.gc()
     child=String["--worker","--job",job,"--job-repeat",string(repeat),"--users",users,"--methods",method]
-    for key in ("data","outdir","tol","criterion","time-limit","maxiter-pr","maxiter-ipm","linear-rtol","linear-maxiter")
+    for key in ("data","outdir","tol","criterion","time-limit","maxiter-pr","maxiter-ipm","linear-rtol","linear-maxiter","show-every")
         append!(child,["--"*key,string(cfg[key])])
     end
+    cfg["verbose"] && push!(child,"--verbose")
     project=dirname(Base.active_project())
     command=`$(Base.julia_cmd()) --startup-file=no --project=$project $(@__FILE__) $child`
-    launch=time();failure=""
+    launch=time();failure="";log_offset=0
     open(job*".log","w") do log
         process=run(pipeline(addenv(command,"JULIA_NUM_THREADS"=>"1","OPENBLAS_NUM_THREADS"=>"1");stdout=log,stderr=log);wait=false)
         while process_running(process)
+            cfg["verbose"] && (log_offset=stream_worker_log(job*".log",log_offset))
             if isfile(job*".started")
                 start=TOML.parsefile(job*".started")["time"]
                 time()-start>cfg["time-limit"]+5 && (failure="time_limit")
@@ -235,6 +254,7 @@ function run_case(cfg,users,method,repeat,digest,job)
             sleep(.25)
         end
         wait(process)
+        cfg["verbose"] && stream_worker_log(job*".log",log_offset)
         isempty(failure) && !success(process) && (failure="process_error")
     end
     if isfile(job*".csv")
@@ -255,7 +275,7 @@ function main(args=ARGS)
     cfg["worker"] && return worker(cfg)
     digest=open(sha256,cfg["data"]) |> bytes2hex
     out=cfg["outdir"];mkpath(out);mkpath(joinpath(out,"jobs"))
-    signature=filter(p->!(p.first in ("resume","worker","job","job-repeat")),cfg)
+    signature=filter(p->!(p.first in ("resume","worker","job","job-repeat","verbose","show-every")),cfg)
     signature["matrix_sha256"]=digest
     configpath=joinpath(out,"config.toml")
     if isfile(configpath)
@@ -276,7 +296,7 @@ function main(args=ARGS)
     end
     rows=NamedTuple[]
     for users in split(cfg["users"],','),repeat in 1:cfg["repeats"],method in split(cfg["methods"],',')
-        job=joinpath(out,"jobs","users_$(users)_$(method)_$(repeat)")
+        job=joinpath(out,"jobs","users-$(users)-$(method)-$(repeat)")
         println("Running users=",users," method=",method," repeat=",repeat);flush(stdout)
         if cfg["resume"] && isfile(job*".csv")
             row=only(Tables.rowtable(CSV.File(job*".csv";stringtype=String)))

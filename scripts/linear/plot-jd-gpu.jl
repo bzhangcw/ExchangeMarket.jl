@@ -2,7 +2,7 @@
 # Regenerate a comparison figure and median summary from saved measurements.
 ENV["GKSwstype"]="100"
 using CSV, DataFrames, Statistics, Plots
-directory=isempty(ARGS) ? joinpath(@__DIR__,"jd_gpu_results") : abspath(only(ARGS))
+directory=isempty(ARGS) ? joinpath(@__DIR__,"jd-gpu-results") : abspath(only(ARGS))
 runs=CSV.read(joinpath(directory,"runs.csv"),DataFrame)
 summary=combine(groupby(runs,[:users,:goods,:nnz,:method,:criterion,:tol]),
     :target_met=>all=>:all_runs_met_target,

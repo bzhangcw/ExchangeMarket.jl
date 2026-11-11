@@ -351,6 +351,7 @@ function linear_perturbed_ipm(f;
             @printf("%4d | %9.2e | %9.2e | %9.2e | %9.2e | %9.6f | %9.6f | %9.2e | %7.4f | %8.3f\n",
                 k, st.σ, st.μ, n * st.σ, metrics.mc, metrics.total_spending,
                 metrics.total_budget, metrics.regret, last_α, elapsed)
+            flush(stdout)
         end
         if stop === nothing ? metrics.error <= tol : stop(metrics)
             status = :converged

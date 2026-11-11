@@ -2,7 +2,7 @@
 
 The three methods are PR, Perturbed (IPM with cuDSS), and PCG (the same IPM
 with native CUDA IC(0)). They share the existing outer algorithms and do not
-use the ExchangeMarket interface. `test_jd_gpu.jl` uses our earlier shared
+use the ExchangeMarket interface. `test-jd-gpu.jl` uses our earlier shared
 relative accuracy target and follows the instance scales in §5/Table 3 of
 [Liu et al. (2025)](https://arxiv.org/pdf/2506.06258).
 
@@ -84,14 +84,17 @@ On turing1, from the existing repository root:
 
 ```bash
 /home/chuwen/julia-1.9.4/bin/julia --project=scripts/linear/gpu \
-  scripts/linear/test-jd-gpu-correctness.jl
-
-/home/chuwen/julia-1.9.4/bin/julia --project=scripts/linear/gpu \
-  scripts/linear/test_jd_gpu.jl --tol 1e-4
+  scripts/linear/test-jd-gpu.jl --tol 1e-4 --verbose
 ```
 
+Use `--verbose` to stream the per-job logs to the terminal and print the IPM
+iteration table (barriers, market-clearing error, total spending/budget,
+regret, step length, and elapsed time). `--show-every 5` prints every fifth
+IPM update; the default is every update. Complete logs remain in `jobs/`.
+Without `--verbose`, the console reports case starts and final results.
+
 Default prefixes are `2000,5000,20000,50000,200000,500000,1000000,all`.
-Use `--users 2000 --outdir scripts/linear/jd_gpu_smoke` for a first case.
+Use `--users 2000 --outdir scripts/linear/jd-gpu-smoke` for a first case.
 Other controls include `--methods pr,perturbed,pcg`, `--repeats 1`,
 `--time-limit 7200`, `--maxiter-pr 1000000`, `--maxiter-ipm 100000`,
 `--linear-rtol 1e-9`, and `--linear-maxiter 0` (automatic: 5 × goods).
@@ -114,9 +117,9 @@ and console progress shows the selected criterion. With total budget 1, the
 paper's KKT threshold can be met despite appreciable relative buyer regret;
 it is therefore a diagnostic rather than the default stopping rule.
 
-Results go to `scripts/linear/jd_gpu_results/runs.csv`, with per-job logs,
+Results go to `scripts/linear/jd-gpu-results/runs.csv`, with per-job logs,
 trajectories, settings, source hash, environment, and `cmd.sh`. Completed rows
-are saved immediately. `--resume` requires identical settings and input hash,
+are saved immediately. `--resume` requires identical solver settings and input hash,
 and skips completed jobs. Each method runs in an isolated Julia process to
 contain GPU failures. Two updates at the actual problem size and a diagnostic call are warmed up
 before initializing a fresh timed state. Warm-up time is reported separately;
@@ -154,5 +157,5 @@ market = JDData.load_market("dataset/jd/utilities.bin"; users=2000)
 Regenerate the summary table and plots from saved CSV data (no GPU needed):
 
 ```bash
-julia --project=scripts scripts/linear/plot_jd_gpu.jl scripts/linear/jd_gpu_results
+julia --project=scripts scripts/linear/plot-jd-gpu.jl scripts/linear/jd-gpu-results
 ```

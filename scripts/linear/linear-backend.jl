@@ -170,3 +170,5 @@ function linear_pr_initial_allocation(c, w, p)
     x .= (w' ./ n) ./ p
     x
 end
+
+linear_meets_target(z,tol)=max(z.mc,z.budget,z.regret)<=tol*(1+1e-8)

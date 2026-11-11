@@ -2,7 +2,8 @@
 
 The three methods are PR, Perturbed (IPM with cuDSS), and PCG (the same IPM
 with native CUDA IC(0)). They share the existing outer algorithms and do not
-use the ExchangeMarket interface. `test-jd-gpu.jl` uses our earlier shared
+use the ExchangeMarket interface. They use the same `run_linear` entry point
+and generic sparse CPU/GPU backend as the synthetic experiments. `test-jd-gpu.jl` uses our earlier shared
 relative accuracy target and follows the instance scales in §5/Table 3 of
 [Liu et al. (2025)](https://arxiv.org/pdf/2506.06258).
 
@@ -96,9 +97,9 @@ Without `--verbose`, the console reports case starts and final results.
 Default prefixes are `2000,5000,20000,50000,200000,500000,1000000,all`.
 Use `--users 2000 --outdir scripts/linear/jd-gpu-smoke` for a first case.
 Other controls include `--methods pr,perturbed,pcg`, `--repeats 1`,
-`--time-limit 7200`, `--maxiter-pr 1000000`, `--maxiter-ipm 100000`,
+`--time-limit 300`, `--maxiter-pr 40000`, `--maxiter-ipm 100000`,
 `--linear-rtol 1e-9`, and `--linear-maxiter 0` (automatic: 5 × goods).
-The larger IPM update cap lets the paper's wall-time limit govern difficult
+The larger IPM update cap lets the configured runtime limit govern difficult
 real-data instances instead of the synthetic benchmark's 200-update cap.
 IPM uses `sigma_min = tol * minimum(w) / goods`, as in the synthetic tests.
 
@@ -126,7 +127,7 @@ before initializing a fresh timed state. Warm-up time is reported separately;
 using only a tiny market leaves shape-specialized CUDA compilation in timing.
 Host-to-device preparation is reported separately; solve time includes
 workspace allocation, Hessian pattern construction, analysis/factorization,
-iterations, diagnostics, and final synchronization. The 7,200-second limit
+iterations, diagnostics, and final synchronization. The 300-second limit
 starts at solve initialization; a supervisor enforces it with at most a short
 shutdown grace period. Startup has a separate 600-second limit. Errors and
 timeouts are recorded as failures, and do not stop the remaining cases.

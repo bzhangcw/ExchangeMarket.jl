@@ -35,9 +35,10 @@ and budgets are read-only. Allocate one allocation/bid matrix and reusable
 price, utility, and demand vectors; only scalar trajectory records grow with
 the number of iterations. The update is the linear specialization of Bids.
 """
-run_pr(f; stop, maxiter) = run_pr(f.c, f.w; stop, maxiter)
+run_pr(f; stop, maxiter, kwargs...) = run_pr(f.c, f.w; stop, maxiter, kwargs...)
 
-function run_pr(c, w; stop::F, maxiter) where {F}
+function run_pr(c, w; stop::F, maxiter, time_limit=Inf, progress=nothing) where {F}
+    time_limit>0 || throw(ArgumentError("time_limit must be positive"))
     t0 = time_ns()
     n, m = size(c)
     linear_device(c) == linear_device(w) || throw(ArgumentError("mixed CPU/GPU market arrays"))
@@ -53,6 +54,11 @@ function run_pr(c, w; stop::F, maxiter) where {F}
     status = :max_iter
     for k in 0:maxiter
         push!(traj, merge((k=k, t=(time_ns() - t0) / 1e9), z))
+        progress === nothing || progress(traj[end])
+        if (time_ns()-t0)/1e9 >= time_limit
+            status = :time_limit
+            break
+        end
         if stop(z)
             status = :converged
             break

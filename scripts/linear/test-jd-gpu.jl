@@ -32,10 +32,10 @@ function options(args)
             default=1
         "--time-limit"
             arg_type=Float64
-            default=7200.0
+            default=300.0
         "--maxiter-pr"
             arg_type=Int
-            default=1000000
+            default=40000
         "--maxiter-ipm"
             arg_type=Int
             default=100000
@@ -131,11 +131,10 @@ function (monitor::JDStop)(z)
     target(z,monitor.cfg) || elapsed>=monitor.cfg["time-limit"]
 end
 function solve(f,method,cfg,stop)
-    method=="pr" && return run_pr(f.c,f.w;stop,maxiter=cfg["maxiter-pr"])
-    linear_perturbed_ipm(f;tol=cfg["tol"],stop,σ_min=cfg["tol"]*minimum(f.w)/size(f.c,1),
-        linear_solver=method=="perturbed" ? :cudss : :pcg_ic,
-        show_trace=cfg["verbose"],show_every=cfg["show-every"],
-        maxiter=cfg["maxiter-ipm"],linear_rtol=cfg["linear-rtol"],
+    run_linear(Symbol(method),f.c,f.w;tol=cfg["tol"],stop,
+        time_limit=cfg["time-limit"],maxiter_pr=cfg["maxiter-pr"],maxiter_ipm=cfg["maxiter-ipm"],
+        direct_solver=:cudss,show_trace=cfg["verbose"],show_every=cfg["show-every"],
+        linear_rtol=cfg["linear-rtol"],
         linear_maxiter=cfg["linear-maxiter"]==0 ? max(20,5size(f.c,1)) : cfg["linear-maxiter"])
 end
 function warmup(f,method,cfg)
@@ -161,7 +160,6 @@ function worker(cfg)
             include(joinpath(@__DIR__,"linear-perturbed.jl"))
             include(joinpath(@__DIR__,"propres.jl"))
             include(joinpath(@__DIR__,"linear-gpu.jl"))
-            include(joinpath(@__DIR__,"linear-jd-gpu.jl"))
         end
         # Includes add methods in a newer world than this function's compilation.
         return Base.invokelatest(worker_gpu,cfg,f,row)
@@ -177,7 +175,7 @@ function worker_gpu(cfg,f,row)
     method=cfg["methods"];job=cfg["job"]
     row=merge(row,(gpu=CUDA.name(CUDA.device()),))
     transferred=@timed begin
-        device=(c=jd_gpu_array(f.c),w=CuArray(f.w));CUDA.synchronize();device
+        device=linear_prepare_market(f.c,f.w;device=:gpu,storage=:sparse);CUDA.synchronize();device
     end
     row=merge(row,(transfer_seconds=transferred.time,))
     # CUDA reductions specialize on problem shape; a tiny market alone leaves

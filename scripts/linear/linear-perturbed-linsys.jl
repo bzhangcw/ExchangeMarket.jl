@@ -105,7 +105,7 @@ function linear_perturbed_solve(B, b; method=:cholesky,
     Minv = I
     setup_seconds = @elapsed begin
         if method == :cholesky
-            factor = cholesky(B; check=false)
+            factor = linear_cholesky(B, workspace)
         elseif method == :pcg_jacobi
             diagonal = diag(B)
             Minv = Diagonal(1 ./ diagonal)
@@ -360,3 +360,5 @@ function perturbed_scaled_inverse(apply, rhs)
     scaled_apply(r)=scale .* apply(r)
     return (;apply=scaled_apply,scale,initial_weighted_norm=sqrt(weighted_squared),setup_applications=1)
 end
+
+linear_cholesky(B,workspace)=cholesky(B;check=false)

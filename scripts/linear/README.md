@@ -12,7 +12,24 @@ julia test-gpu.jl --tol 1e-4
 Both launchers default to **n=500, m=1000**, one timed repetition, and densities
 0.01, 0.02, 0.05. Use `--densities 0.02` for one case. `--sizes_n`, `--sizes_m`,
 `--methods`, `--tol`, and `--output-dir` remain configurable. The shared runner
-also accepts `--device cpu|gpu` and `--direct-solver auto|cholesky|cudss`.
+also accepts `--device cpu|gpu`, `--storage sparse|dense` (default: sparse), and
+`--direct-solver auto|cholesky|cudss`. PR defaults to **40,000 updates**;
+**all three methods have a 300-second timed runtime limit** (`--time-limit`).
+The IPM update cap remains 200. Use `--verbose` for iteration logs.
+
+Random markets are generated directly as sparse CSC matrices. Both random
+and JD inputs pass through `linear_prepare_market(c,w; device, storage)` and
+`run_linear(method,c,w; ...)`. `linear-sparse.jl` contains shared sparse storage
+and arithmetic; `linear-gpu-sparse.jl` supplies CUDA dispatch and native sparse
+assembly. Sparse allocations preserve the positive `sigma/price` entries at
+zero utility implicitly. There is no JD-specific solver.
+
+Results default to `linear-cpu-sparse-results` or `linear-gpu-sparse-results`.
+Each CSV row records storage, input SHA256, iteration/runtime limits, status,
+and accuracy. `cmd.sh`, `config.toml`, `environment.txt`, and per-job checkpoints
+record the run. Existing output directories require `--resume` with the same
+configuration. Earlier dense results remain separate; compare CPU/GPU rows
+with identical input hashes and storage.
 
 ## GPU environment
 
@@ -44,7 +61,9 @@ No matrix or iterate is transferred to the CPU during a GPU solve. Scalar
 reductions/status checks synchronize with the host. CUDA scalar indexing is
 disabled, and incompatible solver/device combinations raise an error.
 
-- CPU `:cholesky` uses dense Cholesky; GPU `:cudss` uses sparse SPD cuDSS.
+- Sparse CPU `:cholesky` uses CHOLMOD and reuses symbolic analysis; dense mode
+  uses dense Cholesky. GPU `:cudss` uses sparse SPD cuDSS.
+- Sparse CPU IC(0) updates only the lower CSC pattern, without a dense workspace.
 - `:pcg_ic` selects CPU IC/CG or native cuSPARSE IC(0)/GPU CG by array type.
 - GPU cuDSS analyzes the fixed structural CSR pattern once per solve.
 - GPU IC preserves that pattern and recomputes the numerical factor per Newton
@@ -53,9 +72,18 @@ disabled, and incompatible solver/device combinations raise an error.
   resistant diagonal formulas as the CPU implementation. IC inverse normalization,
   zero initial direction, and the inner relative tolerance (1e-9) are unchanged.
 
+Each job warms up two updates and its reporting at the actual problem shape,
+then starts from a fresh solver state. The supervisor terminates a worker if a
+native solver call exceeds the timed runtime limit (polling every 0.1 seconds,
+with up to one second for shutdown). Cooperative stops return `time_limit`;
+forced stops retain the last checkpoint and cannot count as convergence.
+Startup and warm-up have separate limits of 600 and 300 seconds. Failed jobs
+are recorded and the worker restarts for the remaining jobs.
+
 `wall_seconds` includes solver/workspace initialization, matrix analysis,
 factorizations, iteration diagnostics, and GPU synchronization; warm-up and
-market transfer are excluded. `transfer_seconds` is reported separately, and
+market preparation are excluded. `transfer_seconds` includes sparse storage
+preparation and, on GPU, the initial transfer. It is reported separately, and
 `end_to_end_seconds` adds it to the solve time. `allocated_MiB` counts host Julia
 allocations only. All methods use the same raw-allocation accuracy predicate.
 Budget reporting compares total spending with total budget; individual budget

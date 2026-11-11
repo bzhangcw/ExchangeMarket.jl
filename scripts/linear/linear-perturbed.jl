@@ -284,8 +284,9 @@ function linear_perturbed_ipm(f;
     show_trace=true, show_every=1, linear_solver=:auto,
     linear_rtol=1e-9, linear_maxiter=max(20, 5size(f.c, 1)),
     optimal_solver=nothing, record_systems=false, linear_initial_guess=:zero, stop=nothing,
-    ic_drop=0.0, ic_normalize::Bool=true
+    ic_drop=0.0, ic_normalize::Bool=true, time_limit=Inf, progress=nothing
 )
+    time_limit>0 || throw(ArgumentError("time_limit must be positive"))
     t0 = time_ns()
     c, w = linear_arrays(f.c, f.w)
     linear_solver = linear_solver == :auto ? linear_default_solver(c) : linear_solver
@@ -353,6 +354,11 @@ function linear_perturbed_ipm(f;
                 metrics.total_budget, metrics.regret, last_α, elapsed)
             flush(stdout)
         end
+        progress === nothing || progress(traj[end])
+        if (time_ns()-t0)/1e9 >= time_limit
+            status = :time_limit
+            break
+        end
         if stop === nothing ? metrics.error <= tol : stop(metrics)
             status = :converged
             break
@@ -391,6 +397,10 @@ function linear_perturbed_ipm(f;
             linear_shift_diagonal!(H, st.μ)
             linear_sync(H)
         end
+        if (time_ns()-t0)/1e9 >= time_limit
+            status = :time_limit
+            break
+        end
         # Once σ is fixed, its continuation term disappears from the rhs.
         d = θσ == θ ? -(st.p .* g .- st.μ) .- θ .* (st.p .* sensitivity .+ st.μ) :
             -(st.p .* g .- st.μ) .- θσ .* st.p .* sensitivity .- θ * st.μ
@@ -417,6 +427,10 @@ function linear_perturbed_ipm(f;
             iterations=solve_result.iterations, residual=solve_result.relative_residual,
             setup_seconds=solve_result.setup_seconds, solve_seconds=solve_result.solve_seconds,
             success=solve_result.success))
+        if (time_ns()-t0)/1e9 >= time_limit
+            status = :time_limit
+            break
+        end
         if !solve_result.success
             status = linear_solver in (:cholesky, :cudss) ? :factorization_failed : :linear_solve_failed
             break
@@ -429,6 +443,10 @@ function linear_perturbed_ipm(f;
         base_merit = θ > 0 ? max(base_norm, n * driver_sigma / min_budget) : base_norm
         trial_μ, trial_σ = st.μ, st.σ
         for bt in 1:max_backtrack
+            if (time_ns()-t0)/1e9 >= time_limit
+                status = :time_limit
+                break
+            end
             trial_p .= st.p .* (1 .+ α .* d)
             trial_μ = (1 - α * θ) * st.μ
             trial_σ = sigma_floor == 0 ? buyer_price_ratio * trial_μ :
@@ -452,7 +470,7 @@ function linear_perturbed_ipm(f;
             α *= 0.5
         end
         if !accepted
-            status = :line_search_failed
+            status == :time_limit || (status = :line_search_failed)
             break
         end
         last_parameter_ratio = 1 - α * θ
@@ -498,4 +516,19 @@ function linear_perturbed_allocation!(f, st::PerturbedLinearState)
     f.val_u .= vec(sum(f.c .* st.x; dims=1))
     f.sumx .= linear_demand(st.x)
     return f
+end
+
+include("linear-sparse.jl")
+
+"""Shared PR / perturbed IPM / PCG entry point for every linear utility source."""
+function run_linear(method,c,w;tol=1e-4,maxiter_pr=40000,maxiter_ipm=200,
+    time_limit=300.0,direct_solver=:auto,linear_rtol=1e-9,
+    linear_maxiter=max(20,5size(c,1)),show_trace=false,show_every=1,
+    stop=z->linear_meets_target(z,tol),progress=nothing)
+    method==:pr && return run_pr(c,w;stop,maxiter=maxiter_pr,time_limit,progress)
+    method in (:perturbed,:pcg) || throw(ArgumentError("unknown linear comparison method: $method"))
+    linear_perturbed_ipm((;c,w);tol,stop,progress,time_limit,
+        σ_min=tol*minimum(w)/size(c,1),maxiter=maxiter_ipm,
+        linear_solver=method==:pcg ? :pcg_ic : direct_solver,
+        linear_rtol,linear_maxiter,show_trace,show_every,ic_drop=0.0,ic_normalize=true)
 end

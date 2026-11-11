@@ -222,3 +222,5 @@ function linear_gpu_solve(B, b::CUDA.CuVector{Float64};
        preconditioner_factorizations=method == :pcg_ic ? 1 : 0,
        sdp_iterations=0, setup_seconds, solve_seconds)
 end
+
+include("linear-gpu-sparse.jl")

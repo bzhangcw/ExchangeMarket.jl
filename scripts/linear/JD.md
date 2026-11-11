@@ -2,8 +2,8 @@
 
 The three methods are PR, Perturbed (IPM with cuDSS), and PCG (the same IPM
 with native CUDA IC(0)). They share the existing outer algorithms and do not
-use the ExchangeMarket interface. `test_jd_gpu.jl` follows the instance scales
-and displayed relative KKT criterion in §5/Table 3 of
+use the ExchangeMarket interface. `test_jd_gpu.jl` uses our earlier shared
+relative accuracy target and follows the instance scales in §5/Table 3 of
 [Liu et al. (2025)](https://arxiv.org/pdf/2506.06258).
 
 ## Data and budgets
@@ -99,16 +99,20 @@ The larger IPM update cap lets the paper's wall-time limit govern difficult
 real-data instances instead of the synthetic benchmark's 200-update cap.
 IPM uses `sigma_min = tol * minimum(w) / goods`, as in the synthetic tests.
 
-By default all methods stop on the paper's displayed relative KKT error,
-setting `t_i = c_i' x_i` and `y_i = w_i / t_i`. The three residuals and their
-maximum are saved. The literal displayed dual denominator is used; it differs
-from the denominator in the authors' paper-era code. `--criterion shared`
-instead uses the existing maximum of market-clearing error, individual
-relative budget error, and relative regret. Both sets of errors are recorded
-regardless of the stopping rule. Budget reporting uses total spending versus
-total budget. Normalizing budgets affects the numerical size of the paper's
-KKT residuals, so its threshold need not imply the same relative individual
-accuracy as `--criterion shared`.
+By default (`--criterion shared`), every method uses the same stopping rule as
+our earlier comparisons: the maximum of market-clearing error, individual
+relative budget error, and relative regret must be at most `tol` (with the
+same numerical allowance of `1 + 1e-8`). The default tolerance is `1e-4`.
+Budget reporting still compares total spending with total budget; individual
+budget errors remain part of the accuracy check.
+
+The paper's displayed relative KKT criterion is available with
+`--criterion paper`, setting `t_i = c_i' x_i` and `y_i = w_i / t_i`.
+Its literal displayed dual denominator is used; it differs from the authors'
+paper-era code. Both sets of errors are saved regardless of the stopping rule,
+and console progress shows the selected criterion. With total budget 1, the
+paper's KKT threshold can be met despite appreciable relative buyer regret;
+it is therefore a diagnostic rather than the default stopping rule.
 
 Results go to `scripts/linear/jd_gpu_results/runs.csv`, with per-job logs,
 trajectories, settings, source hash, environment, and `cmd.sh`. Completed rows

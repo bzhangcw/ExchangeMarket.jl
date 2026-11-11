@@ -22,7 +22,7 @@ function options(args)
             default=1e-4
         "--criterion"
             range_tester=x->x in ("paper","shared")
-            default="paper"
+            default="shared"
         "--time-limit"
             arg_type=Float64
             default=7200.0
@@ -98,7 +98,8 @@ function metric_fields(z)
       paper_gap=z.paper_gap,mc=z.mc,regret=z.regret,shared_error=z.error,
       total_spending=z.total_spending,total_budget=z.total_budget,total_budget_error=z.total_budget_error)
 end
-target(z,cfg)=(cfg["criterion"]=="paper" ? z.paper_error : z.error)<=cfg["tol"]*(1+1e-8)
+stopping_error(z,cfg)=cfg["criterion"]=="paper" ? z.paper_error : z.error
+target(z,cfg)=stopping_error(z,cfg)<=cfg["tol"]*(1+1e-8)
 mutable struct JDStop
     cfg::Dict{String,Any}
     job::String
@@ -116,7 +117,7 @@ function (monitor::JDStop)(z)
         atomic_toml(monitor.job*".progress",Dict(string(k)=>v for (k,v) in pairs(
             merge(metric_fields(z),(wall_seconds=elapsed,updates=monitor.calls-1,gpu=monitor.gpu)))))
         println("updates=",monitor.calls-1," elapsed=",round(elapsed;digits=2),
-                " paper_error=",z.paper_error," total_spending=",z.total_spending)
+                " ",monitor.cfg["criterion"],"_error=",stopping_error(z,monitor.cfg)," total_spending=",z.total_spending)
         flush(stdout);monitor.last_saved=elapsed
     end
     target(z,monitor.cfg) || elapsed>=monitor.cfg["time-limit"]
@@ -286,7 +287,8 @@ function main(args=ARGS)
             row=run_case(cfg,users,method,repeat,digest,job)
         end
         push!(rows,row);write_rows(joinpath(out,"runs.csv"),rows)
-        println(row.method," ",row.status," time=",row.wall_seconds,"s, paper_error=",row.paper_error);flush(stdout)
+        println(row.method," ",row.status," time=",row.wall_seconds,"s, ",row.criterion,"_error=",
+            row.criterion=="paper" ? row.paper_error : row.shared_error);flush(stdout)
     end
     println("Saved ",length(rows)," method runs to ",out)
 end

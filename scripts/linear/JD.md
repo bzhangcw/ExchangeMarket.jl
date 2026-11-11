@@ -83,7 +83,7 @@ the same pipeline verifies and preprocesses that local input.
 On turing1, from the existing repository root:
 
 ```bash
-/home/chuwen/julia-1.9.4/bin/julia --project=scripts/linear/gpu \
+julia --project=scripts/linear/gpu \
   scripts/linear/test-jd-gpu.jl --tol 1e-4 --verbose
 ```
 

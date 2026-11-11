@@ -1,6 +1,6 @@
 # Optional CUDA backend. Include linear-perturbed.jl and propres.jl first.
 using CUDA, CUDSS
-const LinearCUSPARSE = CUDA.CUSPARSE
+const LinearCUSPARSE = CUDA.cuSPARSE
 CUDA.allowscalar(false)
 
 linear_device(::CUDA.CuArray) = :gpu

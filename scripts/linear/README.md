@@ -23,8 +23,13 @@ julia --project=scripts/linear/gpu -e 'using Pkg; Pkg.instantiate()'
 julia scripts/linear/test-gpu.jl --densities 0.02
 ```
 
-The GPU project pins CUDA.jl 5.4.2 and CUDSS.jl 0.1.6 to the native interfaces
-used here and supports Julia 1.9 (including the existing turing1 installation).
+The GPU project pins CUDA.jl 6.5.1 and CUDSS.jl 1.0.0 and was verified on
+turing1 with Julia 1.13.3 and the RTX A6000 (package minimum: Julia 1.10).
+Its project preferences select CUDA runtime and compiler 12.6 for the native
+cuSPARSE IC(0) backend. Use `julia` from your normal login shell.
+When upgrading an existing checkout with an older manifest, run
+`julia --project=scripts/linear/gpu -e 'using Pkg; Pkg.update(); Pkg.precompile()'`
+once before launching a comparison.
 It does not depend on ExchangeMarket or a licensed optimizer. The CPU launcher
 uses the existing `scripts` environment. `LINEAR_PROJECT` can select another
 compatible environment, including the GPU project for CPU reference runs.

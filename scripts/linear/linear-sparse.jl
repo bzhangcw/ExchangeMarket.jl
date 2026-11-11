@@ -72,8 +72,8 @@ function linear_prepare_market(c,w;device=:cpu,storage=:sparse)
     (;c=matrix,w=budgets)
 end
 linear_to_device(a,::Val{:cpu})=a
-linear_sparse_launch(kernel,n,args...) = linear_sparse_launch(first(args),kernel,n,args...)
-function linear_sparse_launch(::Vector,kernel::F,n,args...) where F
+linear_sparse_launch(kernel::F,n,args::Vararg{Any,N}) where {F,N} = linear_sparse_launch(first(args),kernel,n,args...)
+function linear_sparse_launch(::Vector,kernel::F,n,args::Vararg{Any,N}) where {F,N}
     @inbounds for index in 1:n
         kernel(index,args...,n)
     end

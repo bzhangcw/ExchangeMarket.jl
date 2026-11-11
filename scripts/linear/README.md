@@ -22,7 +22,8 @@ and JD inputs pass through `linear_prepare_market(c,w; device, storage)` and
 `run_linear(method,c,w; ...)`. `linear-sparse.jl` contains shared sparse storage
 and arithmetic; `linear-gpu-sparse.jl` supplies CUDA dispatch and native sparse
 assembly. Sparse allocations preserve the positive `sigma/price` entries at
-zero utility implicitly. There is no JD-specific solver.
+zero utility implicitly. There is no JD-specific solver. Paper KKT diagnostics are opt-in and are not
+computed by the synthetic comparisons.
 
 Results default to `linear-cpu-sparse-results` or `linear-gpu-sparse-results`.
 Each CSV row records storage, input SHA256, iteration/runtime limits, status,

@@ -132,6 +132,7 @@ function (monitor::JDStop)(z)
 end
 function solve(f,method,cfg,stop)
     run_linear(Symbol(method),f.c,f.w;tol=cfg["tol"],stop,
+        metrics_workspace=linear_metrics_workspace(f.c;kkt=true),
         time_limit=cfg["time-limit"],maxiter_pr=cfg["maxiter-pr"],maxiter_ipm=cfg["maxiter-ipm"],
         direct_solver=:cudss,show_trace=cfg["verbose"],show_every=cfg["show-every"],
         linear_rtol=cfg["linear-rtol"],

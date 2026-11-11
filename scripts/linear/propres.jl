@@ -37,7 +37,7 @@ the number of iterations. The update is the linear specialization of Bids.
 """
 run_pr(f; stop, maxiter, kwargs...) = run_pr(f.c, f.w; stop, maxiter, kwargs...)
 
-function run_pr(c, w; stop::F, maxiter, time_limit=Inf, progress=nothing) where {F}
+function run_pr(c, w; stop::F, maxiter, time_limit=Inf, progress=nothing, metrics_workspace=nothing) where {F}
     time_limit>0 || throw(ArgumentError("time_limit must be positive"))
     t0 = time_ns()
     n, m = size(c)
@@ -47,7 +47,7 @@ function run_pr(c, w; stop::F, maxiter, time_limit=Inf, progress=nothing) where 
     p = linear_prices(c, w, nothing)
     x = linear_pr_initial_allocation(c, w, p)
     weighted_utility = linear_pr_workspace(c, p)
-    metrics_workspace = linear_metrics_workspace(c)
+    metrics_workspace === nothing && (metrics_workspace = linear_metrics_workspace(c))
     demand = similar(p)
     z = linear_equilibrium_metrics(c, w, p, x; demand, workspace=metrics_workspace)
     traj = typeof(merge((k=0, t=0.0), z))[]

@@ -284,7 +284,7 @@ function linear_perturbed_ipm(f;
     show_trace=true, show_every=1, linear_solver=:auto,
     linear_rtol=1e-9, linear_maxiter=max(20, 5size(f.c, 1)),
     optimal_solver=nothing, record_systems=false, linear_initial_guess=:zero, stop=nothing,
-    ic_drop=0.0, ic_normalize::Bool=true, time_limit=Inf, progress=nothing
+    ic_drop=0.0, ic_normalize::Bool=true, time_limit=Inf, progress=nothing, metrics_workspace=nothing
 )
     time_limit>0 || throw(ArgumentError("time_limit must be positive"))
     t0 = time_ns()
@@ -300,7 +300,7 @@ function linear_perturbed_ipm(f;
     maxiter >= 0 && max_backtrack > 0 && show_every > 0 || throw(ArgumentError("invalid iteration limits"))
     supports = linear_supports(c)
     response_workspace = linear_response_workspace(c, w)
-    metrics_workspace = linear_metrics_workspace(c)
+    metrics_workspace === nothing && (metrics_workspace = linear_metrics_workspace(c))
     solver_workspace = linear_solver_workspace(c, w, linear_solver)
     min_budget = minimum(w)
     sigma_floor = Float64(σ_min)
@@ -524,10 +524,10 @@ include("linear-sparse.jl")
 function run_linear(method,c,w;tol=1e-4,maxiter_pr=40000,maxiter_ipm=200,
     time_limit=300.0,direct_solver=:auto,linear_rtol=1e-9,
     linear_maxiter=max(20,5size(c,1)),show_trace=false,show_every=1,
-    stop=z->linear_meets_target(z,tol),progress=nothing)
-    method==:pr && return run_pr(c,w;stop,maxiter=maxiter_pr,time_limit,progress)
+    stop=z->linear_meets_target(z,tol),progress=nothing,metrics_workspace=nothing)
+    method==:pr && return run_pr(c,w;stop,maxiter=maxiter_pr,time_limit,progress,metrics_workspace)
     method in (:perturbed,:pcg) || throw(ArgumentError("unknown linear comparison method: $method"))
-    linear_perturbed_ipm((;c,w);tol,stop,progress,time_limit,
+    linear_perturbed_ipm((;c,w);tol,stop,progress,time_limit,metrics_workspace,
         σ_min=tol*minimum(w)/size(c,1),maxiter=maxiter_ipm,
         linear_solver=method==:pcg ? :pcg_ic : direct_solver,
         linear_rtol,linear_maxiter,show_trace,show_every,ic_drop=0.0,ic_normalize=true)

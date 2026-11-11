@@ -86,7 +86,7 @@ function linear_validate_market(c::LinearSparseArray,w)
 end
 
 function linear_sparse_row_sum_kernel!(j,out,rp,ids,cols,values,base_rows,base_cols,base_total,n)
-    if j<=n
+    @inbounds if j<=n
         value=base_rows[j]*base_total
         for q in rp[j]:rp[j+1]-1
             value+=values[ids[q]]-base_rows[j]*base_cols[cols[q]]
@@ -108,7 +108,7 @@ function linear_response_workspace(c::LinearSparseArray,w)
       diagonal_edges=similar(c.values),sensitivity_edges=similar(c.values))
 end
 function linear_sparse_response_kernel!(i,x,s,lam,delta,ratios,counts,cp,rows,c,w,p,sigma,ngoods,rtol,maxiter,m)
-    if i<=m
+    @inbounds if i<=m
         first,last=cp[i],cp[i+1]-1
         best=0.0
         for k in first:last;best=max(best,c[k]/p[rows[k]]);end
@@ -150,27 +150,28 @@ function linear_perturbed_response!(x::LinearSparseArray,s,lam,delta,c,w,p,sigma
     sum(Int64,ws.counts)
 end
 
-function linear_metrics_workspace(c::LinearSparseArray)
+function linear_metrics_workspace(c::LinearSparseArray;kkt=false)
     n,m=size(c)
+    extras=kkt ? (;y=linear_zeros(c.values,m),gap=linear_zeros(c.values,m),
+        dual_violation=linear_zeros(c.values,n),dual_signed=linear_zeros(c.values,n),slack=linear_zeros(c.values,n)) : nothing
     (;demand=linear_zeros(c.values,n),spend=linear_zeros(c.values,m),utility=linear_zeros(c.values,m),
-      best=linear_zeros(c.values,m),budget=linear_zeros(c.values,m),regret=linear_zeros(c.values,m),
-      y=linear_zeros(c.values,m),gap=linear_zeros(c.values,m),
-      dual_violation=linear_zeros(c.values,n),dual_signed=linear_zeros(c.values,n),slack=linear_zeros(c.values,n))
+      best=linear_zeros(c.values,m),budget=linear_zeros(c.values,m),regret=linear_zeros(c.values,m),kkt=extras)
 end
 function linear_sparse_buyer_metrics_kernel!(i,spend,utility,best,budget,regret,y,cp,rows,c,x,w,p,br,bc,base_spending,m)
-    if i<=m
+    @inbounds if i<=m
         spent=bc[i]*base_spending;u=0.0;bang=0.0
         for k in cp[i]:cp[i+1]-1
             j=rows[k]
             spent+=p[j]*(x[k]-br[j]*bc[i]);u+=c[k]*x[k];bang=max(bang,c[k]/p[j])
         end
         spend[i]=spent;utility[i]=u;best[i]=bang
-        budget[i]=abs(spent/w[i]-1);regret[i]=max(0.0,1-u/(w[i]*bang));y[i]=w[i]/u
+        budget[i]=abs(spent/w[i]-1);regret[i]=max(0.0,1-u/(w[i]*bang))
+        y===nothing || (y[i]=w[i]/u)
     end
     return
 end
 function linear_sparse_gap_kernel!(i,gap,cp,rows,c,x,p,y,base_cols,zero_spending,ngoods,m)
-    if i<=m
+    @inbounds if i<=m
         value=cp[i+1]-cp[i]<ngoods ? zero_spending*base_cols[i] : 0.0
         for k in cp[i]:cp[i+1]-1
             value=max(value,x[k]*max(0.0,p[rows[k]]-c[k]*y[i]))
@@ -180,7 +181,7 @@ function linear_sparse_gap_kernel!(i,gap,cp,rows,c,x,p,y,base_cols,zero_spending
     return
 end
 function linear_sparse_dual_kernel!(j,negative,signed,slack,rp,ids,cols,c,p,y,nbuyers,n)
-    if j<=n
+    @inbounds if j<=n
         largest=0.0;smallest=rp[j+1]-rp[j]<nbuyers ? 0.0 : Inf
         for q in rp[j]:rp[j+1]-1
             cy=c[ids[q]]*y[cols[q]];largest=max(largest,cy);smallest=min(smallest,cy)
@@ -194,31 +195,33 @@ function linear_equilibrium_metrics(c::LinearSparseArray,w,p,x;demand=nothing,wo
     demand=demand===nothing ? ws.demand : demand
     pat=c.pattern
     linear_sparse_demand!(demand,x)
-    linear_sparse_launch(linear_sparse_buyer_metrics_kernel!,pat.m,ws.spend,ws.utility,ws.best,ws.budget,ws.regret,ws.y,
+    y=ws.kkt===nothing ? nothing : ws.kkt.y
+    linear_sparse_launch(linear_sparse_buyer_metrics_kernel!,pat.m,ws.spend,ws.utility,ws.best,ws.budget,ws.regret,y,
         pat.colptr,pat.rowval,c.values,x.values,w,p,x.base_rows,x.base_cols,dot(p,x.base_rows))
-    linear_sparse_launch(linear_sparse_gap_kernel!,pat.m,ws.gap,pat.colptr,pat.rowval,c.values,x.values,p,ws.y,
-        x.base_cols,x.zero_spending,pat.n)
-    linear_sparse_launch(linear_sparse_dual_kernel!,pat.n,ws.dual_violation,ws.dual_signed,ws.slack,
-        pat.rowptr,pat.csr_to_csc,pat.colval,c.values,p,ws.y,pat.m)
     mc=maximum(z->abs(z-1),demand);budget=maximum(ws.budget);regret=maximum(ws.regret)
     total_spending=sum(ws.spend);total_budget=sum(w)
-    paper_primal=mc/(1+max(maximum(abs,demand),1.0))
-    # Literal relative KKT criterion in the paper, with t=c'x and y=w/t.
-    paper_dual=maximum(ws.dual_violation)/(1+max(maximum(ws.y),maximum(ws.dual_signed)))
-    xmax=max(maximum(x.values),maximum(x.base_rows)*maximum(x.base_cols))
-    paper_gap=maximum(ws.gap)/(1+max(xmax,maximum(ws.slack)))
-    paper_error=max(paper_primal,paper_dual,paper_gap)
     valid=all(isfinite,p)&&all(>(0),p)&&all(isfinite,x.values)&&all(>=(0),x.values)&&
-          all(isfinite,ws.y)&&all(>(0),ws.utility)
-    if !valid
-        mc=budget=regret=paper_primal=paper_dual=paper_gap=paper_error=Inf
-    end
-    (;mc,budget,regret,error=max(mc,budget,regret),total_spending,total_budget,
-      total_budget_error=abs(total_spending/total_budget-1),paper_primal,paper_dual,paper_gap,paper_error)
+          all(isfinite,ws.utility)&&all(>(0),ws.utility)
+    valid || (mc=budget=regret=Inf)
+    shared=(;mc,budget,regret,error=max(mc,budget,regret),total_spending,total_budget,
+        total_budget_error=abs(total_spending/total_budget-1))
+    ws.kkt===nothing && return shared
+    extra=ws.kkt
+    linear_sparse_launch(linear_sparse_gap_kernel!,pat.m,extra.gap,pat.colptr,pat.rowval,c.values,x.values,p,extra.y,
+        x.base_cols,x.zero_spending,pat.n)
+    linear_sparse_launch(linear_sparse_dual_kernel!,pat.n,extra.dual_violation,extra.dual_signed,extra.slack,
+        pat.rowptr,pat.csr_to_csc,pat.colval,c.values,p,extra.y,pat.m)
+    paper_primal=mc/(1+max(maximum(abs,demand),1.0))
+    paper_dual=maximum(extra.dual_violation)/(1+max(maximum(extra.y),maximum(extra.dual_signed)))
+    xmax=max(maximum(x.values),maximum(x.base_rows)*maximum(x.base_cols))
+    paper_gap=maximum(extra.gap)/(1+max(xmax,maximum(extra.slack)))
+    paper_error=max(paper_primal,paper_dual,paper_gap)
+    valid || (paper_primal=paper_dual=paper_gap=paper_error=Inf)
+    merge(shared,(;paper_primal,paper_dual,paper_gap,paper_error))
 end
 
 function linear_sparse_uniform_kernel!(i,values,cp,w,total,m)
-    if i<=m
+    @inbounds if i<=m
         for k in cp[i]:cp[i+1]-1;values[k]=w[i]/total;end
     end
     return
@@ -231,7 +234,7 @@ function linear_pr_initial_allocation(c::LinearSparseArray,w,p)
 end
 linear_pr_workspace(c::LinearSparseArray,p)=nothing
 function linear_sparse_pr_bids_kernel!(i,x,cp,c,w,m)
-    if i<=m
+    @inbounds if i<=m
         u=0.0
         for k in cp[i]:cp[i+1]-1;u+=c[k]*x[k];end
         for k in cp[i]:cp[i+1]-1;x[k]=w[i]*c[k]*x[k]/u;end
@@ -239,7 +242,7 @@ function linear_sparse_pr_bids_kernel!(i,x,cp,c,w,m)
     return
 end
 function linear_sparse_pr_allocate_kernel!(k,x,rows,p,count)
-    if k<=count;x[k]/=p[rows[k]];end
+    @inbounds if k<=count;x[k]/=p[rows[k]];end
     return
 end
 function pr_step!(x::LinearSparseArray,p,c,w,ws)
@@ -268,7 +271,7 @@ struct LinearSparseSolverWorkspace{S,H,V}
 end
 Base.copy(V::LinearSparseRankFactors)=LinearSparseRankFactors(copy(V.matrix),copy(V.transposed))
 function linear_sparse_diagonal_kernel!(j,indices,rowptr,colval,n)
-    if j<=n
+    @inbounds if j<=n
         found=Int32(0)
         for q in rowptr[j]:rowptr[j+1]-1
             if colval[q]==j;found=q;break;end
@@ -278,7 +281,7 @@ function linear_sparse_diagonal_kernel!(j,indices,rowptr,colval,n)
     return
 end
 function linear_sparse_lower_counts_kernel!(j,counts,rowptr,colval,n)
-    if j<=n
+    @inbounds if j<=n
         count=Int32(0)
         for q in rowptr[j]:rowptr[j+1]-1
             if colval[q]<=j;count+=1;end
@@ -288,7 +291,7 @@ function linear_sparse_lower_counts_kernel!(j,counts,rowptr,colval,n)
     return
 end
 function linear_sparse_lower_fill_kernel!(j,columns,indices,pointers,rowptr,colval,n)
-    if j<=n
+    @inbounds if j<=n
         target=pointers[j]
         for q in rowptr[j]:rowptr[j+1]-1
             if colval[q]<=j
@@ -303,7 +306,7 @@ function linear_ipm_buffers(c::LinearSparseArray,w,ws::LinearSparseSolverWorkspa
       sensitivity=linear_zeros(c.values,size(c,1)))
 end
 function linear_sparse_hessian_edges_kernel!(i,vv,vvt,de,se,gamma,cp,rows,map,c,x,w,p,sigma,m)
-    if i<=m
+    @inbounds if i<=m
         first,last=cp[i],cp[i+1]-1;u=0.0
         for k in first:last;u+=c[k]*x[k];end
         largest_k=first;largest=0.0
@@ -328,7 +331,7 @@ function linear_sparse_hessian_edges_kernel!(i,vv,vvt,de,se,gamma,cp,rows,map,c,
     return
 end
 function linear_sparse_hessian_rows_kernel!(j,diagonal,sensitivity,rp,ids,de,se,p,sigma,nbuyers,n)
-    if j<=n
+    @inbounds if j<=n
         d=nbuyers*sigma;s=d/p[j]
         for q in rp[j]:rp[j+1]-1
             k=ids[q];d+=de[k];s+=se[k]
